@@ -64,3 +64,5 @@ tests/ui-testing/scripts/check-topology.js
 v0.70.0_release_gap_report.pdf
 tests/ui-testing/.env.old
 .lh
+temp_reports
+temp_reports/

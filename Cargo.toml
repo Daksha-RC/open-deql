@@ -65,6 +65,12 @@ strip = false
 codegen-units = 4
 split-debuginfo = "packed"
 
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+split-debuginfo = "unpacked" # Faster linking on macOS/Linux
+
 [dependencies]
 axum.workspace = true
 axum-extra.workspace = true
