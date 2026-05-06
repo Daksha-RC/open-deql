@@ -549,6 +549,50 @@ pub fn config_routes() -> Router {
         .route("/token", post(users::service_accounts::exchange_token))
 }
 
+#[cfg(feature = "deql")]
+pub fn deql_routes() -> Router {
+    Router::new()
+        .route("/{org_id}/deql/{aggregate}/command", post(deql::command::execute))
+        .route("/{org_id}/dereg", get(dereg::index))
+        .route(
+            "/{org_id}/dereg/commands",
+            get(dereg::list_commands)
+                .post(dereg::not_implemented)
+                .put(dereg::not_implemented)
+                .delete(dereg::not_implemented),
+        )
+        .route(
+            "/{org_id}/dereg/aggregates",
+            get(dereg::not_implemented)
+                .post(dereg::not_implemented)
+                .put(dereg::not_implemented)
+                .delete(dereg::not_implemented),
+        )
+        .route(
+            "/{org_id}/dereg/events",
+            get(dereg::not_implemented)
+                .post(dereg::not_implemented)
+                .put(dereg::not_implemented)
+                .delete(dereg::not_implemented),
+        )
+        .route(
+            "/{org_id}/dereg/projections",
+            get(dereg::not_implemented)
+                .post(dereg::not_implemented)
+                .put(dereg::not_implemented)
+                .delete(dereg::not_implemented),
+        )
+        .route(
+            "/{org_id}/dereg/inspections",
+            get(dereg::not_implemented)
+                .post(dereg::not_implemented)
+                .put(dereg::not_implemented)
+                .delete(dereg::not_implemented),
+        )
+        .route("/{org_id}/dereg/{aggregate}/export", get(dereg::not_implemented))
+        .route("/{org_id}/dereg/{aggregate}/import", post(dereg::not_implemented))
+}
+
 /// Create main API service routes
 pub fn service_routes() -> Router {
     let cfg = get_config();
@@ -564,6 +608,10 @@ pub fn service_routes() -> Router {
     let server = cfg.common.instance_name_short.to_string();
 
     let mut router = Router::new();
+    #[cfg(feature = "deql")]
+    {
+        router = router.merge(deql_routes());
+    }
     // Users
     router = router.route("/{org_id}/users", get(users::list).post(users::save))
         .route("/{org_id}/users/{email_id}", post(users::add_user_to_org).put(users::update).delete(users::delete))

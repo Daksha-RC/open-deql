@@ -940,6 +940,9 @@ pub async fn init() -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+#[cfg(feature = "deql")]
+pub async fn init_deql() {}
+
 /// Additional jobs that init processes should be deferred until the gRPC service
 /// starts in the main thread
 pub async fn init_deferred() -> Result<(), anyhow::Error> {

@@ -38,6 +38,7 @@ profiling = [
 ]
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 tokio-console = ["dep:console-subscriber"]
+deql = ["dep:o2-deql"]
 
 [profile.release]
 debug = false
@@ -234,6 +235,7 @@ roaring.workspace = true
 flight.workspace = true
 async-stream.workspace = true
 sourcemap = "9.3.2"
+o2-deql = { path = "src/deql", optional = true }
 
 [dev-dependencies]
 expect-test.workspace = true
@@ -244,6 +246,7 @@ rcgen = "0.14.4"
 
 [workspace]
 members = [
+    "src/deql",
     "src/config",
     "src/infra",
     "src/ingester",
