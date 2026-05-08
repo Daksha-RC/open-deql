@@ -7,10 +7,13 @@ curl -u root@example.com:SC7kwSJbGiCoeY8S \
 
 # Use the cURL command from your Ingestion page
 ```
-curl -u root@example.com:SC7kwSJbGiCoeY8S \
+curl -u root@example.com:8N2C5pryAgPBajjE \
 -H "Content-Type: application/json" \
  http://localhost:5080/api/default/default/_json \
 -d "@k8slog_json.json"
+
+curl -u root@example.com:8N2C5pryAgPBajjE -k http://localhost:5080/api/default/default/_json -d "[{\"level\":\"info\",\"job\":\"test\",\"log\":\"test message for openobserve\"}]"
+
 ```
 ### Sample code
 ```rust
@@ -34,4 +37,10 @@ ZO_ROOT_USER_EMAIL="root@example.com" ZO_ROOT_USER_PASSWORD="Complexpass#123" ZO
 [target.aarch64-apple-darwin]
 linker = "/opt/homebrew/opt/llvm/bin/clang"
 rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/lld/bin/ld64.lld"]
+```
+# Build instructions
+```
+cargo run -p openobserve --features deql 
+cargo build  -p openobserve --features deql 
+cargo run  -p openobserve --features deql 
 ```
