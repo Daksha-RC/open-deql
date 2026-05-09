@@ -552,45 +552,18 @@ pub fn config_routes() -> Router {
 #[cfg(feature = "deql")]
 pub fn deql_routes() -> Router {
     Router::new()
-        .route("/{org_id}/deql/{aggregate}/command", post(deql::command::execute))
-        .route("/{org_id}/dereg", get(dereg::index))
         .route(
-            "/{org_id}/dereg/commands",
-            get(dereg::list_commands)
-                .post(dereg::not_implemented)
-                .put(dereg::not_implemented)
-                .delete(dereg::not_implemented),
+            "/{org_id}/deql/{aggregate}/command",
+            post(deql::command::execute),
         )
+        .route("/{org_id}/dereg/definitions", post(dereg::definitions))
+        .route("/{org_id}/dereg/metrics", get(dereg::metrics))
+        .route("/{org_id}/dereg/admin/replay", post(dereg::replay))
         .route(
-            "/{org_id}/dereg/aggregates",
-            get(dereg::not_implemented)
-                .post(dereg::not_implemented)
-                .put(dereg::not_implemented)
-                .delete(dereg::not_implemented),
+            "/{org_id}/dereg/admin/replay-refresh",
+            post(dereg::replay_refresh_handler),
         )
-        .route(
-            "/{org_id}/dereg/events",
-            get(dereg::not_implemented)
-                .post(dereg::not_implemented)
-                .put(dereg::not_implemented)
-                .delete(dereg::not_implemented),
-        )
-        .route(
-            "/{org_id}/dereg/projections",
-            get(dereg::not_implemented)
-                .post(dereg::not_implemented)
-                .put(dereg::not_implemented)
-                .delete(dereg::not_implemented),
-        )
-        .route(
-            "/{org_id}/dereg/inspections",
-            get(dereg::not_implemented)
-                .post(dereg::not_implemented)
-                .put(dereg::not_implemented)
-                .delete(dereg::not_implemented),
-        )
-        .route("/{org_id}/dereg/{aggregate}/export", get(dereg::not_implemented))
-        .route("/{org_id}/dereg/{aggregate}/import", post(dereg::not_implemented))
+        .route("/{org_id}/dereg/admin/validate", post(dereg::validate))
 }
 
 /// Create main API service routes

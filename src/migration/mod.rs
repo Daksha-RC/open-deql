@@ -69,6 +69,19 @@ pub async fn init_db() -> std::result::Result<(), anyhow::Error> {
         infra::dist_lock::unlock(&lock).await?;
         return Err(e);
     }
+
+    // migrate DeQL tables (feature-gated)
+    #[cfg(feature = "deql")]
+    {
+        use o2_deql::migration::{DeqlMigrator, MigratorTrait as _};
+        let ddl_client = ORM_CLIENT_DDL.get_or_init(connect_to_orm_ddl).await;
+        if let Err(e) = DeqlMigrator::up(ddl_client, None).await {
+            infra::dist_lock::unlock(&lock).await?;
+            return Err(e.into());
+        }
+        log::info!("DeQL migrations applied successfully");
+    }
+
     if let Err(e) = infra::set_db_schema_version().await {
         infra::dist_lock::unlock(&lock).await?;
         return Err(e);
