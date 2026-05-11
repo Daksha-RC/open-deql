@@ -44,3 +44,9 @@ cargo run -p openobserve --features deql
 cargo build  -p openobserve --features deql 
 cargo run  -p openobserve --features deql 
 ```
+
+## Metrics
+```
+curl -u root@example.com:NzIJGjQ4qLHuGFht -s http://localhost:5080/api/default/dereg/metrics | jq .
+
+```

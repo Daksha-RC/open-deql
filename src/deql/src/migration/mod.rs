@@ -19,8 +19,22 @@ mod m20260508_000010_create_meta_templates_instances;
 
 pub struct DeqlMigrator;
 
+/// Custom identifier for the DeQL migration tracking table so it does not
+/// collide with infra's default `seaql_migrations` table.
+struct DeqlMigrationsTable;
+
+impl Iden for DeqlMigrationsTable {
+    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
+        write!(s, "deql_migrations").unwrap();
+    }
+}
+
 #[async_trait::async_trait]
 impl MigratorTrait for DeqlMigrator {
+    fn migration_table_name() -> DynIden {
+        SeaRc::new(DeqlMigrationsTable)
+    }
+
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
         vec![
             Box::new(m20260508_000001_create_dereg_meta_store::Migration),

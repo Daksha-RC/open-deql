@@ -44,8 +44,25 @@ pub async fn init_db() -> std::result::Result<(), anyhow::Error> {
         }
     };
     if db_schema_version == DB_SCHEMA_VERSION {
-        // if version matches, we do not need to run update commands
-        log::info!("DB_SCHEMA_VERSION match, skipping db upgrade");
+        // if version matches, we do not need to run infra update commands
+        log::info!("DB_SCHEMA_VERSION match, skipping infra db upgrade");
+
+        // DeQL maintains its own migration tracking via seaql_migrations;
+        // run pending DeQL migrations even when the infra schema is current.
+        #[cfg(feature = "deql")]
+        {
+            let lock = infra::dist_lock::lock("/database/init", 3600).await?;
+            ORM_CLIENT_DDL.get_or_init(connect_to_orm_ddl).await;
+            use o2_deql::migration::{DeqlMigrator, MigratorTrait as _};
+            let ddl_client = ORM_CLIENT_DDL.get_or_init(connect_to_orm_ddl).await;
+            if let Err(e) = DeqlMigrator::up(ddl_client, None).await {
+                infra::dist_lock::unlock(&lock).await?;
+                return Err(e.into());
+            }
+            log::info!("DeQL migrations applied successfully");
+            infra::dist_lock::unlock(&lock).await?;
+        }
+
         return Ok(());
     }
     log::info!(
