@@ -40,7 +40,7 @@ rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/lld/bin/ld64.lld"]
 ```
 # Build instructions
 ```
-cargo run -p openobserve --features deql 
+cargo run -p openobserve --features deql
 cargo build  -p openobserve --features deql 
 cargo run  -p openobserve --features deql 
 ```
@@ -49,4 +49,10 @@ cargo run  -p openobserve --features deql
 ```
 curl -u root@example.com:NzIJGjQ4qLHuGFht -s http://localhost:5080/api/default/dereg/metrics | jq .
 
+```
+
+## Swagger ui
+```bash
+
+http://localhost:5080/swagger/index.html
 ```

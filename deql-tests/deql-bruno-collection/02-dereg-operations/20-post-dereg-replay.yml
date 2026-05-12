@@ -1,0 +1,23 @@
+info:
+  name: 20-Post-Dereg-Replay
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/dereg/admin/replay"
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: Trigger a replay-validate (read-only) for dereg projections. Uses collection-level basic auth.
