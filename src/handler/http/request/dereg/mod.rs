@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use axum::{
     Json,
+    body::{Body, to_bytes},
     extract::{Path, Query},
-    http::StatusCode,
+    http::{Request, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
 use infra::db::{ORM_CLIENT, connect_to_orm};
@@ -24,6 +25,8 @@ use sea_orm::TransactionTrait;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::OnceCell;
+
+const MAX_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
 /// Global DeQL state shared across all handlers.
 pub struct DeqlState {
@@ -51,13 +54,6 @@ pub async fn get_deql_state() -> &'static Arc<DeqlState> {
         .await
 }
 
-// ── Request / Response types ──────────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct DefinitionsRequest {
-    pub statement: String,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct MetricsQuery {
     pub scope: Option<String>,
@@ -69,13 +65,7 @@ pub struct ReplayRefreshQuery {
     pub offset: Option<i64>,
 }
 
-// ── POST /{org_id}/dereg/definitions ──────────────────────────────────────
-// [T2.2.2] Parse → register in-memory → allocate ids → persist.
-
-pub async fn definitions(
-    Path(org_id): Path<String>,
-    Json(req): Json<DefinitionsRequest>,
-) -> Response {
+pub async fn definitions(Path(org_id): Path<String>, req: Request<Body>) -> Response {
     let state = get_deql_state().await;
 
     // Check replay-refresh lock [REQ-064]
@@ -87,10 +77,54 @@ pub async fn definitions(
             .into_response();
     }
 
+    // Content-Type check: accept text/*, treat missing as text/plain
+    if let Some(ct_val) = req.headers().get(CONTENT_TYPE) {
+        if let Ok(ct_str) = ct_val.to_str() {
+            if !ct_str.starts_with("text/") {
+                return (
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                    Json(json!({"error": "Unsupported Media Type, expected text/plain"})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    // Read body and enforce size limit
+    let bytes = match to_bytes(req.into_body(), MAX_BODY_BYTES + 1).await {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("body read error: {e}") })),
+            )
+                .into_response();
+        }
+    };
+
+    if bytes.len() > MAX_BODY_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(json!({"error": "payload too large"})),
+        )
+            .into_response();
+    }
+
+    let statement = match std::str::from_utf8(&bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "invalid UTF-8 in body"})),
+            )
+                .into_response();
+        }
+    };
+
     let db = ORM_CLIENT.get_or_init(connect_to_orm).await;
 
     // Parse the statement
-    let (parsed, diagnostics) = parse(&req.statement);
+    let (parsed, diagnostics) = parse(&statement);
 
     if parsed.statements.is_empty() {
         // Parse failure — persist failed row
@@ -99,7 +133,7 @@ pub async fn definitions(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("db error: {e}")})),
+                    Json(json!({"error": format!("db error: {e}") })),
                 )
                     .into_response();
             }
@@ -110,7 +144,7 @@ pub async fn definitions(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("id allocator error: {e}")})),
+                    Json(json!({"error": format!("id allocator error: {e}") })),
                 )
                     .into_response();
             }
@@ -131,20 +165,20 @@ pub async fn definitions(
             occurred_at: Set(chrono::Utc::now().into()),
             status: Set("failed".to_string()),
             error_message: Set(Some(diag_strings.join("; "))),
-            statement: Set(req.statement.clone()),
+            statement: Set(statement.clone()),
             meta: Set(meta),
         };
         if let Err(e) = model.insert(&txn).await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("persist error: {e}")})),
+                Json(json!({"error": format!("persist error: {e}") })),
             )
                 .into_response();
         }
         if let Err(e) = txn.commit().await {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": format!("commit error: {e}")})),
+                Json(json!({"error": format!("commit error: {e}") })),
             )
                 .into_response();
         }
@@ -173,7 +207,7 @@ pub async fn definitions(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("db error: {e}")})),
+                    Json(json!({"error": format!("db error: {e}") })),
                 )
                     .into_response();
             }
@@ -184,7 +218,7 @@ pub async fn definitions(
             Err(e) => {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({"error": format!("id allocator error: {e}")})),
+                    Json(json!({"error": format!("id allocator error: {e}") })),
                 )
                     .into_response();
             }
@@ -203,7 +237,7 @@ pub async fn definitions(
                         Err(e) => {
                             return (
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(json!({"error": format!("concept_key error: {e}")})),
+                                Json(json!({"error": format!("concept_key error: {e}") })),
                             )
                                 .into_response();
                         }
@@ -222,20 +256,20 @@ pub async fn definitions(
                     occurred_at: Set(chrono::Utc::now().into()),
                     status: Set("ok".to_string()),
                     error_message: Set(None),
-                    statement: Set(req.statement.clone()),
+                    statement: Set(statement.clone()),
                     meta: Set(meta),
                 };
                 if let Err(e) = model.insert(&txn).await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("persist error: {e}")})),
+                        Json(json!({"error": format!("persist error: {e}") })),
                     )
                         .into_response();
                 }
                 if let Err(e) = txn.commit().await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("commit error: {e}")})),
+                        Json(json!({"error": format!("commit error: {e}") })),
                     )
                         .into_response();
                 }
@@ -263,20 +297,20 @@ pub async fn definitions(
                     occurred_at: Set(chrono::Utc::now().into()),
                     status: Set("failed".to_string()),
                     error_message: Set(Some(e.to_string())),
-                    statement: Set(req.statement.clone()),
+                    statement: Set(statement.clone()),
                     meta: Set(meta),
                 };
                 if let Err(e) = model.insert(&txn).await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("persist error: {e}")})),
+                        Json(json!({"error": format!("persist error: {e}") })),
                     )
                         .into_response();
                 }
                 if let Err(e) = txn.commit().await {
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"error": format!("commit error: {e}")})),
+                        Json(json!({"error": format!("commit error: {e}") })),
                     )
                         .into_response();
                 }
@@ -299,6 +333,7 @@ pub async fn definitions(
 
     (status_code, Json(json!({ "results": results }))).into_response()
 }
+// end of definitions()
 
 // ── GET /{org_id}/dereg/metrics ───────────────────────────────────────────
 // [T2.4.1] Status API — report org_tip_id, latest_id, last_applied_id, lag, etc.
