@@ -207,6 +207,7 @@ url.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
 utoipa-swagger-ui.workspace = true
+utoipa-scalar.workspace = true
 version-compare = "0.2.0"
 vector-enrichment.workspace = true
 x509-parser = "0.18.0"
@@ -478,9 +479,10 @@ tracing-subscriber = { version = "0.3.22", features = [
 ] }
 url = "2.5"
 urlencoding = "2.1"
-utoipa = { version = "5.4", features = ["axum_extras", "openapi_extensions"] }
+utoipa = { version = "5.5", features = ["axum_extras", "openapi_extensions"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
 uuid = { version = "1.20", features = ["v7"] }
 vector-enrichment = { version = "0.1.0", package = "enrichment", git = "https://github.com/openobserve/vector", branch = "branch-v0.54" }
 vrl = { version = "0.31", features = [

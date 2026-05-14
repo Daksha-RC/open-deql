@@ -17,6 +17,25 @@ pub struct ExecuteCommandRequest {
     pub payload: Option<Value>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/{org_id}/deql/{aggregate}/command",
+    context_path = "/api",
+    tag = "DeQL",
+    operation_id = "ExecuteDeqlCommand",
+    summary = "Execute command against aggregate",
+    description = "Execute a command for the specified aggregate. Use `mode=async` for asynchronous processing.",
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+        ("aggregate" = String, Path, description = "Aggregate name"),
+    ),
+    request_body(content = String, description = "JSON command request", content_type = "application/json"),
+    responses(
+        (status = StatusCode::OK, description = "Command executed"),
+        (status = StatusCode::ACCEPTED, description = "Accepted for async processing"),
+        (status = StatusCode::BAD_REQUEST, description = "Bad request"),
+    )
+)]
 pub async fn execute(
     Path((_org_id, aggregate)): Path<(String, String)>,
     Json(req): Json<ExecuteCommandRequest>,
@@ -93,9 +112,7 @@ mod tests {
             .method("POST")
             .uri("/o1/deql/bank_account/command")
             .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"mode":"async","command":"Deposit"}"#,
-            ))
+            .body(Body::from(r#"{"mode":"async","command":"Deposit"}"#))
             .unwrap();
 
         let resp = app.oneshot(req).await.unwrap();

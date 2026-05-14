@@ -65,6 +65,30 @@ pub struct ReplayRefreshQuery {
     pub offset: Option<i64>,
 }
 
+/// Register DeQL definitions
+#[utoipa::path(
+    post,
+    path = "/{org_id}/dereg/definitions",
+    context_path = "/api",
+    tag = "DeReg",
+    operation_id = "DeqlDefinitions",
+    summary = "Register DeQL definitions",
+    description = "Registers DeQL language definitions (text/plain). Returns results with created IDs and status for each statement.",
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    request_body(content = String, description = "DeQL definitions", content_type = "text/plain", example = json!("CREATE OR REPLACE AGGREGATE Employee;")),
+    responses(
+        (status = StatusCode::CREATED, description = "Definitions processed"),
+        (status = StatusCode::BAD_REQUEST, description = "Parse error"),
+        (status = StatusCode::PAYLOAD_TOO_LARGE, description = "Payload too large"),
+        (status = StatusCode::UNSUPPORTED_MEDIA_TYPE, description = "Unsupported Media Type"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Server Error"),
+    ),
+    extensions(
+        ("x-o2-mcp" = json!({"description": "Registers DeQL definitions", "category": "deql"}))
+    )
+)]
 pub async fn definitions(Path(org_id): Path<String>, req: Request<Body>) -> Response {
     let state = get_deql_state().await;
 
@@ -338,6 +362,26 @@ pub async fn definitions(Path(org_id): Path<String>, req: Request<Body>) -> Resp
 // ── GET /{org_id}/dereg/metrics ───────────────────────────────────────────
 // [T2.4.1] Status API — report org_tip_id, latest_id, last_applied_id, lag, etc.
 
+#[utoipa::path(
+    get,
+    path = "/{org_id}/dereg/metrics",
+    context_path = "/api",
+    tag = "DeReg",
+    operation_id = "DeqlMetrics",
+    summary = "Get DeQL metrics",
+    description = "Get metrics for DeQL projections; use query param `scope=all` to fetch all org metrics.",
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+        ("scope" = Option<String>, Query, description = "Metrics scope; 'all' returns metrics for all orgs"),
+    ),
+    responses(
+        (status = StatusCode::OK, description = "OK"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Server Error"),
+    ),
+    extensions(
+        ("x-o2-mcp" = json!({"module":"DeQL","operation":"metrics"}))
+    )
+)]
 pub async fn metrics(Path(org_id): Path<String>, Query(query): Query<MetricsQuery>) -> Response {
     let state = get_deql_state().await;
     let db = ORM_CLIENT.get_or_init(connect_to_orm).await;
@@ -374,6 +418,26 @@ pub async fn metrics(Path(org_id): Path<String>, Query(query): Query<MetricsQuer
 // ── POST /{org_id}/dereg/admin/replay ─────────────────────────────────────
 // [T2.3.3] Validation-only replay — read-only, no mutations.
 
+#[utoipa::path(
+    post,
+    path = "/{org_id}/dereg/admin/replay",
+    context_path = "/api",
+    tag = "DeReg",
+    operation_id = "DeqlReplayValidate",
+    summary = "Run DeQL replay validation",
+    description = "Perform validation-only replay for the organization; does not mutate production state.",
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    responses(
+        (status = StatusCode::OK, description = "Validation successful"),
+        (status = StatusCode::SERVICE_UNAVAILABLE, description = "Replay-refresh in progress"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Server Error"),
+    ),
+    extensions(
+        ("x-o2-mcp" = json!({"module":"DeQL","operation":"replay_validate"}))
+    )
+)]
 pub async fn replay(Path(org_id): Path<String>) -> Response {
     let state = get_deql_state().await;
 
@@ -401,6 +465,26 @@ pub async fn replay(Path(org_id): Path<String>) -> Response {
 // ── POST /{org_id}/dereg/admin/replay-refresh ────────────────────────────
 // [T2.3.5] Full projection rebuild with lock, worker stop/start.
 
+#[utoipa::path(
+    post,
+    path = "/{org_id}/dereg/admin/replay-refresh",
+    context_path = "/api",
+    tag = "DeReg",
+    operation_id = "DeqlReplayRefresh",
+    summary = "Replay refresh (full projection rebuild)",
+    description = "Performs a full projection rebuild for an organization. Either `id` or `offset` may be specified, but not both.",
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+        ("id" = Option<i64>, Query, description = "Optional replay id to start from"),
+        ("offset" = Option<i64>, Query, description = "Optional offset to start from"),
+    ),
+    responses(
+        (status = StatusCode::OK, description = "Replay refresh initiated"),
+        (status = StatusCode::BAD_REQUEST, description = "Invalid parameters"),
+        (status = StatusCode::SERVICE_UNAVAILABLE, description = "Replay-refresh in progress"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Server Error"),
+    )
+)]
 pub async fn replay_refresh_handler(
     Path(org_id): Path<String>,
     Query(query): Query<ReplayRefreshQuery>,
@@ -443,6 +527,23 @@ pub async fn replay_refresh_handler(
 // ── POST /{org_id}/dereg/admin/validate ──────────────────────────────────
 // [T2.3.4] Validation report only — structured results and error counts.
 
+#[utoipa::path(
+    post,
+    path = "/{org_id}/dereg/admin/validate",
+    context_path = "/api",
+    tag = "DeReg",
+    operation_id = "DeqlValidateDefinitions",
+    summary = "Validate DeQL definitions",
+    description = "Run validation-only report on DeQL definitions.",
+    params(
+        ("org_id" = String, Path, description = "Organization name"),
+    ),
+    responses(
+        (status = StatusCode::OK, description = "Validation report"),
+        (status = StatusCode::SERVICE_UNAVAILABLE, description = "Replay-refresh in progress"),
+        (status = StatusCode::INTERNAL_SERVER_ERROR, description = "Internal Server Error"),
+    )
+)]
 pub async fn validate(Path(org_id): Path<String>) -> Response {
     let state = get_deql_state().await;
 

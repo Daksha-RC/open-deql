@@ -29,6 +29,7 @@ use tower_http::{
     decompression::RequestDecompressionLayer,
 };
 use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 #[cfg(feature = "enterprise")]
 use {
@@ -521,6 +522,7 @@ pub fn basic_routes() -> Router {
             SwaggerUi::new("/swagger").url("/api-doc/openapi.json", openapi::ApiDoc::openapi()),
         );
         router = router.route("/docs", get(|| async { Redirect::permanent("/swagger/") }));
+        router = router.merge(Scalar::with_url("/scalar", openapi::ApiDoc::openapi()));
     }
 
     router
