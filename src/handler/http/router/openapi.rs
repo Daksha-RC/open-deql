@@ -254,6 +254,12 @@ use crate::{common::meta, handler::http::request};
         request::dereg::replay_refresh_handler,
         request::dereg::validate,
         request::deql::command::execute,
+        // DeQL introspection endpoints (Phase 4)
+        request::deql::introspect::info,
+        request::deql::introspect::list_concepts,
+        request::deql::introspect::get_concept,
+        request::deql::introspect::get_concept_schema,
+        request::deql::introspect::list_routes,
     ),
     components(
         schemas(

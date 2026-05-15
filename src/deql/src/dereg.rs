@@ -196,6 +196,88 @@ impl DeReg {
     pub fn get_template(&self, name: &str) -> Option<&CreateTemplate> {
         self.registry.get_template(name)
     }
+
+    pub fn get_projection(&self, name: &str) -> Option<&CreateProjection> {
+        self.registry.get_projection(name)
+    }
+
+    // --- List ---
+
+    pub fn list_aggregate_names(&self) -> Vec<&str> {
+        self.registry.list_aggregate_names()
+    }
+
+    pub fn list_command_names(&self) -> Vec<&str> {
+        self.registry.list_command_names()
+    }
+
+    pub fn list_event_names(&self) -> Vec<&str> {
+        self.registry.list_event_names()
+    }
+
+    pub fn list_decision_names(&self) -> Vec<&str> {
+        self.registry.list_decision_names()
+    }
+
+    pub fn list_projection_names(&self) -> Vec<&str> {
+        self.registry.list_projection_names()
+    }
+
+    pub fn list_template_names(&self) -> Vec<&str> {
+        self.registry.list_template_names()
+    }
+
+    // --- Contains ---
+
+    pub fn contains_aggregate(&self, name: &str) -> bool {
+        self.registry.contains_aggregate(name)
+    }
+
+    pub fn contains_command(&self, name: &str) -> bool {
+        self.registry.contains_command(name)
+    }
+
+    pub fn contains_event(&self, name: &str) -> bool {
+        self.registry.contains_event(name)
+    }
+
+    pub fn contains_decision(&self, name: &str) -> bool {
+        self.registry.contains_decision(name)
+    }
+
+    pub fn contains_projection(&self, name: &str) -> bool {
+        self.registry.contains_projection(name)
+    }
+
+    pub fn contains_template(&self, name: &str) -> bool {
+        self.registry.contains_template(name)
+    }
+
+    // --- Counts ---
+
+    pub fn aggregate_count(&self) -> usize {
+        self.registry.aggregates.len()
+    }
+
+    pub fn command_count(&self) -> usize {
+        self.registry.commands.len()
+    }
+
+    pub fn event_count(&self) -> usize {
+        self.registry.events.len()
+    }
+
+    pub fn decision_count(&self) -> usize {
+        self.registry.decisions.len()
+    }
+
+    pub fn projection_count(&self) -> usize {
+        self.registry.projections.len()
+    }
+
+    pub fn template_count(&self) -> usize {
+        self.registry.templates.len()
+    }
 }
 
 impl Default for DeReg {

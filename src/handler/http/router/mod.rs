@@ -554,10 +554,30 @@ pub fn config_routes() -> Router {
 #[cfg(feature = "deql")]
 pub fn deql_routes() -> Router {
     Router::new()
+        // DeQL introspection endpoints (Phase 4)
+        .route("/{org_id}/deql/info", get(deql::introspect::info))
+        .route(
+            "/{org_id}/deql/registry/routes",
+            get(deql::introspect::list_routes),
+        )
+        .route(
+            "/{org_id}/deql/registry/{concept_type}",
+            get(deql::introspect::list_concepts),
+        )
+        .route(
+            "/{org_id}/deql/registry/{concept_type}/{name}",
+            get(deql::introspect::get_concept),
+        )
+        .route(
+            "/{org_id}/deql/registry/{concept_type}/{name}/schema",
+            get(deql::introspect::get_concept_schema),
+        )
+        // DeQL command execution
         .route(
             "/{org_id}/deql/{aggregate}/command",
             post(deql::command::execute),
         )
+        // DeReg management endpoints (Phase 2)
         .route("/{org_id}/dereg/definitions", post(dereg::definitions))
         .route("/{org_id}/dereg/metrics", get(dereg::metrics))
         .route("/{org_id}/dereg/admin/replay", post(dereg::replay))
