@@ -1,0 +1,23 @@
+info:
+  name: 21-Post-Dereg-Replay-Refresh
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/dereg/admin/replay-refresh"
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: Trigger a replay-refresh (full rebuild) for org1. Uses collection-level basic auth (inherited).

@@ -1,0 +1,22 @@
+[package]
+name = "o2-deql"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+http.workspace = true
+sea-orm.workspace = true
+sea-orm-migration.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+sea-orm = { workspace = true, features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

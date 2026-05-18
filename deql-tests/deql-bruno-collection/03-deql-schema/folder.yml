@@ -1,0 +1,10 @@
+info:
+  name: 03-deql-schema
+  type: folder
+  seq: 3
+
+request:
+  auth:
+    type: basic
+    username: "{{deql_admin}}"
+    password: "{{deql_admin_password}}"

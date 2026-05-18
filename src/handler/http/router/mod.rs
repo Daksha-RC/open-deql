@@ -29,6 +29,7 @@ use tower_http::{
     decompression::RequestDecompressionLayer,
 };
 use utoipa::OpenApi;
+use utoipa_scalar::{Scalar, Servable};
 use utoipa_swagger_ui::SwaggerUi;
 #[cfg(feature = "enterprise")]
 use {
@@ -521,6 +522,7 @@ pub fn basic_routes() -> Router {
             SwaggerUi::new("/swagger").url("/api-doc/openapi.json", openapi::ApiDoc::openapi()),
         );
         router = router.route("/docs", get(|| async { Redirect::permanent("/swagger/") }));
+        router = router.merge(Scalar::with_url("/scalar", openapi::ApiDoc::openapi()));
     }
 
     router
@@ -549,6 +551,44 @@ pub fn config_routes() -> Router {
         .route("/token", post(users::service_accounts::exchange_token))
 }
 
+#[cfg(feature = "deql")]
+pub fn deql_routes() -> Router {
+    Router::new()
+        // DeQL introspection endpoints (Phase 4)
+        .route("/{org_id}/deql/info", get(deql::introspect::info))
+        .route(
+            "/{org_id}/deql/registry/routes",
+            get(deql::introspect::list_routes),
+        )
+        .route(
+            "/{org_id}/deql/registry/{concept_type}",
+            get(deql::introspect::list_concepts),
+        )
+        .route(
+            "/{org_id}/deql/registry/{concept_type}/{name}",
+            get(deql::introspect::get_concept),
+        )
+        .route(
+            "/{org_id}/deql/registry/{concept_type}/{name}/schema",
+            get(deql::introspect::get_concept_schema),
+        )
+        // DeQL command execution
+        .route(
+            "/{org_id}/deql/{aggregate}/command",
+            post(deql::command::execute),
+        )
+        // DeReg management endpoints (Phase 2)
+        .route("/{org_id}/dereg/definitions", post(dereg::definitions))
+        .route("/{org_id}/dereg/metrics", get(dereg::metrics))
+        .route("/{org_id}/dereg/rehydrate", post(dereg::trigger_rehydrate))
+        .route("/{org_id}/dereg/admin/replay", post(dereg::replay))
+        .route(
+            "/{org_id}/dereg/admin/replay-refresh",
+            post(dereg::replay_refresh_handler),
+        )
+        .route("/{org_id}/dereg/admin/validate", post(dereg::validate))
+}
+
 /// Create main API service routes
 pub fn service_routes() -> Router {
     let cfg = get_config();
@@ -564,6 +604,10 @@ pub fn service_routes() -> Router {
     let server = cfg.common.instance_name_short.to_string();
 
     let mut router = Router::new();
+    #[cfg(feature = "deql")]
+    {
+        router = router.merge(deql_routes());
+    }
     // Users
     router = router.route("/{org_id}/users", get(users::list).post(users::save))
         .route("/{org_id}/users/{email_id}", post(users::add_user_to_org).put(users::update).delete(users::delete))

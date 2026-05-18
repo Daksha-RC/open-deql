@@ -1,0 +1,20 @@
+name: dev
+variables:
+  - name: ZO_ROOT_USER_EMAIL
+    value: root@example.com
+  - name: ZO_ROOT_USER_PASSWORD
+    value: Complexpass#123
+  - name: org_id
+    value: default
+  - name: baseUrl
+    value: http://localhost:5080/api
+  - name: deql_admin
+    value: deqladmin@deqladmin.org
+  - name: deql_admin_password
+    value: deqladmin
+  - name: deql_org_id
+    value: 3DcohgYl2nUaGGM9qCuRHTiPldv
+  - name: deql_admin_default
+    value: deqladmin@deqladmin.org
+  - name: deql_admin_default_password
+    value: Complexpass#123

@@ -1,0 +1,23 @@
+info:
+  name: 02-create-command-HireEmployee
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/dereg/definitions"
+  body:
+    type: text
+    data: |-
+      CREATE COMMAND HireEmployee (
+        employee_id STRING,
+        name        STRING,
+        grade       STRING
+      );
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

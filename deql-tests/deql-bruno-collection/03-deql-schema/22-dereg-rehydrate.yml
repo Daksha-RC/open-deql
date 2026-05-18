@@ -1,0 +1,23 @@
+info:
+  name: 22-dereg-rehydrate
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/dereg/rehydrate"
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: ReHydrate all DeQL queries after restart

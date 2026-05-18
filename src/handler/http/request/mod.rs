@@ -29,6 +29,10 @@ pub mod authz;
 pub mod cloud;
 pub mod clusters;
 pub mod dashboards;
+#[cfg(feature = "deql")]
+pub mod dereg;
+#[cfg(feature = "deql")]
+pub mod deql;
 #[cfg(feature = "enterprise")]
 pub mod domain_management;
 pub mod enrichment_table;

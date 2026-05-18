@@ -38,6 +38,7 @@ profiling = [
 ]
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 tokio-console = ["dep:console-subscriber"]
+deql = ["dep:o2-deql"]
 
 [profile.release]
 debug = false
@@ -64,6 +65,13 @@ debug = true
 strip = false
 codegen-units = 4
 split-debuginfo = "packed"
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+split-debuginfo = "unpacked" # Faster linking on macOS/Linux
+codegen-units = 128
 
 [dependencies]
 axum.workspace = true
@@ -199,6 +207,7 @@ url.workspace = true
 utoipa.workspace = true
 utoipa-axum.workspace = true
 utoipa-swagger-ui.workspace = true
+utoipa-scalar.workspace = true
 version-compare = "0.2.0"
 vector-enrichment.workspace = true
 x509-parser = "0.18.0"
@@ -228,6 +237,7 @@ roaring.workspace = true
 flight.workspace = true
 async-stream.workspace = true
 sourcemap = "9.3.2"
+o2-deql = { path = "src/deql", optional = true }
 
 [dev-dependencies]
 expect-test.workspace = true
@@ -238,6 +248,7 @@ rcgen = "0.14.4"
 
 [workspace]
 members = [
+    "src/deql",
     "src/config",
     "src/infra",
     "src/ingester",
@@ -468,10 +479,11 @@ tracing-subscriber = { version = "0.3.22", features = [
 ] }
 url = "2.5"
 urlencoding = "2.1"
-utoipa = { version = "5.4", features = ["axum_extras", "openapi_extensions"] }
+utoipa = { version = "5.5", features = ["axum_extras", "openapi_extensions"] }
 utoipa-axum = "0.2"
-utoipa-swagger-ui = { version = "9", features = ["axum"] }
-uuid = { version = "1.20", features = ["v7"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-scalar = { version = "0.3", features = ["axum"] }
+uuid = { version = "1.20", features = ["v4", "v7"] }
 vector-enrichment = { version = "0.1.0", package = "enrichment", git = "https://github.com/openobserve/vector", branch = "branch-v0.54" }
 vrl = { version = "0.31", features = [
     "arbitrary",
