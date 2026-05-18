@@ -16,6 +16,7 @@ mod m20260508_000007_create_meta_commands;
 mod m20260508_000008_create_meta_events;
 mod m20260508_000009_create_meta_templates;
 mod m20260508_000010_create_meta_templates_instances;
+mod m20260508_000011_create_dereg_id_sequence;
 
 pub struct DeqlMigrator;
 
@@ -47,6 +48,7 @@ impl MigratorTrait for DeqlMigrator {
             Box::new(m20260508_000008_create_meta_events::Migration),
             Box::new(m20260508_000009_create_meta_templates::Migration),
             Box::new(m20260508_000010_create_meta_templates_instances::Migration),
+            Box::new(m20260508_000011_create_dereg_id_sequence::Migration),
         ]
     }
 }

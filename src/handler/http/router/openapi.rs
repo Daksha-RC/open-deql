@@ -253,6 +253,7 @@ use crate::{common::meta, handler::http::request};
         request::dereg::replay,
         request::dereg::replay_refresh_handler,
         request::dereg::validate,
+        request::dereg::rehydrate::trigger_rehydrate,
         request::deql::command::execute,
         // DeQL introspection endpoints (Phase 4)
         request::deql::introspect::info,

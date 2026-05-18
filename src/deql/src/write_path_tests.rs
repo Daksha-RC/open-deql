@@ -5,18 +5,21 @@
 
 #[cfg(test)]
 mod tests {
-    use sea_orm::{Database, DatabaseConnection, EntityTrait, TransactionTrait};
+    use sea_orm::{
+        ConnectionTrait, Database, DatabaseConnection, EntityTrait, Statement, TransactionTrait,
+    };
     use sea_orm_migration::MigratorTrait;
 
-    use crate::allocator;
-    use crate::dereg::DeReg;
-    use crate::error::ConceptKind;
-    use crate::meta_json;
-    use crate::migration::DeqlMigrator;
-    use crate::org_registry::OrgDeRegMap;
-    use crate::parser::ast::*;
-    use crate::parser::token::Span;
-    use crate::store::dereg_meta_store;
+    use crate::{
+        allocator,
+        dereg::DeReg,
+        error::ConceptKind,
+        meta_json,
+        migration::DeqlMigrator,
+        org_registry::OrgDeRegMap,
+        parser::{ast::*, error::Diagnostic, token::Span},
+        store::dereg_meta_store,
+    };
 
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:").await.unwrap();
@@ -100,65 +103,225 @@ mod tests {
         stmt: &DeqlStatement,
         raw_sql: &str,
     ) -> Result<i64, String> {
-        let result = dereg.register_statement(stmt);
+        let mut temp_dereg = dereg.clone();
+        let id = allocator::allocate_next_id(db).await.unwrap();
+        let result = temp_dereg.register_statement(stmt);
+
+        let registration = match result {
+            Ok(reg) => reg,
+            Err(e) => return Err(e.to_string()),
+        };
 
         let txn = db.begin().await.unwrap();
+
+        let stream_id = format!(
+            "{}:{}",
+            format!("{:?}", registration.concept_type).to_lowercase(),
+            registration.concept_name.as_str()
+        );
+        let concept_key = allocator::allocate_concept_key_txn(&txn, org_id, &stream_id)
+            .await
+            .unwrap();
+        let meta = meta_json::build_meta(stmt);
+
+        use sea_orm::{ActiveModelTrait, Set};
+        let model = dereg_meta_store::ActiveModel {
+            id: Set(id),
+            org_id: Set(org_id.to_string()),
+            stream_id: Set(stream_id),
+            event_type: Set(registration.event_type.to_string()),
+            concept_type: Set(format!("{:?}", registration.concept_type).to_uppercase()),
+            concept_key: Set(concept_key),
+            occurred_at: Set(chrono::Utc::now().into()),
+            status: Set("ok".to_string()),
+            error_message: Set(None),
+            statement: Set(raw_sql.to_string()),
+            meta: Set(meta),
+        };
+        model.insert(&txn).await.unwrap();
+        txn.commit().await.unwrap();
+        *dereg = temp_dereg;
+        Ok(id)
+    }
+
+    async fn write_parse_error(
+        db: &DatabaseConnection,
+        org_id: &str,
+        raw_sql: &str,
+        diagnostics: &[Diagnostic],
+    ) -> i64 {
+        let txn = db.begin().await.unwrap();
         let id = allocator::allocate_next_id_txn(&txn).await.unwrap();
+        let error_message = if diagnostics.is_empty() {
+            "empty script".to_string()
+        } else {
+            diagnostics
+                .iter()
+                .map(|diag| diag.display(raw_sql))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let meta = meta_json::build_parse_error_meta(raw_sql, diagnostics);
 
-        match result {
-            Ok(reg) => {
-                let stream_id = format!(
-                    "{}:{}",
-                    format!("{:?}", reg.concept_type).to_lowercase(),
-                    reg.concept_name
-                );
-                let concept_key =
-                    allocator::allocate_concept_key_txn(&txn, org_id, &stream_id)
-                        .await
-                        .unwrap();
-                let meta = meta_json::build_meta(stmt);
+        use sea_orm::{ActiveModelTrait, Set};
+        let model = dereg_meta_store::ActiveModel {
+            id: Set(id),
+            org_id: Set(org_id.to_string()),
+            stream_id: Set("ERROR:PARSE".to_string()),
+            event_type: Set("ParseError".to_string()),
+            concept_type: Set("PARSE_ERROR".to_string()),
+            concept_key: Set(0),
+            occurred_at: Set(chrono::Utc::now().into()),
+            status: Set("parse_error".to_string()),
+            error_message: Set(Some(error_message)),
+            statement: Set(raw_sql.to_string()),
+            meta: Set(meta),
+        };
+        model.insert(&txn).await.unwrap();
+        txn.commit().await.unwrap();
+        id
+    }
 
-                use sea_orm::ActiveModelTrait;
-                use sea_orm::Set;
-                let model = dereg_meta_store::ActiveModel {
-                    id: Set(id),
-                    org_id: Set(org_id.to_string()),
-                    stream_id: Set(stream_id),
-                    event_type: Set(reg.event_type.to_string()),
-                    concept_type: Set(format!("{:?}", reg.concept_type).to_uppercase()),
-                    concept_key: Set(concept_key),
-                    occurred_at: Set(chrono::Utc::now().into()),
-                    status: Set("ok".to_string()),
-                    error_message: Set(None),
-                    statement: Set(raw_sql.to_string()),
-                    meta: Set(meta),
-                };
-                model.insert(&txn).await.unwrap();
-                txn.commit().await.unwrap();
-                Ok(id)
-            }
-            Err(e) => {
-                let meta = meta_json::build_error_meta(&e.to_string());
-                use sea_orm::ActiveModelTrait;
-                use sea_orm::Set;
-                let model = dereg_meta_store::ActiveModel {
-                    id: Set(id),
-                    org_id: Set(org_id.to_string()),
-                    stream_id: Set("unknown".to_string()),
-                    event_type: Set("RegistrationFailed".to_string()),
-                    concept_type: Set("UNKNOWN".to_string()),
-                    concept_key: Set(0),
-                    occurred_at: Set(chrono::Utc::now().into()),
-                    status: Set("failed".to_string()),
-                    error_message: Set(Some(e.to_string())),
-                    statement: Set(raw_sql.to_string()),
-                    meta: Set(meta),
-                };
-                model.insert(&txn).await.unwrap();
-                txn.commit().await.unwrap();
-                Err(e.to_string())
+    async fn write_definitions_atomic(
+        db: &DatabaseConnection,
+        dereg: &mut DeReg,
+        org_id: &str,
+        statements: &[(&DeqlStatement, &str)],
+    ) -> Result<Vec<i64>, String> {
+        let mut temp_dereg = dereg.clone();
+        let mut prepared = Vec::with_capacity(statements.len());
+
+        for (stmt, raw_sql) in statements {
+            let id = match allocator::allocate_next_id(db).await {
+                Ok(id) => id,
+                Err(e) => return Err(e.to_string()),
+            };
+
+            let registration = match temp_dereg.register_statement(stmt) {
+                Ok(reg) => reg,
+                Err(e) => return Err(e.to_string()),
+            };
+            let stream_id = format!(
+                "{}:{}",
+                format!("{:?}", registration.concept_type).to_lowercase(),
+                registration.concept_name.as_str()
+            );
+            prepared.push((
+                id,
+                raw_sql.to_string(),
+                registration,
+                stream_id,
+                meta_json::build_meta(stmt),
+            ));
+        }
+
+        let txn = db.begin().await.map_err(|e| e.to_string())?;
+        let mut ids = Vec::with_capacity(prepared.len());
+
+        for (id, raw_sql, registration, stream_id, meta) in prepared {
+            let concept_key = allocator::allocate_concept_key_txn(&txn, org_id, &stream_id)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            use sea_orm::{ActiveModelTrait, Set};
+            let model = dereg_meta_store::ActiveModel {
+                id: Set(id),
+                org_id: Set(org_id.to_string()),
+                stream_id: Set(stream_id),
+                event_type: Set(registration.event_type.to_string()),
+                concept_type: Set(format!("{:?}", registration.concept_type).to_uppercase()),
+                concept_key: Set(concept_key),
+                occurred_at: Set(chrono::Utc::now().into()),
+                status: Set("ok".to_string()),
+                error_message: Set(None),
+                statement: Set(raw_sql),
+                meta: Set(meta),
+            };
+            model.insert(&txn).await.map_err(|e| e.to_string())?;
+            ids.push(id);
+        }
+
+        txn.commit().await.map_err(|e| e.to_string())?;
+        *dereg = temp_dereg;
+        Ok(ids)
+    }
+
+    async fn write_definitions_atomic_with_forced_db_failure(
+        db: &DatabaseConnection,
+        dereg: &mut DeReg,
+        org_id: &str,
+        statements: &[(&DeqlStatement, &str)],
+    ) -> Result<(), String> {
+        let mut temp_dereg = dereg.clone();
+        let mut prepared = Vec::with_capacity(statements.len());
+
+        for (stmt, raw_sql) in statements {
+            let id = match allocator::allocate_next_id(db).await {
+                Ok(id) => id,
+                Err(e) => return Err(e.to_string()),
+            };
+
+            let registration = match temp_dereg.register_statement(stmt) {
+                Ok(reg) => reg,
+                Err(e) => return Err(e.to_string()),
+            };
+            let stream_id = format!(
+                "{}:{}",
+                format!("{:?}", registration.concept_type).to_lowercase(),
+                registration.concept_name.as_str()
+            );
+            prepared.push((
+                id,
+                raw_sql.to_string(),
+                registration,
+                stream_id,
+                meta_json::build_meta(stmt),
+            ));
+        }
+
+        let txn = db.begin().await.map_err(|e| e.to_string())?;
+
+        for (index, (id, raw_sql, registration, stream_id, meta)) in
+            prepared.into_iter().enumerate()
+        {
+            let concept_key = allocator::allocate_concept_key_txn(&txn, org_id, &stream_id)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            use sea_orm::{ActiveModelTrait, Set};
+            let model = dereg_meta_store::ActiveModel {
+                id: Set(id),
+                org_id: Set(org_id.to_string()),
+                stream_id: Set(stream_id),
+                event_type: Set(registration.event_type.to_string()),
+                concept_type: Set(format!("{:?}", registration.concept_type).to_uppercase()),
+                concept_key: Set(concept_key),
+                occurred_at: Set(chrono::Utc::now().into()),
+                status: Set("ok".to_string()),
+                error_message: Set(None),
+                statement: Set(raw_sql),
+                meta: Set(meta),
+            };
+            model.insert(&txn).await.map_err(|e| e.to_string())?;
+
+            if index == 0 {
+                let forced_error = txn
+                    .execute(Statement::from_string(
+                        sea_orm::DatabaseBackend::Sqlite,
+                        String::from("INSRT INTO definitely_not_a_table VALUES (1)"),
+                    ))
+                    .await;
+
+                if forced_error.is_err() {
+                    let _ = txn.rollback().await;
+                    return Err("forced db failure".to_string());
+                }
             }
         }
+
+        txn.commit().await.map_err(|e| e.to_string())?;
+        *dereg = temp_dereg;
+        Ok(())
     }
 
     // --- CREATE flow tests ---
@@ -169,17 +332,20 @@ mod tests {
         let mut dereg = DeReg::new();
         let stmt = make_aggregate("BankAccount");
 
-        let id = write_definition(&db, &mut dereg, "org1", &stmt, "CREATE AGGREGATE BankAccount")
-            .await
-            .unwrap();
+        let id = write_definition(
+            &db,
+            &mut dereg,
+            "org1",
+            &stmt,
+            "CREATE AGGREGATE BankAccount",
+        )
+        .await
+        .unwrap();
 
         assert_eq!(id, 1);
 
         // Verify row in DB
-        let rows = dereg_meta_store::Entity::find()
-            .all(&db)
-            .await
-            .unwrap();
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].org_id, "org1");
         assert_eq!(rows[0].event_type, "AggregateCreated");
@@ -239,37 +405,166 @@ mod tests {
         .unwrap();
 
         assert_eq!(id, 4);
-        let rows = dereg_meta_store::Entity::find()
-            .all(&db)
-            .await
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        let decision_row = rows
+            .iter()
+            .find(|r| r.event_type == "DecisionCreated")
             .unwrap();
-        let decision_row = rows.iter().find(|r| r.event_type == "DecisionCreated").unwrap();
         assert_eq!(decision_row.status, "ok");
         assert_eq!(decision_row.meta["aggregate"], "Account");
         assert_eq!(decision_row.meta["command"], "Withdraw");
     }
 
     #[tokio::test]
-    async fn create_decision_fails_validation_persists_error() {
+    async fn create_decision_fails_validation_without_persisting_row() {
         let db = setup_db().await;
         let mut dereg = DeReg::new();
 
         // Decision references non-existent aggregate
         let stmt = make_decision("BadDecision", "NoSuchAgg", "NoCmd", "NoEvent");
-        let err = write_definition(&db, &mut dereg, "org1", &stmt, "CREATE DECISION BadDecision")
+        let err = write_definition(
+            &db,
+            &mut dereg,
+            "org1",
+            &stmt,
+            "CREATE DECISION BadDecision",
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.contains("MissingReferences") || err.contains("missing"));
+
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        assert!(rows.is_empty());
+
+        let next_id = allocator::allocate_next_id(&db).await.unwrap();
+        assert_eq!(next_id, 2);
+    }
+
+    #[tokio::test]
+    async fn parse_error_persists_single_row_with_full_sql_and_diagnostics() {
+        let db = setup_db().await;
+        let raw_sql = "CRATE AGGREGATE Foo;";
+        let (parsed, diagnostics) = crate::parse(raw_sql);
+
+        assert!(parsed.statements.is_empty());
+        assert!(!diagnostics.is_empty());
+
+        let main_txn = db.begin().await.unwrap();
+        main_txn
+            .execute(Statement::from_string(
+                sea_orm::DatabaseBackend::Sqlite,
+                String::from("INSERT INTO dereg_meta_store (id, org_id, stream_id, event_type, concept_type, concept_key, occurred_at, status, statement, meta) VALUES (99, 'org1', 'aggregate:Temp', 'AggregateCreated', 'AGGREGATE', 1, '2026-01-01T00:00:00Z', 'ok', 'CREATE AGGREGATE Temp;', '{}')"),
+            ))
+            .await
+            .unwrap();
+        main_txn.rollback().await.unwrap();
+
+        let id = write_parse_error(&db, "org1", raw_sql, &diagnostics).await;
+
+        assert_eq!(id, 1);
+
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 1);
+
+        let row = &rows[0];
+        assert_eq!(row.status, "parse_error");
+        assert_eq!(row.statement, raw_sql);
+        assert_eq!(row.stream_id, "ERROR:PARSE");
+        assert_eq!(row.concept_type, "PARSE_ERROR");
+        assert_eq!(row.concept_key, 0);
+        let expected_message = diagnostics[0].display(raw_sql);
+        assert_eq!(
+            row.error_message.as_deref(),
+            Some(expected_message.as_str())
+        );
+        assert_eq!(row.meta["code"], "PARSE_ERROR");
+        assert_eq!(row.meta["line"], 1);
+        assert_eq!(row.meta["column"], 1);
+        assert_eq!(row.meta["snippet"], raw_sql);
+        assert_eq!(row.meta["diagnostics"].as_array().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn multi_statement_success_persists_all_rows_atomically() {
+        let db = setup_db().await;
+        let mut dereg = DeReg::new();
+
+        let account_stmt = make_aggregate("Account");
+        let withdraw_stmt = make_command("Withdraw");
+
+        let statements = [
+            (&account_stmt, "CREATE AGGREGATE Account;"),
+            (&withdraw_stmt, "CREATE COMMAND Withdraw (amount INT);"),
+        ];
+
+        let ids = write_definitions_atomic(&db, &mut dereg, "org1", &statements)
+            .await
+            .unwrap();
+
+        assert_eq!(ids, vec![1, 2]);
+
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].status, "ok");
+        assert_eq!(rows[1].status, "ok");
+        assert_eq!(rows[0].statement, "CREATE AGGREGATE Account;");
+        assert_eq!(rows[1].statement, "CREATE COMMAND Withdraw (amount INT);");
+    }
+
+    #[tokio::test]
+    async fn multi_statement_validation_failure_rolls_back_everything() {
+        let db = setup_db().await;
+        let mut dereg = DeReg::new();
+
+        let account_stmt = make_aggregate("Account");
+        let bad_decision_stmt = make_decision("BadDecision", "MissingAgg", "Withdraw", "Withdrawn");
+
+        let statements = [
+            (&account_stmt, "CREATE AGGREGATE Account;"),
+            (&bad_decision_stmt, "CREATE DECISION BadDecision;"),
+        ];
+
+        let err = write_definitions_atomic(&db, &mut dereg, "org1", &statements)
             .await
             .unwrap_err();
 
         assert!(err.contains("MissingReferences") || err.contains("missing"));
 
-        // Row persisted as failed
-        let rows = dereg_meta_store::Entity::find()
-            .all(&db)
-            .await
-            .unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, "failed");
-        assert!(rows[0].error_message.is_some());
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        assert!(rows.is_empty());
+        assert!(dereg.get_aggregate("Account").is_none());
+
+        let next_id = allocator::allocate_next_id(&db).await.unwrap();
+        assert_eq!(next_id, 3);
+    }
+
+    #[tokio::test]
+    async fn multi_statement_db_failure_rolls_back_everything() {
+        let db = setup_db().await;
+        let mut dereg = DeReg::new();
+
+        let account_stmt = make_aggregate("Account");
+        let withdraw_stmt = make_command("Withdraw");
+
+        let statements = [
+            (&account_stmt, "CREATE AGGREGATE Account;"),
+            (&withdraw_stmt, "CREATE COMMAND Withdraw (amount INT);"),
+        ];
+
+        let err =
+            write_definitions_atomic_with_forced_db_failure(&db, &mut dereg, "org1", &statements)
+                .await
+                .unwrap_err();
+
+        assert_eq!(err, "forced db failure");
+
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        assert!(rows.is_empty());
+        assert!(dereg.get_aggregate("Account").is_none());
+
+        let next_id = allocator::allocate_next_id(&db).await.unwrap();
+        assert_eq!(next_id, 3);
     }
 
     #[tokio::test]
@@ -277,14 +572,25 @@ mod tests {
         let db = setup_db().await;
         let mut dereg = DeReg::new();
 
-        write_definition(&db, &mut dereg, "org1", &make_aggregate("X"), "CREATE AGGREGATE X")
-            .await
-            .unwrap();
+        write_definition(
+            &db,
+            &mut dereg,
+            "org1",
+            &make_aggregate("X"),
+            "CREATE AGGREGATE X",
+        )
+        .await
+        .unwrap();
 
-        let err =
-            write_definition(&db, &mut dereg, "org1", &make_aggregate("X"), "CREATE AGGREGATE X")
-                .await
-                .unwrap_err();
+        let err = write_definition(
+            &db,
+            &mut dereg,
+            "org1",
+            &make_aggregate("X"),
+            "CREATE AGGREGATE X",
+        )
+        .await
+        .unwrap_err();
 
         assert!(err.contains("Duplicate name") || err.contains("duplicate"));
     }
@@ -318,9 +624,15 @@ mod tests {
         let db = setup_db().await;
         let mut dereg = DeReg::new();
 
-        write_definition(&db, &mut dereg, "org1", &make_aggregate("X"), "CREATE AGGREGATE X")
-            .await
-            .unwrap();
+        write_definition(
+            &db,
+            &mut dereg,
+            "org1",
+            &make_aggregate("X"),
+            "CREATE AGGREGATE X",
+        )
+        .await
+        .unwrap();
 
         // DROP
         let drop_result = dereg.drop_concept(ConceptKind::Aggregate, "X").unwrap();
@@ -333,8 +645,7 @@ mod tests {
         let txn = db.begin().await.unwrap();
         let id = allocator::allocate_next_id_txn(&txn).await.unwrap();
         let meta = meta_json::build_tombstone_meta(ConceptKind::Aggregate, "X");
-        use sea_orm::ActiveModelTrait;
-        use sea_orm::Set;
+        use sea_orm::{ActiveModelTrait, Set};
         let model = dereg_meta_store::ActiveModel {
             id: Set(id),
             org_id: Set("org1".to_string()),
@@ -352,11 +663,11 @@ mod tests {
         txn.commit().await.unwrap();
 
         // Verify tombstone in DB
-        let rows = dereg_meta_store::Entity::find()
-            .all(&db)
-            .await
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
+        let tombstone = rows
+            .iter()
+            .find(|r| r.event_type == "AggregateDropped")
             .unwrap();
-        let tombstone = rows.iter().find(|r| r.event_type == "AggregateDropped").unwrap();
         assert_eq!(tombstone.meta["tombstone"], true);
     }
 
@@ -403,12 +714,8 @@ mod tests {
         dereg
             .register_statement(&make_aggregate("Account"))
             .unwrap();
-        dereg
-            .register_statement(&make_command("Withdraw"))
-            .unwrap();
-        dereg
-            .register_statement(&make_event("Withdrawn"))
-            .unwrap();
+        dereg.register_statement(&make_command("Withdraw")).unwrap();
+        dereg.register_statement(&make_event("Withdrawn")).unwrap();
         dereg
             .register_statement(&make_decision(
                 "HandleWithdraw",
@@ -526,10 +833,7 @@ mod tests {
             .await
             .unwrap();
 
-        let rows = dereg_meta_store::Entity::find()
-            .all(&db)
-            .await
-            .unwrap();
+        let rows = dereg_meta_store::Entity::find().all(&db).await.unwrap();
         // Both should have concept_key=1 since they have different stream_ids
         assert_eq!(rows[0].concept_key, 1);
         assert_eq!(rows[1].concept_key, 1);

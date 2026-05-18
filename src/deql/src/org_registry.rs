@@ -12,14 +12,15 @@ use crate::dereg::DeReg;
 pub type OrgId = String;
 
 /// Per-org in-memory DeReg state map.
+#[derive(Clone)]
 pub struct OrgDeRegMap {
-    inner: tokio::sync::RwLock<HashMap<OrgId, Arc<RwLock<DeReg>>>>,
+    inner: Arc<tokio::sync::RwLock<HashMap<OrgId, Arc<RwLock<DeReg>>>>>,
 }
 
 impl OrgDeRegMap {
     pub fn new() -> Self {
         Self {
-            inner: tokio::sync::RwLock::new(HashMap::new()),
+            inner: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -53,6 +54,12 @@ impl OrgDeRegMap {
     pub async fn org_ids(&self) -> Vec<OrgId> {
         let map = self.inner.read().await;
         map.keys().cloned().collect()
+    }
+
+    /// Get a new instance that can be Arc-wrapped for service injection.
+    /// Since OrgDeRegMap is now Clone and wraps Arc<RwLock>, this just clones self.
+    pub fn clone_for_service(&self) -> Self {
+        self.clone()
     }
 }
 

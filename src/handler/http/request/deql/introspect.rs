@@ -11,6 +11,11 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use infra::db::ORM_CLIENT;
+use o2_deql::store::projections::{
+    meta_aggregates, meta_commands, meta_decisions, meta_events, meta_templates,
+};
+use sea_orm::EntityTrait;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use utoipa::ToSchema;
@@ -37,6 +42,24 @@ pub struct DeqlInfoResponse {
     pub readonly: bool,
     pub counts: ConceptCounts,
     pub last_stream_seq: Option<i64>,
+    /// In-memory rehydrate watermark (sequence id of last successful rehydrate)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rehydrate_revision: Option<i64>,
+    /// Most recent rehydrate result (success or failure with timestamp & message)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_rehydrate_result: Option<LastRehydrateResult>,
+}
+
+/// Last rehydrate result information.
+#[derive(Debug, Serialize, ToSchema, Clone)]
+pub struct LastRehydrateResult {
+    pub status: String,              // "success" | "failure"
+    pub timestamp: String,           // ISO 8601 UTC
+    pub elapsed_ms: u64,
+    pub rows_processed: i64,
+    pub last_sequence_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
 }
 
 /// Counts of registered concepts.
@@ -127,11 +150,28 @@ pub async fn info(Path(org_id): Path<String>) -> Response {
         templates: dereg.template_count(),
     };
 
+    // Fetch in-memory rehydrate state
+    let rehydrate_state_map = state.rehydrate_state_map.read().await;
+    let rehydrate_state = rehydrate_state_map.get(&org_id);
+    let rehydrate_revision = rehydrate_state.and_then(|rs| rs.revision);
+    let last_result = rehydrate_state.and_then(|rs| rs.last_result.as_ref()).map(|r| {
+        LastRehydrateResult {
+            status: r.status.clone(),
+            timestamp: r.end_time.to_rfc3339(),
+            elapsed_ms: r.elapsed_ms,
+            rows_processed: r.rows_processed,
+            last_sequence_id: r.last_sequence_id,
+            error_message: r.error_message.clone(),
+        }
+    });
+
     let response = DeqlInfoResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         readonly: false,
         counts,
         last_stream_seq: None, // TODO: fetch from dereg_meta_store
+        rehydrate_revision,
+        last_rehydrate_result: last_result,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -237,11 +277,139 @@ pub async fn get_concept(
     let state = get_deql_state().await;
     let dereg_arc = state.org_map.get_or_init(&org_id).await;
     let dereg = dereg_arc.read().await;
+    // Prefer projection tables for authoritative metadata when available.
+    // If the DB row is missing (projection worker hasn't run yet) or the ORM
+    // client is not initialized (unit tests), fall back to the in-memory DeReg
+    // state.
 
-    let (found, fields): (bool, Vec<FieldInfo>) = match concept_type.as_str() {
-        "aggregates" => {
-            if let Some(agg) = dereg.get_aggregate(&name) {
-                let fields = agg
+    // Validate concept_type early to avoid duplicating validation in both branches.
+    match concept_type.as_str() {
+        "aggregates" | "commands" | "events" | "decisions" | "projections" | "templates" => {}
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("Invalid concept type: {}. Valid types: aggregates, commands, events, decisions, projections, templates", concept_type)
+                })),
+            )
+            .into_response();
+        }
+    }
+
+    // --- Try projection tables first ---
+    let db_meta: Option<Value> = if let Some(db) = ORM_CLIENT.get() {
+        match concept_type.as_str() {
+            "aggregates" => {
+                match meta_aggregates::Entity::find_by_id((org_id.clone(), name.clone()))
+                    .one(db)
+                    .await
+                {
+                    Ok(Some(m)) => Some(json!({
+                        "org_id": m.org_id,
+                        "name": m.name,
+                        "fields_json": m.fields_json,
+                        "last_applied_id": m.last_applied_id,
+                        "is_dropped": m.is_dropped,
+                    })),
+                    Ok(None) => None,
+                    Err(e) => {
+                        log::warn!("DB error querying meta_aggregates for {name}: {e}");
+                        None
+                    }
+                }
+            }
+            "commands" => match meta_commands::Entity::find_by_id((org_id.clone(), name.clone()))
+                .one(db)
+                .await
+            {
+                Ok(Some(m)) => Some(json!({
+                    "org_id": m.org_id,
+                    "name": m.name,
+                    "aggregate": m.aggregate,
+                    "attributes_json": m.attributes_json,
+                    "full_sql": m.full_sql,
+                    "last_applied_id": m.last_applied_id,
+                    "is_dropped": m.is_dropped,
+                })),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!("DB error querying meta_commands for {name}: {e}");
+                    None
+                }
+            },
+            "events" => match meta_events::Entity::find_by_id((org_id.clone(), name.clone()))
+                .one(db)
+                .await
+            {
+                Ok(Some(m)) => Some(json!({
+                    "org_id": m.org_id,
+                    "name": m.name,
+                    "aggregate": m.aggregate,
+                    "attributes_json": m.attributes_json,
+                    "full_sql": m.full_sql,
+                    "last_applied_id": m.last_applied_id,
+                    "is_dropped": m.is_dropped,
+                })),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!("DB error querying meta_events for {name}: {e}");
+                    None
+                }
+            },
+            "decisions" => match meta_decisions::Entity::find_by_id((org_id.clone(), name.clone()))
+                .one(db)
+                .await
+            {
+                Ok(Some(m)) => Some(json!({
+                    "org_id": m.org_id,
+                    "name": m.name,
+                    "aggregate": m.aggregate,
+                    "command": m.command,
+                    "emits_json": m.emits_json,
+                    "has_guard": m.has_guard,
+                    "guard_sql": m.guard_sql,
+                    "state_sql": m.state_sql,
+                    "full_sql": m.full_sql,
+                    "last_applied_id": m.last_applied_id,
+                    "is_dropped": m.is_dropped,
+                })),
+                Ok(None) => None,
+                Err(e) => {
+                    log::warn!("DB error querying meta_decisions for {name}: {e}");
+                    None
+                }
+            },
+            "projections" | "templates" => {
+                match meta_templates::Entity::find_by_id((org_id.clone(), name.clone()))
+                    .one(db)
+                    .await
+                {
+                    Ok(Some(m)) => Some(json!({
+                        "org_id": m.org_id,
+                        "name": m.name,
+                        "parameters_json": m.parameters_json,
+                        "full_sql": m.full_sql,
+                        "last_applied_id": m.last_applied_id,
+                        "is_dropped": m.is_dropped,
+                    })),
+                    Ok(None) => None,
+                    Err(e) => {
+                        log::warn!("DB error querying meta_templates for {name}: {e}");
+                        None
+                    }
+                }
+            }
+            _ => None, // unreachable — validated above
+        }
+    } else {
+        None
+    };
+
+    // --- Fall back to in-memory DeReg if DB had no row ---
+    let meta_json: Option<Value> = db_meta.or_else(|| {
+        match concept_type.as_str() {
+            "aggregates" => dereg.get_aggregate(&name).map(|agg| {
+                let fields_out: Vec<FieldInfo> = agg
                     .fields
                     .as_ref()
                     .map(|fs| {
@@ -254,14 +422,14 @@ pub async fn get_concept(
                             .collect()
                     })
                     .unwrap_or_default();
-                (true, fields)
-            } else {
-                (false, vec![])
-            }
-        }
-        "commands" => {
-            if let Some(cmd) = dereg.get_command(&name) {
-                let fields = cmd
+                json!({
+                    "org_id": org_id.clone(),
+                    "name": name.clone(),
+                    "fields": fields_out,
+                })
+            }),
+            "commands" => dereg.get_command(&name).map(|cmd| {
+                let fields_out: Vec<FieldInfo> = cmd
                     .fields
                     .iter()
                     .map(|f| FieldInfo {
@@ -270,14 +438,14 @@ pub async fn get_concept(
                         nullable: !f.is_key,
                     })
                     .collect();
-                (true, fields)
-            } else {
-                (false, vec![])
-            }
-        }
-        "events" => {
-            if let Some(evt) = dereg.get_event(&name) {
-                let fields = evt
+                json!({
+                    "org_id": org_id.clone(),
+                    "name": name.clone(),
+                    "fields": fields_out,
+                })
+            }),
+            "events" => dereg.get_event(&name).map(|evt| {
+                let fields_out: Vec<FieldInfo> = evt
                     .fields
                     .iter()
                     .map(|f| FieldInfo {
@@ -286,31 +454,41 @@ pub async fn get_concept(
                         nullable: !f.is_key,
                     })
                     .collect();
-                (true, fields)
-            } else {
-                (false, vec![])
+                json!({
+                    "org_id": org_id.clone(),
+                    "name": name.clone(),
+                    "fields": fields_out,
+                })
+            }),
+            "decisions" => {
+                if dereg.contains_decision(&name) {
+                    Some(json!({"org_id": org_id.clone(), "name": name.clone()}))
+                } else {
+                    None
+                }
             }
+            "projections" => {
+                if dereg.contains_projection(&name) {
+                    Some(json!({"org_id": org_id.clone(), "name": name.clone()}))
+                } else {
+                    None
+                }
+            }
+            "templates" => {
+                if dereg.contains_template(&name) {
+                    Some(json!({"org_id": org_id.clone(), "name": name.clone()}))
+                } else {
+                    None
+                }
+            }
+            _ => None, // unreachable — validated above
         }
-        "decisions" => (dereg.contains_decision(&name), vec![]),
-        "projections" => (dereg.contains_projection(&name), vec![]),
-        "templates" => (dereg.contains_template(&name), vec![]),
-        _ => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({
-                    "error": format!("Invalid concept type: {}. Valid types: aggregates, commands, events, decisions, projections, templates", concept_type)
-                })),
-            )
-                .into_response();
-        }
-    };
+    });
 
-    if !found {
+    if meta_json.is_none() {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": format!("{} '{}' not found", concept_type, name)
-            })),
+            Json(json!({"error": format!("{} '{}' not found", concept_type, name)})),
         )
             .into_response();
     }
@@ -318,9 +496,9 @@ pub async fn get_concept(
     let response = RegistryItemDetail {
         name: name.clone(),
         concept_type: concept_type.clone(),
-        source: None, // TODO: fetch from dereg_meta_store
-        fields,
-        meta: json!({}),
+        source: None,   // TODO: fetch from dereg_meta_store if needed
+        fields: vec![], // schema can be fetched via schema endpoint if required
+        meta: meta_json.unwrap(),
     };
 
     (StatusCode::OK, Json(response)).into_response()

@@ -580,6 +580,7 @@ pub fn deql_routes() -> Router {
         // DeReg management endpoints (Phase 2)
         .route("/{org_id}/dereg/definitions", post(dereg::definitions))
         .route("/{org_id}/dereg/metrics", get(dereg::metrics))
+        .route("/{org_id}/dereg/rehydrate", post(dereg::trigger_rehydrate))
         .route("/{org_id}/dereg/admin/replay", post(dereg::replay))
         .route(
             "/{org_id}/dereg/admin/replay-refresh",

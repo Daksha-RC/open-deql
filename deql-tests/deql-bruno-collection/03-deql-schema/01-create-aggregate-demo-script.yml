@@ -1,5 +1,5 @@
 info:
-  name: 01-create-aggregate
+  name: 01-create-aggregate-demo-script
   type: http
   seq: 1
 
@@ -14,7 +14,7 @@ http:
 
       CREATE OR REPLACE AGGREGATE Employee;
 
-      CREATE COMMAND HireEmployee (
+      CREATE OR COMMAND HireEmployee (
         employee_id STRING,
         name        STRING,
         grade       STRING
@@ -46,7 +46,7 @@ http:
           grade := :grade
         );
       /* An employee should only be promoted when the new grade is different from their current grade. */
-      CREATE DECISION Promote
+      CREATE OR REPLACE DECISION Promote
       FOR Employee
       ON COMMAND PromoteEmployee
       STATE AS
@@ -70,7 +70,7 @@ http:
       -- a new-hire report for Finance/Admin, and a promotions report for Accounts.
       -- So we’ll create two projections.
 
-      CREATE OR REPLACE PROJECTION NewHireReport AS
+      CREATE PROJECTION NewHireReport AS
       SELECT
         stream_id AS employee_id,
         LAST(data.name)  AS name,

@@ -483,7 +483,7 @@ utoipa = { version = "5.5", features = ["axum_extras", "openapi_extensions"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 utoipa-scalar = { version = "0.3", features = ["axum"] }
-uuid = { version = "1.20", features = ["v7"] }
+uuid = { version = "1.20", features = ["v4", "v7"] }
 vector-enrichment = { version = "0.1.0", package = "enrichment", git = "https://github.com/openobserve/vector", branch = "branch-v0.54" }
 vrl = { version = "0.31", features = [
     "arbitrary",

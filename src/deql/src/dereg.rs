@@ -6,10 +6,12 @@
 
 use std::collections::HashMap;
 
-use crate::error::{ConceptKind, DeRegError};
-use crate::parser::ast::*;
-use crate::registry::Registry;
-use crate::validator;
+use crate::{
+    error::{ConceptKind, DeRegError},
+    parser::ast::*,
+    registry::Registry,
+    validator,
+};
 
 /// Registration outcome for the write handler.
 #[derive(Debug)]
@@ -28,6 +30,7 @@ pub struct DropResult {
 }
 
 /// The Decision Registry — central catalog for all DeQL definitions.
+#[derive(Clone)]
 pub struct DeReg {
     pub(crate) registry: Registry,
     pub(crate) command_map: HashMap<String, String>,

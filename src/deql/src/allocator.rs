@@ -1,16 +1,18 @@
 //! Sequence allocators for `dereg_meta_store`.
 //!
 //! - Global `id` allocator: single monotonic sequence across all rows [REQ-025]
+//!   backed by `dereg_id_sequence` so reservations survive rollbacks in the main write path.
 //! - Per-entity `concept_key` allocator: monotonic per (org_id, stream_id) [REQ-022d]
 
 use sea_orm::{
     ConnectionTrait, DatabaseConnection, DbErr, FromQueryResult, Statement, TransactionTrait,
 };
 
+const GLOBAL_SEQUENCE_NAME: &str = "global";
+
 /// Allocate the next global monotonic `id` for `dereg_meta_store`.
 ///
-/// Uses `SELECT MAX(id) + 1` within a transaction to ensure monotonicity.
-/// Falls back to 1 if the table is empty.
+/// Reserves the next value from the global id sequence and returns it.
 /// [REQ-025] Single stream across all rows (all orgs).
 pub async fn allocate_next_id(db: &DatabaseConnection) -> Result<i64, DbErr> {
     let txn = db.begin().await?;
@@ -19,21 +21,49 @@ pub async fn allocate_next_id(db: &DatabaseConnection) -> Result<i64, DbErr> {
     Ok(id)
 }
 
-/// Allocate next id within an existing transaction.
+/// Reserve the next id within an existing transaction.
 pub async fn allocate_next_id_txn<C: ConnectionTrait>(conn: &C) -> Result<i64, DbErr> {
+    ensure_global_sequence_row(conn).await?;
+
+    conn.execute(Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        format!(
+            "UPDATE dereg_id_sequence SET last_id = last_id + 1 WHERE name = '{}'",
+            GLOBAL_SEQUENCE_NAME
+        ),
+    ))
+    .await?;
+
     #[derive(Debug, FromQueryResult)]
-    struct MaxId {
-        max_id: Option<i64>,
+    struct SequenceState {
+        last_id: i64,
     }
 
-    let result = MaxId::find_by_statement(Statement::from_string(
+    let result = SequenceState::find_by_statement(Statement::from_string(
         sea_orm::DatabaseBackend::Sqlite,
-        "SELECT MAX(id) as max_id FROM dereg_meta_store",
+        format!(
+            "SELECT last_id FROM dereg_id_sequence WHERE name = '{}'",
+            GLOBAL_SEQUENCE_NAME
+        ),
     ))
     .one(conn)
     .await?;
 
-    Ok(result.and_then(|r| r.max_id).unwrap_or(0) + 1)
+    result
+        .map(|row| row.last_id)
+        .ok_or_else(|| DbErr::Custom("global id sequence row missing".to_string()))
+}
+
+async fn ensure_global_sequence_row<C: ConnectionTrait>(conn: &C) -> Result<(), DbErr> {
+    conn.execute(Statement::from_string(
+        sea_orm::DatabaseBackend::Sqlite,
+        format!(
+            "INSERT OR IGNORE INTO dereg_id_sequence (name, last_id) VALUES ('{}', (SELECT COALESCE(MAX(id), 0) FROM dereg_meta_store))",
+            GLOBAL_SEQUENCE_NAME
+        ),
+    ))
+    .await?;
+    Ok(())
 }
 
 /// Allocate the next `concept_key` for a given `(org_id, stream_id)`.

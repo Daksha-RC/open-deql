@@ -11,6 +11,7 @@ use crate::{
 };
 
 /// Internal storage for all concept definitions.
+#[derive(Clone)]
 pub struct Registry {
     pub(crate) aggregates: HashMap<String, CreateAggregate>,
     pub(crate) commands: HashMap<String, CreateCommand>,

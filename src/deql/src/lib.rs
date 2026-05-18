@@ -13,6 +13,8 @@ pub mod parser;
 mod projection_tests;
 pub mod projection_worker;
 pub mod registry;
+pub mod rehydrate;
+pub mod rehydrate_impl;
 pub mod replay;
 pub mod store;
 pub mod validator;
@@ -38,3 +40,7 @@ pub use parser::{
     token::Span,
 };
 pub use registry::Registry;
+pub use rehydrate::{
+    OrgRehydrateState, OrgRehydrateStateMap, RehydrateError, RehydrateResult, RehydrateService,
+};
+pub use rehydrate_impl::RehydrateServiceImpl;

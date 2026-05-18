@@ -6,10 +6,12 @@
 //!
 //! [REQ-028] Design doc section 5.1 table.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::error::ConceptKind;
-use crate::parser::ast::*;
+use crate::{
+    error::ConceptKind,
+    parser::{ast::*, error::Diagnostic},
+};
 
 /// Build the `meta` JSON column value for a successful CREATE statement.
 pub fn build_meta(stmt: &DeqlStatement) -> Value {
@@ -39,6 +41,61 @@ pub fn build_error_meta(error: &str) -> Value {
     json!({
         "error": true,
         "message": error,
+    })
+}
+
+/// Build error meta for a parser failure using the full diagnostic context.
+pub fn build_parse_error_meta(source: &str, diagnostics: &[Diagnostic]) -> Value {
+    let diagnostics_json: Vec<Value> = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let (line, column) = byte_offset_to_line_col(source, diagnostic.span.start);
+            json!({
+                "severity": format!("{:?}", diagnostic.severity),
+                "message": diagnostic.message.clone(),
+                "line": line,
+                "column": column,
+                "snippet": get_source_line(source, diagnostic.span.start),
+                "span": {
+                    "start": diagnostic.span.start,
+                    "end": diagnostic.span.end,
+                },
+                "display": diagnostic.display(source),
+            })
+        })
+        .collect();
+
+    let message = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.display(source))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let (line, column, snippet) = diagnostics
+        .first()
+        .map(|diagnostic| {
+            let (line, column) = byte_offset_to_line_col(source, diagnostic.span.start);
+            (
+                Some(line),
+                Some(column),
+                Some(get_source_line(source, diagnostic.span.start)),
+            )
+        })
+        .unwrap_or((None, None, None));
+
+    let root_message = if message.is_empty() {
+        "parse error"
+    } else {
+        message.as_str()
+    };
+
+    json!({
+        "code": "PARSE_ERROR",
+        "message": root_message,
+        "line": line,
+        "column": column,
+        "snippet": snippet,
+        "diagnostics": diagnostics_json,
     })
 }
 
@@ -145,5 +202,62 @@ fn config_value_to_json(cv: &ConfigValue) -> Value {
         ConfigValue::DecimalLit(d) => json!(d),
         ConfigValue::BoolLit(b) => json!(b),
         ConfigValue::List(l) => json!(l),
+    }
+}
+
+fn byte_offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let mut line = 1;
+    let mut line_start = 0;
+
+    for (i, ch) in source.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if ch == '\n' {
+            line += 1;
+            line_start = i + 1;
+        }
+    }
+
+    let column = offset - line_start + 1;
+    (line, column)
+}
+
+fn get_source_line(source: &str, offset: usize) -> &str {
+    let offset = offset.min(source.len());
+    let line_start = source[..offset].rfind('\n').map_or(0, |idx| idx + 1);
+    let line_end = source[offset..]
+        .find('\n')
+        .map_or(source.len(), |idx| offset + idx);
+
+    &source[line_start..line_end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::{error::Severity, token::Span};
+
+    #[test]
+    fn parse_error_meta_includes_diagnostic_details() {
+        let source = "-- comment\nCRATE AGGREGATE Foo;";
+        let diagnostics = vec![Diagnostic {
+            span: Span { start: 11, end: 16 },
+            message: "unexpected token 'CRATE'".to_string(),
+            severity: Severity::Error,
+        }];
+
+        let meta = build_parse_error_meta(source, &diagnostics);
+
+        assert_eq!(meta["code"], "PARSE_ERROR");
+        assert_eq!(meta["line"], 2);
+        assert_eq!(meta["column"], 1);
+        assert_eq!(meta["snippet"], "CRATE AGGREGATE Foo;");
+        assert_eq!(meta["diagnostics"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            meta["diagnostics"][0]["display"],
+            diagnostics[0].display(source)
+        );
     }
 }

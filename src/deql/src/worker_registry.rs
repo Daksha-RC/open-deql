@@ -69,14 +69,15 @@ impl Default for WorkerRegistry {
 
 /// Per-org lock map for replay-refresh blocking.
 /// [REQ-063-1] [REQ-064]
+#[derive(Clone)]
 pub struct OrgLockMap {
-    locks: RwLock<HashMap<OrgId, Arc<RwLock<()>>>>,
+    locks: Arc<RwLock<HashMap<OrgId, Arc<RwLock<()>>>>>,
 }
 
 impl OrgLockMap {
     pub fn new() -> Self {
         Self {
-            locks: RwLock::new(HashMap::new()),
+            locks: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -104,6 +105,12 @@ impl OrgLockMap {
         // Acquire the write lock
         let guard = lock.write_owned().await;
         OrgLockGuard { _guard: guard }
+    }
+
+    /// Get a new instance that can be Arc-wrapped for service injection.
+    /// Since OrgLockMap is now Clone and wraps Arc<RwLock>, this just clones self.
+    pub fn clone_for_service(&self) -> Self {
+        self.clone()
     }
 }
 

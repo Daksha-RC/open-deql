@@ -1758,6 +1758,20 @@ mod tests {
     }
 
     #[test]
+    fn test_statement_spans_capture_each_statement_body() {
+        let input = "-- leading comment\nCREATE AGGREGATE Foo;\n/* between */\nCREATE EVENT Bar (id UUID);\n";
+        let (parsed, diags) = parse(input);
+        assert!(diags.is_empty(), "diagnostics: {:?}", diags);
+        assert_eq!(parsed.statements.len(), 2);
+
+        let first = &parsed.statements[0].span;
+        let second = &parsed.statements[1].span;
+
+        assert_eq!(&input[first.start..first.end], "CREATE AGGREGATE Foo;");
+        assert_eq!(&input[second.start..second.end], "CREATE EVENT Bar (id UUID);");
+    }
+
+    #[test]
     fn test_create_or_replace_command() {
         let (parsed, diags) = parse("CREATE OR REPLACE COMMAND Bar (id UUID, name STRING);");
         assert!(diags.is_empty());
