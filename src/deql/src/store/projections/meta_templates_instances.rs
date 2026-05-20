@@ -12,6 +12,8 @@ pub struct Model {
     pub template_name: String,
     pub args_json: Json,
     pub generated_names_json: Json,
+    #[sea_orm(column_type = "Text")]
+    pub full_sql: String,
     pub last_applied_id: i64,
     pub is_dropped: bool,
 }

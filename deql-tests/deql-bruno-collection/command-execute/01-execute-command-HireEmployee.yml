@@ -1,0 +1,23 @@
+info:
+  name: 01-execute-command-HireEmployee
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/deql/Employee/HireEmployee"
+  body:
+    type: json
+    data: |-
+      {
+        "employee_id": "EMP12345",
+        "name": "John Doe",
+        "grade": "A1"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

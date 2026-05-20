@@ -6655,8 +6655,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "datafusion",
  "http 1.4.0",
+ "lazy_static",
+ "parking_lot 0.12.5",
  "proptest",
+ "regex",
  "sea-orm",
  "sea-orm-migration",
  "serde",

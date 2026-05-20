@@ -281,6 +281,46 @@ impl DeReg {
     pub fn template_count(&self) -> usize {
         self.registry.templates.len()
     }
+
+    /// Case-insensitive aggregate lookup.
+    /// Returns a reference to the aggregate if found by case-insensitive match.
+    pub fn get_aggregate_ci(&self, name: &str) -> Option<&CreateAggregate> {
+        let name_lower = name.to_lowercase();
+        self.registry
+            .aggregates
+            .values()
+            .find(|a| a.name.node.to_lowercase() == name_lower)
+    }
+
+    /// Case-insensitive command lookup.
+    /// Returns a reference to the command if found by case-insensitive match.
+    pub fn get_command_ci(&self, name: &str) -> Option<&CreateCommand> {
+        let name_lower = name.to_lowercase();
+        self.registry
+            .commands
+            .values()
+            .find(|c| c.name.node.to_lowercase() == name_lower)
+    }
+
+    /// Case-insensitive decision lookup.
+    /// Returns a reference to the decision if found by case-insensitive match.
+    pub fn get_decision_ci(&self, name: &str) -> Option<&CreateDecision> {
+        let name_lower = name.to_lowercase();
+        self.registry
+            .decisions
+            .values()
+            .find(|d| d.name.node.to_lowercase() == name_lower)
+    }
+
+    /// Case-insensitive event lookup.
+    /// Returns a reference to the event if found by case-insensitive match.
+    pub fn get_event_ci(&self, name: &str) -> Option<&CreateEvent> {
+        let name_lower = name.to_lowercase();
+        self.registry
+            .events
+            .values()
+            .find(|e| e.name.node.to_lowercase() == name_lower)
+    }
 }
 
 impl Default for DeReg {

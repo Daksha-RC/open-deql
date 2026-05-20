@@ -203,3 +203,58 @@ mod tests {
         assert_eq!(multi_headers.accept, "*/*");
     }
 }
+
+#[cfg(feature = "deql")]
+pub mod deql {
+    //! DeQL-specific extractors and utilities.
+
+    use axum::{
+        extract::FromRequestParts,
+        http::request::Parts,
+        response::{IntoResponse, Response},
+    };
+    use std::sync::Arc;
+
+    /// Extractor for accessing the global DeQL state (OrgDeRegMap).
+    ///
+    /// This extractor provides access to the singleton `OrgDeRegMap` from any handler.
+    /// Unlike `Extension`, which requires explicit state injection on the router,
+    /// this extractor accesses the global singleton directly.
+    ///
+    /// # Example
+    /// ```ignore
+    /// use crate::handler::http::extractors::deql::DeqlState;
+    ///
+    /// async fn my_handler(DeqlState(org_dereg_map): DeqlState) {
+    ///     // Use org_dereg_map
+    /// }
+    /// ```
+    pub struct DeqlState(pub Arc<crate::deql::OrgDeRegMap>);
+
+    pub struct DeqlStateRejection;
+
+    impl IntoResponse for DeqlStateRejection {
+        fn into_response(self) -> Response {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to access DeQL state",
+            )
+                .into_response()
+        }
+    }
+
+    impl<S> FromRequestParts<S> for DeqlState
+    where
+        S: Send + Sync,
+    {
+        type Rejection = DeqlStateRejection;
+
+        async fn from_request_parts(
+            _parts: &mut Parts,
+            _state: &S,
+        ) -> Result<Self, Self::Rejection> {
+            // Access the global singleton
+            Ok(DeqlState(Arc::new(crate::deql::get_deql_state().clone())))
+        }
+    }
+}

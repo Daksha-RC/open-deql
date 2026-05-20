@@ -17,6 +17,9 @@ mod m20260508_000008_create_meta_events;
 mod m20260508_000009_create_meta_templates;
 mod m20260508_000010_create_meta_templates_instances;
 mod m20260508_000011_create_dereg_id_sequence;
+mod m20260518_000001_add_full_sql_meta_aggregates;
+mod m20260518_000002_add_full_sql_meta_concepts;
+mod m20260518_000003_add_full_sql_meta_templates_instances;
 
 pub struct DeqlMigrator;
 
@@ -49,6 +52,9 @@ impl MigratorTrait for DeqlMigrator {
             Box::new(m20260508_000009_create_meta_templates::Migration),
             Box::new(m20260508_000010_create_meta_templates_instances::Migration),
             Box::new(m20260508_000011_create_dereg_id_sequence::Migration),
+            Box::new(m20260518_000001_add_full_sql_meta_aggregates::Migration),
+            Box::new(m20260518_000002_add_full_sql_meta_concepts::Migration),
+            Box::new(m20260518_000003_add_full_sql_meta_templates_instances::Migration),
         ]
     }
 }

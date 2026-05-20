@@ -1,7 +1,9 @@
 pub mod allocator;
 pub mod core;
+pub mod deql_state;
 pub mod dereg;
 pub mod error;
+pub mod executor;
 pub mod meta_json;
 pub mod metrics;
 #[cfg(test)]
@@ -16,7 +18,9 @@ pub mod registry;
 pub mod rehydrate;
 pub mod rehydrate_impl;
 pub mod replay;
+pub mod schema_provider;
 pub mod store;
+pub mod udaf;
 pub mod validator;
 pub mod worker_registry;
 #[cfg(test)]
@@ -24,8 +28,13 @@ mod write_path_tests;
 
 pub use core::{ConfigPair, ConfigValue, DeqlType, FieldDef};
 
+pub use deql_state::get_deql_state;
 pub use dereg::{DeReg, DropResult, RegistrationResult};
 pub use error::{ApiError, ApiErrorBody, ConceptKind, DeRegError, ServiceError};
+pub use executor::{
+    EmittedEvent, ExecutionError, ExecutionRejection, ExecutionResult, ExecutionSuccess,
+    execute_command,
+};
 pub use org_registry::{OrgDeRegMap, OrgId};
 pub use parser::{
     ast::{
@@ -44,3 +53,5 @@ pub use rehydrate::{
     OrgRehydrateState, OrgRehydrateStateMap, RehydrateError, RehydrateResult, RehydrateService,
 };
 pub use rehydrate_impl::RehydrateServiceImpl;
+pub use schema_provider::DeQlSchemaProvider;
+pub use validator::validate_command_payload;

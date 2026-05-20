@@ -574,7 +574,7 @@ pub fn deql_routes() -> Router {
         )
         // DeQL command execution
         .route(
-            "/{org_id}/deql/{aggregate}/command",
+            "/{org_id}/deql/{aggregate}/{commandname}",
             post(deql::command::execute),
         )
         // DeReg management endpoints (Phase 2)

@@ -4,9 +4,125 @@
 
 use std::collections::HashMap;
 
-use crate::error::{ConceptKind, DeRegError};
-use crate::parser::ast::{CreateDecision, CreateProjection};
-use crate::registry::Registry;
+use serde_json::{Map, Value};
+
+use crate::{
+    error::{ConceptKind, DeRegError},
+    parser::ast::{CreateCommand, CreateDecision, CreateProjection, DeqlType, FieldDef},
+    registry::Registry,
+};
+
+/// Validate a command payload against its schema.
+///
+/// Checks that:
+/// - No unknown fields are present in the payload (REQ-CMD-003)
+/// - Each field type matches the command definition's expected type
+///
+/// Returns a list of validation errors (empty if valid).
+pub fn validate_command_payload(
+    command: &CreateCommand,
+    payload: &Map<String, Value>,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    // Build a map of field name -> FieldDef for quick lookup
+    let command_fields: HashMap<String, &FieldDef> = command
+        .fields
+        .iter()
+        .map(|f| (f.name.node.clone(), f))
+        .collect();
+
+    // Check for unknown fields
+    for key in payload.keys() {
+        if !command_fields.contains_key(key) {
+            errors.push(format!("Unknown field: {}", key));
+        }
+    }
+
+    // Validate type compatibility for each field in the payload
+    for (key, value) in payload.iter() {
+        if let Some(field_def) = command_fields.get(key) {
+            if !is_type_compatible(value, &field_def.data_type.node) {
+                errors.push(format!(
+                    "Type mismatch for field '{}': expected {:?}, got {}",
+                    key,
+                    field_def.data_type.node,
+                    value_type_name(value)
+                ));
+            }
+        }
+    }
+
+    errors
+}
+
+/// Get the human-readable type name of a JSON value.
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::String(_) => "string",
+        Value::Number(_) => "number",
+        Value::Bool(_) => "boolean",
+        Value::Null => "null",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Check if a serde_json::Value is compatible with a DeqlType.
+fn is_type_compatible(value: &Value, deql_type: &DeqlType) -> bool {
+    match (value, deql_type) {
+        (Value::String(s), DeqlType::Uuid) => {
+            // Validate UUID format: must be 36 chars and valid hex with dashes
+            s.len() == 36 && is_valid_uuid(s)
+        }
+        (Value::String(_), DeqlType::String) => true,
+        (Value::Number(n), DeqlType::Int) => {
+            // Must be an integer (no fractional part)
+            n.is_i64()
+        }
+        (Value::Number(n), DeqlType::Decimal { .. }) => {
+            // Decimal can be any valid number (skip NaN check which doesn't exist for
+            // serde_json::Number)
+            n.is_f64() || n.is_i64() || n.is_u64()
+        }
+        (Value::String(s), DeqlType::Timestamp) => {
+            // Validate RFC3339 timestamp format
+            chrono::DateTime::parse_from_rfc3339(s).is_ok()
+        }
+        (Value::Bool(_), DeqlType::Boolean) => true,
+        (Value::Null, _) => {
+            // Null is generally not allowed for command fields (no optional fields in commands)
+            false
+        }
+        _ => false,
+    }
+}
+
+/// Check if a string is a valid UUID.
+fn is_valid_uuid(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+
+    let parts: Vec<&str> = s.split('-').collect();
+    if parts.len() != 5 {
+        return false;
+    }
+
+    // Check standard UUID format: 8-4-4-4-12
+    if parts[0].len() != 8
+        || parts[1].len() != 4
+        || parts[2].len() != 4
+        || parts[3].len() != 4
+        || parts[4].len() != 12
+    {
+        return false;
+    }
+
+    parts
+        .iter()
+        .all(|part| part.chars().all(|c| c.is_ascii_hexdigit()))
+}
 
 /// Validate a decision's cross-references against the registry.
 pub fn validate_decision(decision: &CreateDecision, registry: &Registry) -> Result<(), DeRegError> {

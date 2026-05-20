@@ -26,6 +26,9 @@ pub mod migration;
 pub mod router;
 pub mod service;
 
+#[cfg(feature = "deql")]
+pub use o2_deql as deql;
+
 #[cfg(feature = "enterprise")]
 pub mod super_cluster_queue;
 

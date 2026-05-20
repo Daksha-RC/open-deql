@@ -1,0 +1,18 @@
+meta {
+  name: AC-8 Unknown Command
+  type: http
+  seq: 8
+}
+
+@baseUrl = {{baseUrl}}
+@org = {{org_id}}
+
+post {{baseUrl}}/api/{{org}}/deql/BankAccount/UnknownCommand
+Content-Type: application/json
+
+{
+  "account_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+
+? response.status == 404
+? response.body.error == "Command not found"

@@ -11,6 +11,8 @@ pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
     pub name: String,
     pub fields_json: Json,
+    #[sea_orm(column_type = "Text")]
+    pub full_sql: String,
     pub last_applied_id: i64,
     pub is_dropped: bool,
 }

@@ -53,8 +53,8 @@ pub struct DeqlInfoResponse {
 /// Last rehydrate result information.
 #[derive(Debug, Serialize, ToSchema, Clone)]
 pub struct LastRehydrateResult {
-    pub status: String,              // "success" | "failure"
-    pub timestamp: String,           // ISO 8601 UTC
+    pub status: String,    // "success" | "failure"
+    pub timestamp: String, // ISO 8601 UTC
     pub elapsed_ms: u64,
     pub rows_processed: i64,
     pub last_sequence_id: Option<i64>,
@@ -154,16 +154,16 @@ pub async fn info(Path(org_id): Path<String>) -> Response {
     let rehydrate_state_map = state.rehydrate_state_map.read().await;
     let rehydrate_state = rehydrate_state_map.get(&org_id);
     let rehydrate_revision = rehydrate_state.and_then(|rs| rs.revision);
-    let last_result = rehydrate_state.and_then(|rs| rs.last_result.as_ref()).map(|r| {
-        LastRehydrateResult {
+    let last_result = rehydrate_state
+        .and_then(|rs| rs.last_result.as_ref())
+        .map(|r| LastRehydrateResult {
             status: r.status.clone(),
             timestamp: r.end_time.to_rfc3339(),
             elapsed_ms: r.elapsed_ms,
             rows_processed: r.rows_processed,
             last_sequence_id: r.last_sequence_id,
             error_message: r.error_message.clone(),
-        }
-    });
+        });
 
     let response = DeqlInfoResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -226,7 +226,6 @@ pub async fn list_concepts(
                 .into_response();
         }
     };
-
     let total = names.len();
     let items: Vec<RegistryItemSummary> = names
         .into_iter()
@@ -408,7 +407,7 @@ pub async fn get_concept(
     // --- Fall back to in-memory DeReg if DB had no row ---
     let meta_json: Option<Value> = db_meta.or_else(|| {
         match concept_type.as_str() {
-            "aggregates" => dereg.get_aggregate(&name).map(|agg| {
+            "aggregates" => dereg.get_aggregate_ci(&name).map(|agg| {
                 let fields_out: Vec<FieldInfo> = agg
                     .fields
                     .as_ref()
@@ -428,7 +427,7 @@ pub async fn get_concept(
                     "fields": fields_out,
                 })
             }),
-            "commands" => dereg.get_command(&name).map(|cmd| {
+            "commands" => dereg.get_command_ci(&name).map(|cmd| {
                 let fields_out: Vec<FieldInfo> = cmd
                     .fields
                     .iter()
@@ -444,7 +443,7 @@ pub async fn get_concept(
                     "fields": fields_out,
                 })
             }),
-            "events" => dereg.get_event(&name).map(|evt| {
+            "events" => dereg.get_event_ci(&name).map(|evt| {
                 let fields_out: Vec<FieldInfo> = evt
                     .fields
                     .iter()
@@ -493,12 +492,18 @@ pub async fn get_concept(
             .into_response();
     }
 
+    let meta = meta_json.unwrap();
+    let full_sql = meta
+        .get("full_sql")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let response = RegistryItemDetail {
         name: name.clone(),
         concept_type: concept_type.clone(),
-        source: None,   // TODO: fetch from dereg_meta_store if needed
-        fields: vec![], // schema can be fetched via schema endpoint if required
-        meta: meta_json.unwrap(),
+        source: full_sql,
+        fields: vec![], // schema can be fetched via the /schema endpoint
+        meta,
     };
 
     (StatusCode::OK, Json(response)).into_response()
@@ -535,7 +540,7 @@ pub async fn get_concept_schema(
     let dereg = dereg_arc.read().await;
 
     let fields: Option<Vec<FieldInfo>> = match concept_type.as_str() {
-        "aggregates" => dereg.get_aggregate(&name).map(|agg| {
+        "aggregates" => dereg.get_aggregate_ci(&name).map(|agg| {
             agg.fields
                 .as_ref()
                 .map(|fs| {
@@ -549,7 +554,7 @@ pub async fn get_concept_schema(
                 })
                 .unwrap_or_default()
         }),
-        "commands" => dereg.get_command(&name).map(|cmd| {
+        "commands" => dereg.get_command_ci(&name).map(|cmd| {
             cmd.fields
                 .iter()
                 .map(|f| FieldInfo {
@@ -559,7 +564,7 @@ pub async fn get_concept_schema(
                 })
                 .collect()
         }),
-        "events" => dereg.get_event(&name).map(|evt| {
+        "events" => dereg.get_event_ci(&name).map(|evt| {
             evt.fields
                 .iter()
                 .map(|f| FieldInfo {

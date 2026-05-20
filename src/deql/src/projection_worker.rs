@@ -280,6 +280,7 @@ async fn upsert_meta_concepts<C: ConnectionTrait>(
         Some(model) => {
             let mut am = model.into_active_model();
             am.json_source = Set(eff.meta.clone());
+            am.full_sql = Set(eff.statement.clone());
             am.last_applied_id = Set(eff.id);
             am.is_dropped = Set(eff.is_tombstone);
             am.update(conn).await?;
@@ -290,6 +291,7 @@ async fn upsert_meta_concepts<C: ConnectionTrait>(
                 kind: Set(kind),
                 name: Set(name.to_string()),
                 json_source: Set(eff.meta.clone()),
+                full_sql: Set(eff.statement.clone()),
                 last_applied_id: Set(eff.id),
                 is_dropped: Set(eff.is_tombstone),
             };
@@ -318,6 +320,7 @@ async fn upsert_meta_aggregates<C: ConnectionTrait>(
         Some(model) => {
             let mut am = model.into_active_model();
             am.fields_json = Set(fields_json);
+            am.full_sql = Set(eff.statement.clone());
             am.last_applied_id = Set(eff.id);
             am.is_dropped = Set(eff.is_tombstone);
             am.update(conn).await?;
@@ -327,6 +330,7 @@ async fn upsert_meta_aggregates<C: ConnectionTrait>(
                 org_id: Set(eff.org_id.clone()),
                 name: Set(name.to_string()),
                 fields_json: Set(fields_json),
+                full_sql: Set(eff.statement.clone()),
                 last_applied_id: Set(eff.id),
                 is_dropped: Set(eff.is_tombstone),
             };
