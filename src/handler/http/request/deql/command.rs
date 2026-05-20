@@ -305,22 +305,10 @@ pub async fn execute(
                 ingest_events.push(serde_json::Value::Object(log_record));
             }
 
-            // Persist events to OpenObserve logs
+            // Persist events to OpenObserve logs into single per-org `deql_events` stream
             if !ingest_events.is_empty() {
-                let stream_name = format!(
-                    "deql_{}_{}",
-                    aggregate_str.to_lowercase(),
-                    if ingest_events.len() == 1 {
-                        ingest_events[0]
-                            .get("deql_event_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("event")
-                            .to_lowercase()
-                    } else {
-                        // Multiple event types in one response - use a generic suffix
-                        "events".to_string()
-                    }
-                );
+                // Use single per-org stream name as required by spec
+                let stream_name = "deql_events".to_string();
 
                 let bytes = bytes::Bytes::from(
                     serde_json::to_string(&ingest_events).unwrap_or_else(|_| "[]".to_string()),
