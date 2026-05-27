@@ -246,8 +246,14 @@ pub async fn ingest(
             pipeline_inputs.push(item);
             original_options.push(original_data);
         } else {
-            // JSON Flattening - use per-stream flatten level
-            let mut res = flatten::flatten_with_level(item, flatten_level)?;
+            // JSON Flattening - use per-stream flatten level.
+            // SS-04: skip flattening for deql_events — payload fields are already
+            // flat scalars and OO flattening must not rename or restructure them.
+            let mut res = if stream_name == "deql_events" {
+                item
+            } else {
+                flatten::flatten_with_level(item, flatten_level)?
+            };
 
             // handle timestamp
             let timestamp = match handle_timestamp(&mut res, min_ts, max_ts) {

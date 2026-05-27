@@ -11,12 +11,15 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
     use serde_json::json;
 
-    use crate::migration::DeqlMigrator;
-    use crate::store::dereg_meta_store;
-    use crate::store::projection_watermark;
-    use crate::store::projections::{
-        meta_aggregates, meta_commands, meta_concepts, meta_decisions, meta_events,
-        meta_inspections, meta_templates, meta_templates_instances,
+    use crate::{
+        migration::DeqlMigrator,
+        store::{
+            dereg_meta_store, projection_watermark,
+            projections::{
+                meta_aggregates, meta_commands, meta_concepts, meta_decisions, meta_events,
+                meta_inspections, meta_templates, meta_templates_instances,
+            },
+        },
     };
 
     async fn setup_db() -> DatabaseConnection {
@@ -99,6 +102,7 @@ mod tests {
             kind: Set("AGGREGATE".to_string()),
             name: Set("BankAccount".to_string()),
             json_source: Set(json!({"fields": []})),
+            full_sql: Set(String::new()),
             last_applied_id: Set(1),
             is_dropped: Set(false),
         };
@@ -118,6 +122,7 @@ mod tests {
             org_id: Set("org1".to_string()),
             name: Set("BankAccount".to_string()),
             fields_json: Set(json!([{"name": "id", "type": "UUID"}])),
+            full_sql: Set(String::new()),
             last_applied_id: Set(1),
             is_dropped: Set(false),
         };
@@ -238,6 +243,7 @@ mod tests {
             template_name: Set("AuditLog".to_string()),
             args_json: Set(json!({})),
             generated_names_json: Set(json!(["AuditLogEvents"])),
+            full_sql: Set(String::new()),
             last_applied_id: Set(1),
             is_dropped: Set(false),
         };
@@ -259,6 +265,7 @@ mod tests {
             org_id: Set("org1".to_string()),
             name: Set("Account".to_string()),
             fields_json: Set(json!([])),
+            full_sql: Set(String::new()),
             last_applied_id: Set(1),
             is_dropped: Set(false),
         };

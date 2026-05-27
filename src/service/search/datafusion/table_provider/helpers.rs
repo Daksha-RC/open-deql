@@ -1,3 +1,24 @@
+#[allow(dead_code)]
+pub fn compute_selection_stats(num_rows: usize, segment_ids: &BitVec) -> (usize, usize, usize) {
+    let row_group_count = num_rows.div_ceil(PARQUET_MAX_ROW_GROUP_SIZE);
+    let mut selected_row_group_count: usize = 0;
+    let mut selected_bits_count: usize = 0;
+
+    for (row_group_id, chunk) in segment_ids.chunks(PARQUET_MAX_ROW_GROUP_SIZE).enumerate() {
+        let remaining = num_rows - row_group_id * PARQUET_MAX_ROW_GROUP_SIZE;
+        if chunk.iter().take(remaining).any(|v| *v) {
+            selected_row_group_count += 1;
+            let sel_bits = chunk.iter().take(remaining).filter(|v| **v).count();
+            selected_bits_count += sel_bits;
+        }
+    }
+
+    (
+        row_group_count,
+        selected_row_group_count,
+        selected_bits_count,
+    )
+}
 // Copyright 2026 OpenObserve Inc.
 //
 // This program is free software: you can redistribute it and/or modify
@@ -13,7 +34,24 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+// Instrumentation: count files with access plans and last selected_rows_estimate (for test
+// assertions)
+static FILES_WITH_ACCESS_PLAN: AtomicUsize = AtomicUsize::new(0);
+static LAST_SELECTED_ROWS_ESTIMATE: AtomicUsize = AtomicUsize::new(0);
+
+#[cfg(test)]
+pub fn get_files_with_access_plan() -> usize {
+    FILES_WITH_ACCESS_PLAN.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+pub fn get_last_selected_rows_estimate() -> usize {
+    LAST_SELECTED_ROWS_ESTIMATE.load(Ordering::Relaxed)
+}
 
 use arrow_schema::{DataType, SchemaRef};
 use config::{FileFormat, PARQUET_MAX_ROW_GROUP_SIZE, TIMESTAMP_COL_NAME, meta::bitvec::BitVec};
@@ -51,6 +89,8 @@ pub fn generate_access_plan(
     }
 }
 
+/// Compute basic parquet selection stats from a BitVec for testing and metrics.
+
 fn generate_parquet_access_plan(
     file: &PartitionedFile,
     segment_ids: Arc<BitVec>,
@@ -77,6 +117,8 @@ fn generate_parquet_access_plan(
     }
 
     let mut access_plan = ParquetAccessPlan::new_none(row_group_count);
+    let mut selected_row_group_count: usize = 0;
+    let mut selected_bits_count: usize = 0;
     for (row_group_id, chunk) in segment_ids.chunks(PARQUET_MAX_ROW_GROUP_SIZE).enumerate() {
         let mut selection = Vec::new();
         let mut current_count = 0;
@@ -111,10 +153,27 @@ fn generate_parquet_access_plan(
         }
 
         if selection.iter().any(|s| !s.skip) {
+            // record that this row-group has some selected rows
             access_plan.scan(row_group_id);
             access_plan.scan_selection(row_group_id, RowSelection::from(selection));
+            selected_row_group_count += 1;
+            // estimate selected bits in this chunk
+            let remaining = num_rows - row_group_id * PARQUET_MAX_ROW_GROUP_SIZE;
+            let sel_bits = chunk.iter().take(remaining).filter(|v| **v).count();
+            selected_bits_count += sel_bits;
         }
     }
+
+    // Instrumentation: increment counter and record last selected_rows_estimate
+    FILES_WITH_ACCESS_PLAN.fetch_add(1, Ordering::Relaxed);
+    LAST_SELECTED_ROWS_ESTIMATE.store(selected_bits_count, Ordering::Relaxed);
+
+    log::info!(
+        "parquet access plan: file={:?}, row_group_count={row_group_count}, selected_row_groups={}, selected_rows_estimate={}",
+        file.path().as_ref(),
+        selected_row_group_count,
+        selected_bits_count
+    );
 
     log::debug!(
         "file path: file={:?}, row_group_count={row_group_count}, access_plan={access_plan:?}",
@@ -204,6 +263,27 @@ pub fn apply_combined_filter(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_access_plan_instrumentation() {
+        // Reset counters
+        super::FILES_WITH_ACCESS_PLAN.store(0, std::sync::atomic::Ordering::Relaxed);
+        super::LAST_SELECTED_ROWS_ESTIMATE.store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Use the pruning test to trigger access plan creation
+        test_parquet_pruning_reduces_scans();
+
+        // Assert counters were updated
+        assert!(
+            super::get_files_with_access_plan() > 0,
+            "files_with_access_plan should be incremented"
+        );
+        assert_eq!(
+            super::get_last_selected_rows_estimate(),
+            2,
+            "selected_rows_estimate should match selected bits"
+        );
+    }
     use arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
@@ -267,5 +347,285 @@ mod tests {
         let result = apply_projection(&schema, &diff_rules, None, exec);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().name(), "ProjectionExec");
+    }
+
+    #[test]
+    fn test_compute_selection_stats_simple() {
+        use config::meta::bitvec::BitVec;
+
+        let num_rows: usize = 10;
+        let mut bv = BitVec::repeat(false, num_rows);
+        // set a couple of selected rows
+        bv.set(2, true);
+        bv.set(7, true);
+
+        let (row_group_count, selected_row_groups, selected_bits) =
+            compute_selection_stats(num_rows, &bv);
+
+        assert_eq!(row_group_count, 1);
+        assert_eq!(selected_row_groups, 1);
+        assert_eq!(selected_bits, 2);
+    }
+
+    #[tokio::test]
+    async fn test_generate_access_plan_from_file_list() {
+        use config::meta::{bitvec::BitVec, stream::FileKey};
+        use datafusion::{
+            common::{Statistics, stats::Precision},
+            datasource::{listing::PartitionedFile, physical_plan::parquet::ParquetAccessPlan},
+        };
+
+        let trace_id = "trace_for_test";
+        let schema_key = "schemaA";
+        let filename = "file1.parquet";
+        let num_rows: usize = 10;
+
+        // prepare segment bitvec with two selected rows
+        let mut bv = BitVec::repeat(false, num_rows);
+        bv.set(2, true);
+        bv.set(7, true);
+
+        // create FileKey and register it in the storage file list
+        let mut fk = FileKey::new(
+            1,
+            "".to_string(),
+            filename.to_string(),
+            Default::default(),
+            false,
+        );
+        fk.with_segment_ids(bv.clone());
+        storage::file_list::set(trace_id, schema_key, "parquet", vec![fk]).await;
+
+        // build a PartitionedFile whose path matches the storage key format
+        let path = format!(
+            "{}/schema={}/format=parquet/$$/{}",
+            trace_id, schema_key, filename
+        );
+        let mut pf = PartitionedFile::new(path, 0u64);
+        pf.statistics = Some(Arc::new(
+            Statistics::default().with_num_rows(Precision::Exact(num_rows)),
+        ));
+
+        // generate access plan and assert it is a ParquetAccessPlan
+        let ap_opt = generate_access_plan(&pf);
+        assert!(ap_opt.is_some());
+        let ap = ap_opt.unwrap();
+        assert!(ap.as_ref().downcast_ref::<ParquetAccessPlan>().is_some());
+
+        // verify selection stats match expectations
+        let (rg_count, selected_rg_count, selected_bits) = compute_selection_stats(num_rows, &bv);
+        assert_eq!(selected_bits, 2);
+        assert_eq!(selected_rg_count, 1);
+        // basic sanity: at least one row group exists
+        assert!(rg_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_memtable_parquet_parity() {
+        use arrow::{
+            array::{Array, ArrayRef, StringArray},
+            record_batch::RecordBatch,
+        };
+        use arrow_schema::{Field, Schema};
+        use config::meta::{bitvec::BitVec, stream::FileKey};
+        use datafusion::{
+            common::{Statistics, stats::Precision},
+            datasource::{listing::PartitionedFile, physical_plan::parquet::ParquetAccessPlan},
+            physical_plan::ColumnarValue,
+            prelude::{col, lit},
+            scalar::ScalarValue,
+        };
+
+        // Build a tiny in-memory RecordBatch (memtable row set)
+        let values = vec!["a", "b", "a", "c", "a"];
+        let arr: ArrayRef = Arc::new(StringArray::from(values));
+        let schema = Arc::new(Schema::new(vec![Field::new("col", DataType::Utf8, false)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![arr.clone()]).unwrap();
+        let num_rows = batch.num_rows();
+
+        // Create a supported logical predicate: col = 'a'
+        let df_expr = col("col").eq(lit("a"));
+
+        // Duplicate conservative logical->physical conversion used by the memtable fast-path.
+        fn logical_to_physical(
+            expr: &datafusion::logical_expr::Expr,
+            schema: &arrow_schema::Schema,
+        ) -> std::result::Result<Arc<dyn PhysicalExpr>, datafusion::common::DataFusionError>
+        {
+            use datafusion::logical_expr::Expr as E;
+            match expr {
+                E::Column(c) => {
+                    let idx = schema.index_of(&c.name).map_err(|e| {
+                        datafusion::common::DataFusionError::Execution(e.to_string())
+                    })?;
+                    Ok(Arc::new(Column::new(&c.name, idx)))
+                }
+                E::Literal(sv, _opt) => Ok(Arc::new(Literal::new(sv.clone()))),
+                E::BinaryExpr(bin) => {
+                    let left = logical_to_physical(&bin.left, schema)?;
+                    let right = logical_to_physical(&bin.right, schema)?;
+                    Ok(Arc::new(BinaryExpr::new(left, bin.op, right)))
+                }
+                E::Cast(cast) => {
+                    let inner = logical_to_physical(&cast.expr, schema)?;
+                    Ok(Arc::new(CastExpr::new(inner, cast.data_type.clone(), None)))
+                }
+                E::Not(inner) => {
+                    let arg = logical_to_physical(inner, schema)?;
+                    Ok(Arc::new(
+                        datafusion::physical_plan::expressions::NotExpr::new(arg),
+                    ))
+                }
+                E::Alias(a) => logical_to_physical(&a.expr, schema),
+                E::InList(il) => {
+                    let left = logical_to_physical(&il.expr, schema)?;
+                    let mut vals: Vec<Arc<dyn PhysicalExpr>> = Vec::with_capacity(il.list.len());
+                    for e in &il.list {
+                        let v = logical_to_physical(e, schema)?;
+                        vals.push(v);
+                    }
+                    Ok(Arc::new(
+                        datafusion::physical_plan::expressions::InListExpr::try_new(
+                            left, vals, il.negated, schema,
+                        )?,
+                    ))
+                }
+                _ => Err(datafusion::common::DataFusionError::Execution(format!(
+                    "unsupported expr for physical conversion: {expr:?}"
+                ))),
+            }
+        }
+
+        // Convert to physical and evaluate against the RecordBatch
+        let phys = logical_to_physical(&df_expr, batch.schema().as_ref()).unwrap();
+        let cv = phys.evaluate(&batch).unwrap();
+
+        // Build a BitVec representing selected rows (memtable selection)
+        let mut bv = BitVec::repeat(false, num_rows);
+        match cv {
+            ColumnarValue::Array(arr) => {
+                let bool_arr = arr
+                    .as_any()
+                    .downcast_ref::<arrow::array::BooleanArray>()
+                    .expect("expected boolean array");
+                for i in 0..bool_arr.len() {
+                    if bool_arr.is_valid(i) && bool_arr.value(i) {
+                        bv.set(i, true);
+                    }
+                }
+            }
+            ColumnarValue::Scalar(s) => match s {
+                ScalarValue::Boolean(Some(true)) => {
+                    for i in 0..num_rows {
+                        bv.set(i, true);
+                    }
+                }
+                _ => {}
+            },
+        }
+
+        // Register the FileKey with the same BitVec and generate an access plan
+        let trace_id = "trace_parity_test";
+        let schema_key = "schemaParity";
+        let filename = "fparquet.parquet";
+
+        let mut fk = FileKey::new(
+            1,
+            "".to_string(),
+            filename.to_string(),
+            Default::default(),
+            false,
+        );
+        fk.with_segment_ids(bv.clone());
+        storage::file_list::set(trace_id, schema_key, "parquet", vec![fk]).await;
+
+        let path = format!(
+            "{}/schema={}/format=parquet/$$/{}",
+            trace_id, schema_key, filename
+        );
+        let mut pf = PartitionedFile::new(path, 0u64);
+        pf.statistics = Some(Arc::new(
+            Statistics::default().with_num_rows(Precision::Exact(num_rows)),
+        ));
+
+        let ap_opt = generate_access_plan(&pf);
+        assert!(ap_opt.is_some());
+        let ap_any = ap_opt.unwrap();
+        let ap = ap_any
+            .as_ref()
+            .downcast_ref::<ParquetAccessPlan>()
+            .expect("expected ParquetAccessPlan");
+
+        // Compare selection stats between computed BitVec and the produced plan
+        let (rg_count, selected_rg_count, _selected_bits_count) =
+            compute_selection_stats(num_rows, &bv);
+        // count scanned row groups in the plan
+        let mut plan_selected_rg = 0usize;
+        for i in 0..rg_count {
+            if ap.should_scan(i) {
+                plan_selected_rg += 1;
+            }
+        }
+
+        assert_eq!(selected_rg_count, plan_selected_rg);
+    }
+
+    #[tokio::test]
+    async fn test_parquet_pruning_reduces_scans() {
+        use config::meta::{bitvec::BitVec, stream::FileKey};
+        use datafusion::{
+            common::{Statistics, stats::Precision},
+            datasource::{listing::PartitionedFile, physical_plan::parquet::ParquetAccessPlan},
+        };
+
+        // Build a sparse selection across multiple row groups.
+        let row_group_count: usize = 4;
+        let num_rows: usize = PARQUET_MAX_ROW_GROUP_SIZE * row_group_count;
+
+        let mut bv = BitVec::repeat(false, num_rows);
+        // select a row in group 1 and group 3
+        bv.set(PARQUET_MAX_ROW_GROUP_SIZE * 1 + 10, true);
+        bv.set(PARQUET_MAX_ROW_GROUP_SIZE * 3 + 20, true);
+
+        // register in storage file list
+        let filename = "prune_test.parquet";
+        let mut fk = FileKey::new(
+            1,
+            "".to_string(),
+            filename.to_string(),
+            Default::default(),
+            false,
+        );
+        fk.with_segment_ids(bv.clone());
+        storage::file_list::set("trace_prune", "schemaP", "parquet", vec![fk]).await;
+
+        let path = format!(
+            "trace_prune/schema={}/format=parquet/$$/{}",
+            "schemaP", filename
+        );
+        let mut pf = PartitionedFile::new(path, 0u64);
+        pf.statistics = Some(Arc::new(
+            Statistics::default().with_num_rows(Precision::Exact(num_rows)),
+        ));
+
+        let ap_opt = generate_access_plan(&pf);
+        assert!(ap_opt.is_some());
+        let ap_any = ap_opt.unwrap();
+        let ap = ap_any
+            .as_ref()
+            .downcast_ref::<ParquetAccessPlan>()
+            .expect("expected ParquetAccessPlan");
+
+        let (rg_count, selected_rg_count, _selected_bits_count) =
+            compute_selection_stats(num_rows, &bv);
+        assert_eq!(rg_count, row_group_count);
+        assert_eq!(selected_rg_count, 2);
+
+        let plan_selected_rg = (0..rg_count).filter(|&i| ap.should_scan(i)).count();
+        assert_eq!(plan_selected_rg, selected_rg_count);
+        assert!(
+            plan_selected_rg < rg_count,
+            "pruning should reduce scanned row groups"
+        );
     }
 }

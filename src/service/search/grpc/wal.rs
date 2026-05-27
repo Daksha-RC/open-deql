@@ -15,7 +15,7 @@
 
 use std::{collections::HashSet, path::Path, sync::Arc};
 
-use arrow::array::{ArrayRef, new_null_array};
+use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array, new_null_array};
 use arrow_schema::{DataType, Field};
 use chrono::DateTime;
 use config::{
@@ -39,6 +39,8 @@ use config::{
 use datafusion::{
     arrow::{datatypes::Schema, record_batch::RecordBatch},
     execution::cache::cache_manager::FileStatisticsCache,
+    physical_plan::ColumnarValue,
+    scalar::ScalarValue,
 };
 use futures::StreamExt;
 use hashbrown::HashMap;
@@ -62,6 +64,13 @@ use crate::{
         },
     },
 };
+
+// `Condition` import removed: use `IndexCondition` and `to_physical_expr` instead.
+
+// NOTE: logical-expression conversion helper removed — memtable path now
+// evaluates `IndexCondition` directly using `to_physical_expr` and per-
+// RecordBatch evaluation for predicate pushdown. Keep the code here small
+// and prefer `IndexCondition::to_physical_expr` for physical evaluation.
 
 /// search in local WAL, which haven't been sync to object storage
 #[tracing::instrument(name = "service:search:wal:parquet", skip_all, fields(org_id = query.org_id, stream_name = query.stream_name))]
@@ -280,6 +289,10 @@ pub async fn search_memtable(
     }
 
     let start = std::time::Instant::now();
+    // Read raw memtable batches (unfiltered). We'll attempt to convert the
+    // IndexCondition -> PhysicalExpr and evaluate directly on merged
+    // RecordBatches below. This avoids creating a DataFusion SessionContext
+    // per-batch (Approach A: fast physical evaluation).
     let (mut memtable_ids, mut batches) = ingester::read_from_memtable(
         &query.org_id,
         query.stream_type.as_str(),
@@ -430,6 +443,126 @@ pub async fn search_memtable(
                 }
             })
             .collect::<Vec<_>>();
+
+        // If we have an index condition, try to evaluate it as a PhysicalExpr
+        // against each merged RecordBatch to perform in-memory predicate
+        // pushdown. Fall back to keeping the original batch on any error.
+        let record_batches = if let Some(ic) = index_condition.as_ref() {
+            let mut filtered_batches = Vec::with_capacity(record_batches.len());
+            'outer: for rb in record_batches.into_iter() {
+                // Build a physical expression for this batch schema
+                let phys = match ic.to_physical_expr(rb.schema().as_ref(), &fst_fields) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log::warn!(
+                            "[trace_id {}] to_physical_expr failed: {}",
+                            query.trace_id,
+                            e
+                        );
+                        // if we can't build a physical expr, keep the original batch
+                        filtered_batches.push(rb);
+                        continue 'outer;
+                    }
+                };
+
+                // Evaluate the expression
+                let cv = match phys.evaluate(&rb) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        log::warn!(
+                            "[trace_id {}] physical expr evaluate error: {}",
+                            query.trace_id,
+                            e
+                        );
+                        filtered_batches.push(rb);
+                        continue 'outer;
+                    }
+                };
+
+                match cv {
+                    ColumnarValue::Array(arr) => {
+                        // Expect a boolean mask per-row. If not boolean, keep batch.
+                        if arr.len() != rb.num_rows() {
+                            log::warn!(
+                                "[trace_id {}] predicate array length mismatch: {} vs {}",
+                                query.trace_id,
+                                arr.len(),
+                                rb.num_rows()
+                            );
+                            filtered_batches.push(rb);
+                            continue 'outer;
+                        }
+                        let bool_arr = match arr.as_any().downcast_ref::<BooleanArray>() {
+                            Some(b) => b,
+                            None => {
+                                log::warn!(
+                                    "[trace_id {}] predicate did not return a boolean array",
+                                    query.trace_id
+                                );
+                                filtered_batches.push(rb);
+                                continue 'outer;
+                            }
+                        };
+
+                        // collect selected indices (treat NULL as false)
+                        let mut sel: Vec<u32> = Vec::with_capacity(bool_arr.len());
+                        for i in 0..bool_arr.len() {
+                            if bool_arr.is_valid(i) && bool_arr.value(i) {
+                                sel.push(i as u32);
+                            }
+                        }
+                        if sel.is_empty() {
+                            // no rows match, skip
+                            continue 'outer;
+                        }
+                        let indices = Arc::new(UInt32Array::from(sel)) as arrow::array::ArrayRef;
+                        // build filtered columns
+                        let mut cols: Vec<arrow::array::ArrayRef> =
+                            Vec::with_capacity(rb.num_columns());
+                        for c in rb.columns() {
+                            match arrow::compute::take(c.as_ref(), &indices, None) {
+                                Ok(new_col) => cols.push(new_col),
+                                Err(e) => {
+                                    log::warn!("[trace_id {}] take() error: {}", query.trace_id, e);
+                                    // on error, keep original batch
+                                    filtered_batches.push(rb);
+                                    continue 'outer;
+                                }
+                            }
+                        }
+                        if let Ok(new_rb) = RecordBatch::try_new(rb.schema().clone(), cols) {
+                            if new_rb.num_rows() > 0 {
+                                filtered_batches.push(new_rb);
+                            }
+                        } else {
+                            filtered_batches.push(rb);
+                        }
+                    }
+                    ColumnarValue::Scalar(s) => {
+                        match s {
+                            ScalarValue::Boolean(Some(true)) => {
+                                // keep all rows
+                                filtered_batches.push(rb);
+                            }
+                            // false or null -> drop all rows
+                            ScalarValue::Boolean(_) => {
+                                continue 'outer;
+                            }
+                            _ => {
+                                log::warn!(
+                                    "[trace_id {}] predicate scalar not boolean",
+                                    query.trace_id
+                                );
+                                filtered_batches.push(rb);
+                            }
+                        }
+                    }
+                }
+            }
+            filtered_batches
+        } else {
+            record_batches
+        };
 
         log::info!(
             "[trace_id {}] wal->mem->search: merge batches for group {i}, batches {batch_num}, took {} ms",

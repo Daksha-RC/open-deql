@@ -41,12 +41,19 @@ pub struct DeqlInfoResponse {
     pub version: String,
     pub readonly: bool,
     pub counts: ConceptCounts,
-    pub last_stream_seq: Option<i64>,
+    #[serde(rename = "_offset_tip")]
+    pub offset_tip: Option<i64>,
     /// In-memory rehydrate watermark (sequence id of last successful rehydrate)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_rehydrate_revision",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rehydrate_revision: Option<i64>,
     /// Most recent rehydrate result (success or failure with timestamp & message)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "_last_rehydrate_result",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub last_rehydrate_result: Option<LastRehydrateResult>,
 }
 
@@ -57,7 +64,8 @@ pub struct LastRehydrateResult {
     pub timestamp: String, // ISO 8601 UTC
     pub elapsed_ms: u64,
     pub rows_processed: i64,
-    pub last_sequence_id: Option<i64>,
+    #[serde(rename = "_offset")]
+    pub offset: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
 }
@@ -161,20 +169,76 @@ pub async fn info(Path(org_id): Path<String>) -> Response {
             timestamp: r.end_time.to_rfc3339(),
             elapsed_ms: r.elapsed_ms,
             rows_processed: r.rows_processed,
-            last_sequence_id: r.last_sequence_id,
+            offset: r.last_sequence_id,
             error_message: r.error_message.clone(),
         });
+    drop(rehydrate_state_map);
+
+    // Lazy-warm _offset_tip: check in-memory map first, then cold-start from storage
+    let tip_key = format!("{}/deql_events", &org_id);
+    let offset_tip = match state.offset_tip_map.get(&tip_key) {
+        Some(v) => Some(v.load(std::sync::atomic::Ordering::Relaxed)),
+        None => {
+            // Cold-start: query MAX(_offset) from storage
+            let cold_tip = query_max_offset(state, &org_id).await;
+            if let Some(v) = cold_tip {
+                state
+                    .offset_tip_map
+                    .entry(tip_key)
+                    .or_insert_with(|| std::sync::atomic::AtomicI64::new(v))
+                    .fetch_max(v, std::sync::atomic::Ordering::Relaxed);
+            }
+            cold_tip
+        }
+    };
 
     let response = DeqlInfoResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         readonly: false,
         counts,
-        last_stream_seq: None, // TODO: fetch from dereg_meta_store
+        offset_tip,
         rehydrate_revision,
         last_rehydrate_result: last_result,
     };
 
     (StatusCode::OK, Json(response)).into_response()
+}
+
+/// Cold-start query: SELECT MAX(_offset) FROM deql_events for the given org.
+/// Returns None on empty stream or query failure.
+async fn query_max_offset(_state: &super::super::dereg::DeqlState, org_id: &str) -> Option<i64> {
+    use config::meta::stream::StreamType;
+
+    let sql = "SELECT MAX(_offset) as max_off FROM deql_events".to_string();
+    let now = config::utils::time::now_micros();
+    const TWO_YEARS_MICROS: i64 = 2 * 365 * 24 * 3600 * 1_000_000;
+
+    let req = config::meta::search::Request {
+        query: config::meta::search::Query {
+            sql,
+            start_time: now - TWO_YEARS_MICROS,
+            end_time: now + 3_600_000_000,
+            size: 1,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    match crate::service::search::search(
+        &config::ider::uuid(),
+        org_id,
+        StreamType::Logs,
+        None,
+        &req,
+    )
+    .await
+    {
+        Ok(resp) => resp
+            .hits
+            .first()
+            .and_then(|hit| hit.get("max_off").and_then(|v| v.as_i64())),
+        Err(_) => None,
+    }
 }
 
 /// GET /{org}/deql/registry/{type} — list registered concepts (paginated)

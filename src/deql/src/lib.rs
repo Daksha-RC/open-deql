@@ -1,9 +1,12 @@
+pub mod agg_provider;
 pub mod allocator;
 pub mod core;
 pub mod deql_state;
 pub mod dereg;
 pub mod error;
+pub mod event_table_provider;
 pub mod executor;
+pub mod guard_translator;
 pub mod meta_json;
 pub mod metrics;
 #[cfg(test)]
@@ -20,6 +23,7 @@ pub mod rehydrate_impl;
 pub mod replay;
 pub mod schema_provider;
 pub mod store;
+pub mod stream_schema;
 pub mod udaf;
 pub mod validator;
 pub mod worker_registry;
@@ -31,6 +35,7 @@ pub use core::{ConfigPair, ConfigValue, DeqlType, FieldDef};
 pub use deql_state::get_deql_state;
 pub use dereg::{DeReg, DropResult, RegistrationResult};
 pub use error::{ApiError, ApiErrorBody, ConceptKind, DeRegError, ServiceError};
+pub use event_table_provider::DeqlSearchBackend;
 pub use executor::{
     EmittedEvent, ExecutionError, ExecutionRejection, ExecutionResult, ExecutionSuccess,
     execute_command,

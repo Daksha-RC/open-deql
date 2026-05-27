@@ -5,10 +5,7 @@
 
 pub mod rehydrate;
 
-#[cfg(feature = "deql")]
-pub use rehydrate::trigger_rehydrate;
-
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json,
@@ -17,22 +14,22 @@ use axum::{
     http::{Request, StatusCode, header::CONTENT_TYPE},
     response::{IntoResponse, Response},
 };
+use dashmap::DashMap;
 use infra::db::{ORM_CLIENT, connect_to_orm};
 use o2_deql::{
-    allocator, meta_json,
+    OrgRehydrateStateMap, allocator, meta_json,
     metrics::collect_metrics,
     org_registry::OrgDeRegMap,
     parser::{error::Severity, parser::parse},
     replay::{ReplayRefreshParams, replay_refresh, replay_validate, validate_definitions},
     worker_registry::{OrgLockMap, WorkerRegistry},
-    OrgRehydrateStateMap,
 };
+#[cfg(feature = "deql")]
+pub use rehydrate::trigger_rehydrate;
 use sea_orm::TransactionTrait;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
-use tokio::sync::RwLock;
-use tokio::sync::OnceCell;
+use tokio::sync::{OnceCell, RwLock};
 
 const MAX_BODY_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
 
@@ -43,6 +40,8 @@ pub struct DeqlState {
     pub lock_map: OrgLockMap,
     /// Per-org rehydrate watermarks and last results
     pub rehydrate_state_map: OrgRehydrateStateMap,
+    /// Per-stream offset tip: key = "{org_id}/deql_events", value = highest _offset seen
+    pub offset_tip_map: DashMap<String, std::sync::atomic::AtomicI64>,
 }
 
 impl DeqlState {
@@ -52,6 +51,7 @@ impl DeqlState {
             worker_registry: WorkerRegistry::new(),
             lock_map: OrgLockMap::new(),
             rehydrate_state_map: Arc::new(RwLock::new(HashMap::new())),
+            offset_tip_map: DashMap::new(),
         }
     }
 }
@@ -398,6 +398,15 @@ pub async fn definitions(Path(org_id): Path<String>, req: Request<Body>) -> Resp
     {
         let mut live = dereg_lock.write().await;
         *live = temp_dereg;
+    }
+
+    // Update the deql_events stream schema to include any new payload fields
+    // from newly registered aggregates/events.
+    {
+        let dereg_read = dereg_lock.read().await;
+        if let Err(e) = dereg_read.register_stream_schema(&org_id).await {
+            tracing::error!(org_id = %org_id, error = ?e, "Failed to update deql_events schema after registration");
+        }
     }
 
     (StatusCode::CREATED, Json(json!({ "results": results }))).into_response()

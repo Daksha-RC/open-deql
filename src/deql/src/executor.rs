@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 
 use crate::{
     dereg::DeReg,
+    event_table_provider::DeqlSearchBackend,
     parser::ast::{CreateDecision, EmitItem, Execute, FieldAnnotation},
     schema_provider::DeQlSchemaProvider,
 };
@@ -158,6 +159,43 @@ impl std::error::Error for ExecutionError {}
 pub enum ExecutionResult {
     Success(ExecutionSuccess),
     Rejected(ExecutionRejection),
+}
+
+// ============================================================================
+// DeQL → OpenObserve column name rewriting
+// ============================================================================
+
+/// Rewrite DeQL-lang canonical column names to the prefixed names used by the
+/// OpenObserve virtual-table schema.
+///
+/// Handles two classes of mismatch between the deql-cli prototype and OO:
+///
+/// 1. **`data.` prefix** — the prototype stored payload in a nested `data` object, so STATE AS SQL
+///    uses `data.grade`, `data.balance`, etc.  In OO the payload fields are stored flat, so
+///    `data.grade` → `grade`.
+///
+/// 2. **Reserved column prefixes** — the prototype used bare `stream_id` and `event_type`; the OO
+///    virtual table prefixes them with `deql_` to avoid collisions with user payload fields.
+///
+/// Word-boundary matching prevents false-positive rewrites inside longer
+/// identifiers such as `my_stream_id` or `deql_event_type`.
+fn rewrite_deql_column_names(sql: &str) -> String {
+    // 1. Strip `data.` prefix from payload field references (e.g. data.grade → grade). Only matches
+    //    bare `data.`, not `my_data.` or `some_data.`. The SQL is reconstructed from tokens joined
+    //    with spaces, so `data.grade` appears as `data . grade` — allow optional whitespace around
+    //    the dot.
+    let re_data_prefix = Regex::new(r"\bdata\s*\.\s*([a-zA-Z_][a-zA-Z0-9_]*)").unwrap();
+    let sql = re_data_prefix.replace_all(sql, "$1");
+    // 2. Rewrite reserved virtual-table column names.
+    let re_stream = Regex::new(r"\bstream_id\b").unwrap();
+    let re_event_type = Regex::new(r"\bevent_type\b").unwrap();
+    let re_seq = Regex::new(r"\bseq\b").unwrap();
+    let re_event_id = Regex::new(r"\bevent_id\b").unwrap();
+    let sql = re_stream.replace_all(&sql, "_aggregate_id");
+    let sql = re_event_type.replace_all(&sql, "_event_type");
+    let sql = re_seq.replace_all(&sql, "_offset");
+    let sql = re_event_id.replace_all(&sql, "_event_id");
+    sql.into_owned()
 }
 
 // ============================================================================
@@ -316,27 +354,23 @@ async fn evaluate_guard(
     }
 
     // If state_row is empty, replace remaining bare identifiers with NULL
-    // (except SQL keywords) to enable `WHERE exists IS NULL` patterns
+    // (except SQL keywords) to enable `WHERE exists IS NULL` patterns.
+    // Skip content inside single-quoted string literals to avoid mangling
+    // bound parameter values like 'A3' → 'NULL'.
     if state_row.is_empty() {
-        let re = regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b").unwrap();
-        let sql_keywords = [
-            "IS", "NULL", "NOT", "AND", "OR", "TRUE", "FALSE", "CASE", "WHEN", "THEN", "ELSE",
-            "END", "IN", "BETWEEN", "LIKE", "AS", "SELECT",
-        ];
-        final_sql = re
-            .replace_all(&final_sql, |caps: &regex::Captures| {
-                let word = &caps[1];
-                if sql_keywords.iter().any(|&kw| kw.eq_ignore_ascii_case(word)) {
-                    word.to_string()
-                } else {
-                    "NULL".to_string()
-                }
-            })
-            .to_string();
+        final_sql = replace_bare_identifiers_with_null(&final_sql);
     }
 
     // Execute: SELECT <expr> AS guard_result
     let query = format!("SELECT {final_sql} AS guard_result");
+    tracing::debug!(
+        decision = %decision_name,
+        guard_sql = %guard_sql,
+        final_query = %query,
+        state_empty = state_row.is_empty(),
+        "Guard evaluation"
+    );
+
     let df = ctx
         .sql(&query)
         .await
@@ -368,6 +402,82 @@ async fn evaluate_guard(
         ScalarValue::Boolean(Some(b)) => Ok(b),
         _ => Ok(false),
     }
+}
+
+/// Replace bare SQL identifiers with NULL, skipping single-quoted string
+/// literals and SQL keywords. Used when state_row is empty to produce a
+/// valid SQL expression (all unknown columns → NULL).
+fn replace_bare_identifiers_with_null(sql: &str) -> String {
+    // Tokenize respecting single-quoted strings: split into alternating
+    // segments of "outside quotes" and "inside quotes (including delimiters)".
+    let sql_keywords = [
+        "IS", "NULL", "NOT", "AND", "OR", "TRUE", "FALSE", "CASE", "WHEN", "THEN", "ELSE", "END",
+        "IN", "BETWEEN", "LIKE", "AS", "SELECT",
+    ];
+    let re = regex::Regex::new(r"\b([a-zA-Z_][a-zA-Z0-9_]*)\b").unwrap();
+
+    let mut result = String::with_capacity(sql.len());
+    let mut in_quote = false;
+    let mut segment_start = 0;
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            if !in_quote {
+                // Process the unquoted segment before this quote
+                let segment = &sql[segment_start..i];
+                let replaced = re.replace_all(segment, |caps: &regex::Captures| {
+                    let word = &caps[1];
+                    if sql_keywords.iter().any(|&kw| kw.eq_ignore_ascii_case(word)) {
+                        word.to_string()
+                    } else {
+                        "NULL".to_string()
+                    }
+                });
+                result.push_str(&replaced);
+                segment_start = i;
+                in_quote = true;
+                i += 1;
+            } else {
+                // Check for escaped quote ('')
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    // Skip both quotes — stay in_quote
+                    i += 2;
+                    continue;
+                }
+                // End of quoted string — include the closing quote
+                let segment = &sql[segment_start..=i];
+                result.push_str(segment);
+                segment_start = i + 1;
+                in_quote = false;
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    // Process remaining segment
+    if segment_start < sql.len() {
+        let segment = &sql[segment_start..];
+        if in_quote {
+            // Unterminated quote — pass through as-is
+            result.push_str(segment);
+        } else {
+            let replaced = re.replace_all(segment, |caps: &regex::Captures| {
+                let word = &caps[1];
+                if sql_keywords.iter().any(|&kw| kw.eq_ignore_ascii_case(word)) {
+                    word.to_string()
+                } else {
+                    "NULL".to_string()
+                }
+            });
+            result.push_str(&replaced);
+        }
+    }
+
+    result
 }
 
 // ============================================================================
@@ -448,10 +558,16 @@ async fn evaluate_emit_expressions(
 ///
 /// Takes ownership of the DeReg lock acquisition to satisfy REQ-CMD-010:
 /// releases the lock before any async I/O operations.
+///
+/// `search_backend` — optional OO search backend injected by the main crate.
+/// When present, STATE AS queries can resolve `$Events` and `$Agg` tables
+/// (`IMPL-03`, `IMPL-04`). When `None`, those tables resolve to `Ok(None)` so
+/// guard-free decisions still work.
 pub async fn execute_command(
     execute: &Execute,
     dereg: Arc<RwLock<DeReg>>,
     org_id: &str,
+    search_backend: Option<Arc<dyn DeqlSearchBackend>>,
 ) -> Result<ExecutionResult, ExecutionError> {
     let command_name = execute.command.node.clone();
     let command_name_lower = command_name.to_lowercase();
@@ -500,8 +616,14 @@ pub async fn execute_command(
         (decision_name, decision, command_def, event_defs)
     };
 
-    // Build DataFusion context for query execution
-    let schema_provider = DeQlSchemaProvider::new(dereg.clone(), org_id.to_string());
+    // Build DataFusion context for query execution.
+    // IMPL-03/04: inject search backend so STATE AS can resolve $Events/$Agg.
+    let schema_provider = match search_backend {
+        Some(backend) => {
+            DeQlSchemaProvider::with_search_backend(dereg.clone(), org_id.to_string(), backend)
+        }
+        None => DeQlSchemaProvider::new(dereg.clone(), org_id.to_string()),
+    };
     let ctx = schema_provider.build_state_context().await?;
 
     // Extract and validate bind params
@@ -513,10 +635,23 @@ pub async fn execute_command(
     // Execute STATE AS if present
     let state_row = if let Some(ref state_sql) = decision.state_as {
         let substituted = substitute_bind_params(&state_sql.sql, &params, "STATE AS")?;
+        let substituted = rewrite_deql_column_names(&substituted);
+        tracing::debug!(
+            decision = %decision.name.node,
+            sql = %substituted,
+            "STATE AS executing rewritten SQL"
+        );
         execute_state_query(&substituted, &ctx, &decision.name.node).await?
     } else {
         HashMap::new()
     };
+
+    tracing::debug!(
+        decision = %decision.name.node,
+        state_row_empty = state_row.is_empty(),
+        state_keys = ?state_row.keys().collect::<Vec<_>>(),
+        "STATE AS result"
+    );
 
     // Evaluate branches
     let mut emitted_events = Vec::new();
@@ -641,4 +776,140 @@ async fn execute_state_query(
     }
 
     Ok(state_row)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_deql_column_names;
+
+    #[test]
+    fn test_rewrite_stream_id_to_aggregate_id() {
+        let sql = "SELECT stream_id AS employee_id, LAST(grade) AS grade \
+                   FROM dereg.\"Employee$Events\" WHERE stream_id = 'EMP-001' \
+                   GROUP BY stream_id";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert!(
+            !rewritten.contains(" stream_id"),
+            "bare stream_id should be rewritten"
+        );
+        assert!(
+            rewritten.contains("_aggregate_id"),
+            "_aggregate_id should appear after rewrite"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_event_type() {
+        let sql = "SELECT event_type, LAST(name) AS name FROM dereg.\"Employee$Events\"";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert!(!rewritten.contains(" event_type,"));
+        assert!(rewritten.contains("_event_type"));
+    }
+
+    #[test]
+    fn test_rewrite_seq_to_offset() {
+        let sql = "SELECT * FROM dereg.\"Employee$Events\" ORDER BY seq ASC";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert!(!rewritten.contains(" seq "));
+        assert!(rewritten.contains("_offset"));
+    }
+
+    #[test]
+    fn test_rewrite_event_id() {
+        let sql = "SELECT event_id FROM dereg.\"Employee$Events\" WHERE event_id = 'abc'";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert!(!rewritten.contains(" event_id"));
+        assert!(rewritten.contains("_event_id"));
+    }
+
+    #[test]
+    fn test_rewrite_does_not_double_rewrite_already_prefixed() {
+        // If somehow the SQL already has _aggregate_id it should not be altered.
+        let sql = "SELECT _aggregate_id FROM dereg.\"Employee$Events\"";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert_eq!(rewritten, sql, "already-prefixed name must not be altered");
+    }
+
+    #[test]
+    fn test_rewrite_data_prefix_stripped() {
+        // Compact form (direct string usage)
+        let sql = "SELECT data.grade AS grade, LAST(data.name) AS name \
+                   FROM dereg.\"Employee$Events\" WHERE deql_stream_id = 'EMP-001' \
+                   GROUP BY deql_stream_id";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert!(
+            !rewritten.contains("data."),
+            "data. prefix should be stripped; got: {rewritten}"
+        );
+        assert!(rewritten.contains("grade"), "field name must survive");
+        assert!(rewritten.contains("name"), "field name must survive");
+    }
+
+    #[test]
+    fn test_rewrite_data_prefix_spaced_form() {
+        // Token-joined form: the parser reconstructs SQL as `data . grade`
+        let sql = "SELECT data . grade AS grade , LAST ( data . name ) AS name \
+                   FROM dereg . \"Employee$Events\" WHERE deql_stream_id = 'EMP-001' \
+                   GROUP BY deql_stream_id";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert!(
+            !rewritten.contains("data . ") && !rewritten.contains("data."),
+            "spaced data . prefix should be stripped; got: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn test_rewrite_data_prefix_does_not_affect_other_qualified_names() {
+        // `mydata.grade` or `some_data.x` must NOT be rewritten.
+        let sql = "SELECT mydata.grade, some_data.x FROM t";
+        let rewritten = rewrite_deql_column_names(sql);
+        assert_eq!(rewritten, sql, "only bare `data.` must be stripped");
+    }
+
+    #[test]
+    fn test_replace_bare_identifiers_preserves_string_literals() {
+        use super::replace_bare_identifiers_with_null;
+
+        // Simulates guard: `'A3' <> current_grade` when state_row is empty.
+        // The 'A3' inside quotes must NOT be replaced.
+        let sql = "'A3' <> current_grade";
+        let result = replace_bare_identifiers_with_null(sql);
+        assert_eq!(result, "'A3' <> NULL", "got: {result}");
+    }
+
+    #[test]
+    fn test_replace_bare_identifiers_preserves_keywords() {
+        use super::replace_bare_identifiers_with_null;
+
+        let sql = "status IS NOT NULL AND active = TRUE";
+        let result = replace_bare_identifiers_with_null(sql);
+        assert!(result.contains("IS"), "IS keyword must survive");
+        assert!(result.contains("NOT"), "NOT keyword must survive");
+        assert!(result.contains("NULL"), "NULL keyword must survive");
+        assert!(result.contains("AND"), "AND keyword must survive");
+        assert!(result.contains("TRUE"), "TRUE keyword must survive");
+        // `status` and `active` should become NULL
+        assert!(
+            !result.contains("status"),
+            "bare identifier 'status' should be NULL"
+        );
+        assert!(
+            !result.contains("active"),
+            "bare identifier 'active' should be NULL"
+        );
+    }
+
+    #[test]
+    fn test_replace_bare_identifiers_escaped_quotes() {
+        use super::replace_bare_identifiers_with_null;
+
+        // SQL with escaped single quote: WHERE name = 'O''Brien'
+        let sql = "'O''Brien' <> current_name";
+        let result = replace_bare_identifiers_with_null(sql);
+        assert!(
+            result.contains("O''Brien"),
+            "escaped quote content must be preserved; got: {result}"
+        );
+        assert!(result.contains("NULL"), "current_name should become NULL");
+    }
 }

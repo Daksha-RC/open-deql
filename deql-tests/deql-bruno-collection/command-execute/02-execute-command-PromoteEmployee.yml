@@ -1,0 +1,22 @@
+info:
+  name: 02-execute-command-PromoteEmployee
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/deql/Employee/PromoteEmployee"
+  body:
+    type: json
+    data: |-
+      {
+        "employee_id": "EMP12345",
+        "new_grade": "A2"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
