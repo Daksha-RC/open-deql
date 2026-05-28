@@ -261,6 +261,8 @@ use crate::{common::meta, handler::http::request};
         request::deql::introspect::get_concept,
         request::deql::introspect::get_concept_schema,
         request::deql::introspect::list_routes,
+        // DeQL aggregate state query (R3.4)
+        request::deql::agg_query::get_agg,
     ),
     components(
         schemas(

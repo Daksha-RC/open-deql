@@ -15,14 +15,9 @@ rustflags = ["-C", "target-feature=+aes,+neon"]
 # [target.aarch64-apple-darwin]
 # rustflags = ["-C", "link-arg=-Wl,-ld_new"]
 
-# [target.aarch64-apple-darwin]
-# linker = "clang"
-# rustflags = [
-#     "-C",
-#     "link-arg=-fuse-ld=mold",
-#     "-C",
-#     "link-arg=-Wl,-dead_strip", # Optional: keeps the binary smaller
-# ]
+[target.aarch64-apple-darwin]
+linker = "/opt/homebrew/opt/llvm/bin/clang"
+rustflags = ["-C", "link-arg=-fuse-ld=/opt/homebrew/opt/lld/bin/ld64.lld"]
 
 
 # [target.aarch64-apple-darwin]

@@ -572,6 +572,11 @@ pub fn deql_routes() -> Router {
             "/{org_id}/deql/registry/{concept_type}/{name}/schema",
             get(deql::introspect::get_concept_schema),
         )
+        // DeQL aggregate state query
+        .route(
+            "/{org_id}/deql/aggregates/{agg}/agg",
+            get(deql::agg_query::get_agg),
+        )
         // DeQL command execution
         .route(
             "/{org_id}/deql/{aggregate}/{commandname}",

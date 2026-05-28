@@ -1,0 +1,22 @@
+info:
+  name: 02-query-agg-Employee
+  type: http
+  seq: 3
+
+http:
+  method: GET
+  url: "{{baseUrl}}/{{deql_org_id}}/deql/Employee/events"
+  body:
+    type: json
+    data: |-
+      {
+        "employee_id": "EMP200",
+        "new_grade": "A5"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
