@@ -107,7 +107,6 @@ pub(crate) mod cache;
 pub(crate) mod cardinality;
 pub(crate) mod cluster;
 pub(crate) mod datafusion;
-pub(crate) mod deql_guard_injector;
 pub(crate) mod grpc;
 pub(crate) mod grpc_search;
 pub(crate) mod index;

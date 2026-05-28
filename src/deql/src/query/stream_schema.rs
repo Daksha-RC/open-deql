@@ -53,7 +53,7 @@ fn metadata_fields() -> Vec<Field> {
         Field::new("_aggregate_type", DataType::Utf8, false),
         Field::new("_aggregate_id", DataType::Utf8, false),
         Field::new("_aggregate_version", DataType::Int64, false),
-        Field::new("_offset", DataType::Int64, false),
+        Field::new("_offset", DataType::Utf8, false),
         Field::new("_timestamp", DataType::Int64, false),
     ]
 }
@@ -372,10 +372,10 @@ mod tests {
             schema.field_with_name("name").unwrap().data_type(),
             &DataType::Utf8
         );
-        // _offset: fixed Int64 (non-nullable)
+        // _offset: fixed Utf8 (non-nullable, string-serialized snowflake ID)
         assert_eq!(
             schema.field_with_name("_offset").unwrap().data_type(),
-            &DataType::Int64
+            &DataType::Utf8
         );
     }
 

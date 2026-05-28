@@ -587,7 +587,10 @@ pub async fn cache() -> Result<(), anyhow::Error> {
     for (i, (key, val)) in items.into_iter().enumerate() {
         let key = key.strip_prefix(db_key).unwrap();
         let columns = key.split('/').take(4).collect::<Vec<_>>();
-        assert_eq!(columns.len(), 4, "BUG");
+        if columns.len() != 4 {
+            log::warn!("Skipping malformed schema key (expected 4 segments, got {}): {key}", columns.len());
+            continue;
+        }
         let item_key = format!("{}/{}/{}", columns[0], columns[1], columns[2]);
         let start_dt: i64 = columns[3].parse().unwrap();
         let entry = schemas.entry(item_key).or_insert(Vec::new());

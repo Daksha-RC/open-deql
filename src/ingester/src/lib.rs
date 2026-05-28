@@ -42,8 +42,10 @@ pub use wal::collect_wal_parquet_metrics;
 pub use writer::{
     Writer, check_disk_circuit_breaker, check_memory_circuit_breaker, check_memtable_size,
     flush_all, get_max_writer_seq_id, get_writer, read_from_memtable,
-    read_from_memtable_with_filter,
 };
+
+#[cfg(feature = "deql")]
+pub use writer::read_from_memtable_with_filter;
 
 use crate::errors::OpenDirSnafu;
 

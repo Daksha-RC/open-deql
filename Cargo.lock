@@ -5300,6 +5300,7 @@ dependencies = [
  "infra",
  "itertools 0.14.0",
  "log",
+ "o2-deql",
  "parquet",
  "serde",
  "serde_json",
@@ -6653,6 +6654,8 @@ dependencies = [
 name = "o2-deql"
 version = "0.1.0"
 dependencies = [
+ "arrow",
+ "arrow-schema",
  "async-trait",
  "chrono",
  "config",
@@ -6660,6 +6663,7 @@ dependencies = [
  "http 1.4.0",
  "infra",
  "lazy_static",
+ "log",
  "parking_lot 0.12.5",
  "proptest",
  "regex",

@@ -38,7 +38,7 @@ profiling = [
 ]
 pyroscope = ["dep:pyroscope", "dep:pyroscope_pprofrs"]
 tokio-console = ["dep:console-subscriber"]
-deql = ["dep:o2-deql"]
+deql = ["dep:o2-deql", "ingester/deql"]
 
 [profile.release]
 debug = false

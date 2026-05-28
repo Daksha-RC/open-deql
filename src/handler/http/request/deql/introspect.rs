@@ -64,10 +64,20 @@ pub struct LastRehydrateResult {
     pub timestamp: String, // ISO 8601 UTC
     pub elapsed_ms: u64,
     pub rows_processed: i64,
-    #[serde(rename = "_offset")]
+    #[serde(rename = "_offset", serialize_with = "serialize_offset_as_string")]
     pub offset: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
+}
+
+fn serialize_offset_as_string<S>(value: &Option<i64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(v) => serializer.serialize_str(&v.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 /// Counts of registered concepts.

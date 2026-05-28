@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+arrow.workspace = true
+arrow-schema.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 config.workspace = true
@@ -12,6 +14,7 @@ datafusion.workspace = true
 infra.workspace = true
 http.workspace = true
 lazy_static = "1.5"
+log.workspace = true
 parking_lot.workspace = true
 regex.workspace = true
 sea-orm.workspace = true

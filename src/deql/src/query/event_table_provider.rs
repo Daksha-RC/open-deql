@@ -331,7 +331,7 @@ mod tests {
             Field::new("_aggregate_type", DataType::Utf8, false),
             Field::new("_aggregate_id", DataType::Utf8, false),
             Field::new("_aggregate_version", DataType::Int64, false),
-            Field::new("_offset", DataType::Int64, false),
+            Field::new("_offset", DataType::Utf8, false),
             Field::new("_timestamp", DataType::Int64, false),
             Field::new("name", DataType::Utf8, true),
         ]))
@@ -500,14 +500,14 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("name", DataType::Utf8, true),
             Field::new("salary", DataType::Utf8, true),
-            Field::new("_offset", DataType::Int64, false),
+            Field::new("_offset", DataType::Utf8, false),
         ]));
         let batch = RecordBatch::try_new(
             schema.clone(),
             vec![
                 Arc::new(StringArray::from(vec!["Alice", "Bob"])) as _,
                 Arc::new(StringArray::from(vec!["50000", "60000"])) as _,
-                Arc::new(Int64Array::from(vec![1i64, 2i64])) as _,
+                Arc::new(StringArray::from(vec!["1", "2"])) as _,
             ],
         )
         .unwrap();

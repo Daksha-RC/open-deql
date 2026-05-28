@@ -428,7 +428,7 @@ mod tests {
 
         let schema = Arc::new(Schema::new(vec![
             Field::new("_aggregate_id", DataType::Utf8, false),
-            Field::new("_offset", DataType::Int64, false),
+            Field::new("_offset", DataType::Utf8, false),
             Field::new("grade", DataType::Utf8, true),
             Field::new("new_grade", DataType::Utf8, true),
         ]));
@@ -438,7 +438,7 @@ mod tests {
             vec![
                 Arc::new(StringArray::from(vec!["EMP102"]))
                     as Arc<dyn datafusion::arrow::array::Array>,
-                Arc::new(Int64Array::from(vec![100i64]))
+                Arc::new(StringArray::from(vec!["100"]))
                     as Arc<dyn datafusion::arrow::array::Array>,
                 Arc::new(StringArray::from(vec![Some("A1")]))
                     as Arc<dyn datafusion::arrow::array::Array>,

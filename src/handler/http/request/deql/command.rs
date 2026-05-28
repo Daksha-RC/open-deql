@@ -352,7 +352,7 @@ pub async fn execute(
                     "_event_type": event.event_type,
                     "_aggregate_id": event.stream_id,
                     "_event_id": event_id,
-                    "_offset": offset,
+                    "_offset": offset.to_string(),
                     "fields": response_fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<serde_json::Map<String, serde_json::Value>>(),
                 });
                 response_events.push(response_event);
@@ -387,7 +387,7 @@ pub async fn execute(
                 );
                 log_record.insert(
                     "_offset".to_string(),
-                    serde_json::Value::Number(offset.into()),
+                    serde_json::Value::String(offset.to_string()),
                 );
 
                 // Timestamp (microseconds) for event ordering

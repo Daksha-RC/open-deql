@@ -21,6 +21,7 @@ pub mod memory;
 pub mod wal;
 
 const TRACE_ID_SEPARATOR: &str = "$$";
+const ACCOUNT_SEPARATOR: &str = "::";
 
 fn format_location(location: &Path) -> (String, Path) {
     let mut path = location.to_string();

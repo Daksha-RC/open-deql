@@ -1,6 +1,6 @@
-// Small helper for Phase 2: build projection expressions for referenced
-// guard fields. For missing fields we produce NULL-fillers so DataFusion
-// projections have consistent columns during guard evaluation.
+//! Build projection expressions for referenced guard fields.
+//! For missing fields we produce NULL-fillers so DataFusion projections
+//! have consistent columns during guard evaluation.
 
 use std::collections::HashSet;
 
@@ -13,7 +13,6 @@ use datafusion::{
 /// Build a projection `Vec<Expr>` for the given `referenced` field names.
 /// If a field is present in `schema` we return `col(field).alias(field)`;
 /// otherwise we return a `NULL` literal aliased to `field`.
-#[allow(dead_code)]
 pub fn build_projection_for_referenced_fields(
     referenced: &HashSet<String>,
     schema: &Schema,
@@ -43,7 +42,6 @@ mod tests {
         refs.insert("present".to_string());
         refs.insert("missing".to_string());
         let proj = build_projection_for_referenced_fields(&refs, &schema);
-        // Should produce two expressions
         assert_eq!(proj.len(), 2);
     }
 }
