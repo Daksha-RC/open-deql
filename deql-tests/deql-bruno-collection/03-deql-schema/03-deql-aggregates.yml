@@ -5,7 +5,7 @@ info:
 
 http:
   method: GET
-  url: "{{baseUrl}}/{{deql_org_id}}/deql/registry/aggregates"
+  url: "{{baseUrl}}/{{deql_org_id}}/deql/registry/aggregates/Employee"
   auth: inherit
 
 runtime:

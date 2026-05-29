@@ -14,7 +14,7 @@ http:
 
       CREATE OR REPLACE AGGREGATE Employee;
 
-      CREATE OR COMMAND HireEmployee (
+      CREATE OR REPLACE COMMAND HireEmployee (
         employee_id STRING,
         name        STRING,
         grade       STRING
@@ -70,7 +70,7 @@ http:
       -- a new-hire report for Finance/Admin, and a promotions report for Accounts.
       -- So we’ll create two projections.
 
-      CREATE PROJECTION NewHireReport AS
+      CREATE OR REPLACE PROJECTION NewHireReport AS
       SELECT
         stream_id AS employee_id,
         LAST(data.name)  AS name,

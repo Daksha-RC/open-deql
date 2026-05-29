@@ -10,7 +10,7 @@ http:
     type: json
     data: |-
       {
-        "employee_id": "EMP12345",
+        "employee_id": "EMP200",
         "name": "John Doe",
         "grade": "A1"
       }

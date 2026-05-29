@@ -10,8 +10,8 @@ http:
     type: json
     data: |-
       {
-        "employee_id": "EMP12345",
-        "new_grade": "A2"
+        "employee_id": "EMP200",
+        "new_grade": "A5"
       }
   auth: inherit
 

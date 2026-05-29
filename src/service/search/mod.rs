@@ -107,6 +107,8 @@ pub(crate) mod cache;
 pub(crate) mod cardinality;
 pub(crate) mod cluster;
 pub(crate) mod datafusion;
+#[cfg(feature = "deql")]
+pub(crate) mod deql_virtual_rewrite;
 pub(crate) mod grpc;
 pub(crate) mod grpc_search;
 pub(crate) mod index;
@@ -136,6 +138,13 @@ pub async fn search(
     user_id: Option<String>,
     in_req: &search::Request,
 ) -> Result<search::Response, Error> {
+    // R3.5: Rewrite queries targeting DeQL virtual streams (deql_*_agg)
+    // to fold SQL against deql_events before entering the standard search path.
+    #[cfg(feature = "deql")]
+    if let Some(response) = deql_virtual_rewrite::try_search_virtual(trace_id, org_id, stream_type, user_id.clone(), in_req).await {
+        return response;
+    }
+
     let start = std::time::Instant::now();
     let started_at = now_micros();
     let cfg = get_config();

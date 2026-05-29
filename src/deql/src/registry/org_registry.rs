@@ -38,6 +38,11 @@ impl OrgDeRegMap {
             .clone()
     }
 
+    /// Read-only access to the inner map (for non-blocking lookups).
+    pub async fn inner_read(&self) -> tokio::sync::RwLockReadGuard<'_, HashMap<OrgId, Arc<RwLock<DeReg>>>> {
+        self.inner.read().await
+    }
+
     /// Replace the DeReg for a given org (used during replay-refresh).
     pub async fn replace(&self, org_id: &str, dereg: DeReg) {
         let mut map = self.inner.write().await;

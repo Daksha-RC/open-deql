@@ -233,6 +233,45 @@ impl DeReg {
             .await
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
 
+        // R3.5: Register virtual $Agg stream schema for each aggregate.
+        // This makes the stream visible in Logs Explore sidebar with all fields
+        // in the field selector. No physical data is stored — queries are rewritten
+        // to fold SQL against deql_events at search time.
+        for agg_name in self.list_aggregate_names() {
+            let agg_stream_name = format!("deql_{}_agg", agg_name.to_lowercase());
+
+            // Build schema: metadata fields + payload fields for this aggregate
+            let mut agg_fields: Vec<Field> = vec![
+                Field::new("_timestamp", DataType::Int64, false),
+                Field::new("aggregate_id", DataType::Utf8, false),
+                Field::new("_offset", DataType::Utf8, false),
+                Field::new("_aggregate_version", DataType::Int64, false),
+            ];
+            for field_def in self.payload_fields_for_aggregate(agg_name) {
+                let arrow_type = deql_type_to_arrow(&field_def.data_type.node);
+                agg_fields.push(Field::new(&field_def.name.node, arrow_type, true));
+            }
+
+            let agg_defined_fields: Vec<String> =
+                agg_fields.iter().map(|f| f.name().to_string()).collect();
+
+            let agg_settings = StreamSettings {
+                flatten_level: Some(0),
+                defined_schema_fields: agg_defined_fields,
+                ..Default::default()
+            };
+            let agg_settings_json = serde_json::to_string(&agg_settings)?;
+
+            let mut agg_metadata = std::collections::HashMap::new();
+            agg_metadata.insert("settings".to_string(), agg_settings_json);
+
+            let agg_schema = Schema::new_with_metadata(agg_fields, agg_metadata);
+
+            infra::schema::merge(org_id, &agg_stream_name, StreamType::Logs, &agg_schema, None)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+        }
+
         Ok(())
     }
 }

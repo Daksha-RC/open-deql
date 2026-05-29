@@ -248,6 +248,83 @@ pub async fn search_http2_stream(
             return http_response;
         }
     };
+    // R3.5: If the stream is a DeQL virtual agg stream, rewrite the SQL
+    // to the fold query against deql_events and change the target stream.
+    #[cfg(feature = "deql")]
+    {
+        tracing::info!(
+            stream_names = ?stream_names,
+            sql = %req.query.sql,
+            "DeQL R3.5: checking stream names for virtual agg"
+        );
+        if stream_names.len() == 1
+            && stream_names[0].starts_with("deql_")
+            && stream_names[0].ends_with("_agg")
+        {
+            if let Some(agg_lower) = stream_names[0].strip_prefix("deql_").and_then(|s| s.strip_suffix("_agg")) {
+                if let Some((agg_name, field_names)) =
+                    crate::service::search::deql_virtual_rewrite::get_agg_fields(&org_id, agg_lower).await
+                {
+                    let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                    let aggregate_id_filter =
+                        crate::service::search::deql_virtual_rewrite::extract_aggregate_id_filter(&req.query.sql);
+                    let fold_sql = o2_deql::query::agg_sql::build_agg_sql(
+                        &agg_name,
+                        &field_refs,
+                        aggregate_id_filter.as_deref(),
+                        0,
+                        10000,
+                    );
+
+                    let end_time = config::utils::time::now_micros();
+                    let start_time = end_time - (365 * 24 * 60 * 60 * 1_000_000);
+                    let search_req = config::meta::search::Request {
+                        query: config::meta::search::Query {
+                            sql: fold_sql,
+                            start_time,
+                            end_time,
+                            from: 0,
+                            size: 10000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+
+                    match crate::service::search::search(
+                        &trace_id, &org_id, stream_type, None, &search_req,
+                    ).await {
+                        Ok(response) => {
+                            // Format as Server-Sent Events (SSE) to match the streaming protocol
+                            // the Logs Explore frontend expects.
+                            let hits_json = serde_json::to_string(&serde_json::json!({
+                                "hits": response.hits
+                            })).unwrap_or_default();
+                            let meta_json = serde_json::to_string(&serde_json::json!({
+                                "results": response,
+                                "streaming_aggs": false,
+                                "time_offset": serde_json::Value::Null
+                            })).unwrap_or_default();
+
+                            let sse_body = format!(
+                                "event: search_response_metadata\ndata: {meta_json}\n\nevent: search_response_hits\ndata: {hits_json}\n\nevent: progress\ndata: {{\"percent\":100}}\n\ndata: [[DONE]]\n\n"
+                            );
+
+                            return axum::response::Response::builder()
+                                .status(200)
+                                .header("content-type", "text/event-stream")
+                                .header("cache-control", "no-cache")
+                                .body(axum::body::Body::from(sse_body))
+                                .unwrap();
+                        }
+                        Err(e) => {
+                            return map_error_to_http_response(&e, Some(trace_id));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "enterprise")]
     for stream in stream_names.iter() {
         if let Err(e) = crate::service::search::check_search_allowed(&org_id, Some(stream)) {

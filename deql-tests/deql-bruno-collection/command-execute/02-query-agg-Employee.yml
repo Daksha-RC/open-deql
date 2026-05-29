@@ -5,14 +5,10 @@ info:
 
 http:
   method: GET
-  url: "{{baseUrl}}/{{deql_org_id}}/deql/Employee/events"
+  url: "{{baseUrl}}/{{deql_org_id}}/deql/aggregates/Employee/agg"
   body:
     type: json
-    data: |-
-      {
-        "employee_id": "EMP200",
-        "new_grade": "A5"
-      }
+    data: ""
   auth: inherit
 
 settings:

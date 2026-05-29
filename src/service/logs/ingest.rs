@@ -94,6 +94,14 @@ pub async fn ingest(
     // check system resource
     check_ingestion_allowed(org_id, stream_type, Some(&stream_name)).await?;
 
+    // R3.5: Reject ingestion to DeQL virtual streams (they have no physical storage)
+    if stream_name.starts_with("deql_") && stream_name.ends_with("_agg") {
+        return Err(Error::IngestionError(format!(
+            "Cannot ingest into virtual stream '{}' — it is a computed view",
+            stream_name
+        )));
+    }
+
     let now = now_micros();
     let min_ts = now - cfg.limit.ingest_allowed_upto_micro;
     let max_ts = now + cfg.limit.ingest_allowed_in_future_micro;
