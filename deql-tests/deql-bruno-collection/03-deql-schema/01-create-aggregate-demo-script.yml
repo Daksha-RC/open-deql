@@ -72,21 +72,21 @@ http:
 
       CREATE OR REPLACE PROJECTION NewHireReport AS
       SELECT
-        stream_id AS employee_id,
-        LAST(data.name)  AS name,
-        LAST(data.grade) AS hired_grade
-      FROM DeReg."Employee$Events"
-      WHERE event_type = 'EmployeeHired'
-      GROUP BY stream_id;
+        _aggregate_id AS employee_id,
+        LAST_VALUE(name ORDER BY _offset ASC) IGNORE NULLS AS name,
+        LAST_VALUE(grade ORDER BY _offset ASC) IGNORE NULLS AS grade
+      FROM deql_events
+      WHERE _event_type = 'EmployeeHired'
+      GROUP BY _aggregate_id;
 
       CREATE OR REPLACE PROJECTION PromotionsReport AS
       SELECT
-        stream_id AS employee_id,
-        seq,
-        data.new_grade AS promoted_to
-      FROM DeReg."Employee$Events"
-      WHERE event_type = 'EmployeePromoted'
-      ORDER BY employee_id, seq;
+        _aggregate_id AS employee_id,
+        _offset,
+        new_grade AS promoted_to
+      FROM deql_events
+      WHERE _event_type = 'EmployeePromoted'
+      ORDER BY _aggregate_id, _offset;
   auth: inherit
 
 settings:

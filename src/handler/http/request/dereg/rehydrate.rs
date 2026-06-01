@@ -109,6 +109,19 @@ pub async fn trigger_rehydrate(Path(org_id): Path<String>) -> Response {
                     status = %result.status,
                     "Rehydrate completed"
                 );
+
+                // Register virtual stream schemas (deql_agg_*, deql_prj_*)
+                // so they appear in the Logs Explore dropdown.
+                let state = get_deql_state().await;
+                let org_dereg = state.org_map.get_or_init(&org_id_clone).await;
+                let dereg = org_dereg.read().await;
+                if let Err(e) = dereg.register_stream_schema(&org_id_clone).await {
+                    tracing::error!(
+                        org_id = %org_id_clone,
+                        error = ?e,
+                        "Failed to register virtual stream schemas after rehydrate"
+                    );
+                }
             }
             Err(e) => {
                 tracing::error!(

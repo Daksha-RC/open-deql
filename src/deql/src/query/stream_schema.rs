@@ -238,7 +238,7 @@ impl DeReg {
         // in the field selector. No physical data is stored — queries are rewritten
         // to fold SQL against deql_events at search time.
         for agg_name in self.list_aggregate_names() {
-            let agg_stream_name = format!("deql_{}_agg", agg_name.to_lowercase());
+            let agg_stream_name = format!("deql_agg_{}", agg_name.to_lowercase());
 
             // Build schema: metadata fields + payload fields for this aggregate
             let mut agg_fields: Vec<Field> = vec![
@@ -272,8 +272,173 @@ impl DeReg {
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
         }
 
+        // R3.6: Register virtual projection stream schema for each projection.
+        // Parse the projection SQL to extract output column names for the schema.
+        for proj_name in self.list_projection_names() {
+            if let Some(proj) = self.get_projection(proj_name) {
+                let proj_stream_name = format!("deql_prj_{}", proj_name.to_lowercase());
+                let proj_sql = &proj.body.sql;
+
+                // Extract output column names from the projection SQL
+                let output_columns = extract_select_columns(proj_sql);
+
+                // Build schema with extracted columns
+                let mut proj_fields: Vec<Field> = Vec::new();
+                
+                // Always include _timestamp for time-axis compatibility
+                let has_timestamp = output_columns.iter().any(|c| c == "_timestamp");
+                if !has_timestamp {
+                    proj_fields.push(Field::new("_timestamp", DataType::Int64, true));
+                }
+
+                // Add all output columns from the projection SQL
+                for col_name in &output_columns {
+                    // Use Utf8 as default type since we don't know the actual types
+                    // The actual types will be determined at query time
+                    let data_type = if col_name == "_timestamp" || col_name == "_aggregate_version" || col_name == "_offset" {
+                        DataType::Int64
+                    } else {
+                        DataType::Utf8
+                    };
+                    proj_fields.push(Field::new(col_name, data_type, true));
+                }
+
+                let proj_defined_fields: Vec<String> =
+                    proj_fields.iter().map(|f| f.name().to_string()).collect();
+
+                let proj_settings = StreamSettings {
+                    flatten_level: Some(0),
+                    defined_schema_fields: proj_defined_fields,
+                    ..Default::default()
+                };
+                let proj_settings_json = serde_json::to_string(&proj_settings)?;
+
+                let mut proj_metadata = std::collections::HashMap::new();
+                proj_metadata.insert("settings".to_string(), proj_settings_json);
+
+                let proj_schema = Schema::new_with_metadata(proj_fields, proj_metadata);
+
+                infra::schema::merge(org_id, &proj_stream_name, StreamType::Logs, &proj_schema, None)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)?;
+            }
+        }
+
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Helper: Extract SELECT column names from SQL
+// ---------------------------------------------------------------------------
+
+/// Extract output column names from a SQL SELECT statement.
+/// Uses regex-based parsing to extract column aliases and names.
+/// Returns the alias if present (AS clause), otherwise the column name.
+fn extract_select_columns(sql: &str) -> Vec<String> {
+    let mut columns = Vec::new();
+    
+    // Find the SELECT clause - everything between SELECT and FROM
+    let sql_upper = sql.to_uppercase();
+    let select_pos = match sql_upper.find("SELECT") {
+        Some(pos) => pos + 6,
+        None => return columns,
+    };
+    let from_pos = match sql_upper.find("FROM") {
+        Some(pos) => pos,
+        None => return columns,
+    };
+    
+    if select_pos >= from_pos {
+        return columns;
+    }
+    
+    let select_clause = &sql[select_pos..from_pos].trim();
+    
+    // Split by comma, handling nested parentheses
+    let items = split_select_items(select_clause);
+    
+    for item in items {
+        let item = item.trim();
+        if item.is_empty() || item == "*" {
+            continue;
+        }
+        
+        // Check for AS alias (case-insensitive)
+        let item_upper = item.to_uppercase();
+        if let Some(as_pos) = item_upper.rfind(" AS ") {
+            let alias = item[as_pos + 4..].trim();
+            // Remove quotes if present
+            let alias = alias.trim_matches('"').trim_matches('\'').trim_matches('`');
+            if !alias.is_empty() {
+                columns.push(alias.to_string());
+                continue;
+            }
+        }
+        
+        // No alias - try to extract the column name
+        // For simple columns like "name" or "table.name"
+        let name = extract_simple_column_name(item);
+        if !name.is_empty() {
+            columns.push(name);
+        }
+    }
+    
+    columns
+}
+
+/// Split SELECT items by comma, respecting parentheses nesting.
+fn split_select_items(select_clause: &str) -> Vec<String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut paren_depth: i32 = 0;
+    
+    for ch in select_clause.chars() {
+        match ch {
+            '(' => {
+                paren_depth += 1;
+                current.push(ch);
+            }
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if paren_depth == 0 => {
+                items.push(current.trim().to_string());
+                current = String::new();
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    
+    if !current.trim().is_empty() {
+        items.push(current.trim().to_string());
+    }
+    
+    items
+}
+
+/// Extract a simple column name from an expression.
+/// For "table.column" returns "column", for "column" returns "column".
+/// For complex expressions, returns empty string.
+fn extract_simple_column_name(expr: &str) -> String {
+    let expr = expr.trim();
+    
+    // If it contains parentheses, it's a function - skip
+    if expr.contains('(') {
+        return String::new();
+    }
+    
+    // If it contains a dot, take the last part
+    if let Some(dot_pos) = expr.rfind('.') {
+        let name = expr[dot_pos + 1..].trim();
+        return name.trim_matches('"').trim_matches('\'').trim_matches('`').to_string();
+    }
+    
+    // Simple identifier
+    expr.trim_matches('"').trim_matches('\'').trim_matches('`').to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -515,5 +680,42 @@ mod tests {
     fn test_sensitive_fields_unknown_aggregate_is_empty() {
         let dereg = make_employee_dereg_with_sensitive();
         assert!(dereg.sensitive_fields_for_aggregate("Ghost").is_empty());
+    }
+
+    // extract_select_columns tests ----------------------------------------------
+
+    #[test]
+    fn test_extract_select_columns_with_aliases() {
+        let sql = "SELECT _aggregate_id AS employee_id, name AS employee_name FROM deql_events";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["employee_id", "employee_name"]);
+    }
+
+    #[test]
+    fn test_extract_select_columns_simple() {
+        let sql = "SELECT name, grade, role FROM deql_events";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["name", "grade", "role"]);
+    }
+
+    #[test]
+    fn test_extract_select_columns_mixed() {
+        let sql = "SELECT _aggregate_id AS employee_id, name, LAST_VALUE(grade ORDER BY _offset ASC) AS grade FROM deql_events";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["employee_id", "name", "grade"]);
+    }
+
+    #[test]
+    fn test_extract_select_columns_qualified() {
+        let sql = "SELECT t.name, t.grade FROM deql_events t";
+        let cols = extract_select_columns(sql);
+        assert_eq!(cols, vec!["name", "grade"]);
+    }
+
+    #[test]
+    fn test_extract_select_columns_empty_on_wildcard() {
+        let sql = "SELECT * FROM deql_events";
+        let cols = extract_select_columns(sql);
+        assert!(cols.is_empty());
     }
 }

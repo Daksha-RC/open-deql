@@ -138,8 +138,8 @@ pub async fn search(
     user_id: Option<String>,
     in_req: &search::Request,
 ) -> Result<search::Response, Error> {
-    // R3.5: Rewrite queries targeting DeQL virtual streams (deql_*_agg)
-    // to fold SQL against deql_events before entering the standard search path.
+    // R3.5/R3.6: Handle queries targeting DeQL virtual streams (deql_agg_*, deql_prj_*)
+    // Short-circuit before entering the standard search path.
     #[cfg(feature = "deql")]
     if let Some(response) = deql_virtual_rewrite::try_search_virtual(trace_id, org_id, stream_type, user_id.clone(), in_req).await {
         return response;

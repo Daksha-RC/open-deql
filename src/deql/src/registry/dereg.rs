@@ -278,6 +278,15 @@ impl DeReg {
         self.registry.projections.len()
     }
 
+    /// Case-insensitive projection lookup.
+    pub fn get_projection_ci(&self, name: &str) -> Option<&crate::parser::ast::CreateProjection> {
+        let name_lower = name.to_lowercase();
+        self.registry
+            .projections
+            .values()
+            .find(|p| p.name.node.to_lowercase() == name_lower)
+    }
+
     pub fn template_count(&self) -> usize {
         self.registry.templates.len()
     }

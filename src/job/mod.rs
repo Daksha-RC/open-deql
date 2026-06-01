@@ -49,6 +49,8 @@ mod mmdb_downloader;
 #[cfg(feature = "enterprise")]
 pub(crate) mod pipeline;
 mod pipeline_error_cleanup;
+#[cfg(feature = "deql")]
+mod deql_recovery;
 mod promql;
 mod promql_self_consume;
 #[cfg(feature = "enterprise")]
@@ -956,6 +958,13 @@ pub async fn init_deferred() -> Result<(), anyhow::Error> {
         )
         .await;
         tokio::task::spawn(db::license::watch());
+    }
+
+    // DeQL startup recovery: rehydrate known orgs and register virtual stream schemas.
+    // Runs on all node roles since virtual streams need to be visible everywhere.
+    #[cfg(feature = "deql")]
+    {
+        tokio::task::spawn(deql_recovery::deql_startup_recovery());
     }
 
     if !LOCAL_NODE.is_ingester() && !LOCAL_NODE.is_querier() && !LOCAL_NODE.is_alert_manager() {

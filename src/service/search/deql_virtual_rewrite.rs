@@ -1,9 +1,7 @@
 //! DeQL virtual stream query rewrite.
 //!
-//! Detects when a search query targets a virtual `deql_*_agg` stream and
-//! rewrites the SQL to a fold query against `deql_events`. This makes the
-//! virtual stream queryable through the standard OO search path without
-//! any physical storage.
+//! Detects when a search query targets a virtual `deql_agg_*` or `deql_prj_*` stream
+//! and executes the appropriate fold/projection SQL against `deql_events`.
 //!
 //! Gated behind `#[cfg(feature = "deql")]`.
 
@@ -36,47 +34,73 @@ pub async fn try_search_virtual(
         "DeQL virtual stream check"
     );
 
-    // Check naming convention for virtual agg streams
-    if !stream_name.starts_with("deql_") || !stream_name.ends_with("_agg") {
-        return None;
+    // Check naming convention for virtual streams
+    if stream_name.starts_with("deql_agg_") {
+        // $Agg virtual stream: deql_agg_{aggregate}
+        let agg_name_lower = &stream_name[9..]; // "deql_agg_".len() = 9
+
+        // Get payload fields from DeReg (also validates the aggregate exists)
+        let (agg_name, field_names) = get_payload_fields_for_aggregate(org_id, agg_name_lower).await?;
+        let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+
+        // Extract aggregate_id filter from user's SQL (if present)
+        let aggregate_id_filter = extract_aggregate_id_filter(sql);
+
+        // Build fold SQL using the shared builder
+        let fold_sql = o2_deql::query::agg_sql::build_agg_sql(
+            &agg_name,
+            &field_refs,
+            aggregate_id_filter.as_deref(),
+            0,
+            10000,
+        );
+
+        tracing::debug!(
+            org_id = %org_id,
+            stream = %stream_name,
+            aggregate = %agg_name,
+            rewritten_sql = %fold_sql,
+            trace_id = %trace_id,
+            "DeQL virtual stream: executing fold query"
+        );
+
+        return execute_virtual_sql(org_id, trace_id, &fold_sql).await;
+    } else if stream_name.starts_with("deql_prj_") {
+        // Projection virtual stream: deql_prj_{projection_name}
+        let proj_name = &stream_name[9..]; // "deql_prj_".len() = 9
+
+        if let Some(proj_sql) = get_projection_sql(org_id, proj_name).await {
+            tracing::debug!(
+                org_id = %org_id,
+                stream = %stream_name,
+                projection = %proj_name,
+                sql = %proj_sql,
+                trace_id = %trace_id,
+                "DeQL virtual stream: executing projection query"
+            );
+
+            return execute_virtual_sql(org_id, trace_id, &proj_sql).await;
+        }
     }
 
-    // Derive aggregate name from stream name: "deql_employee_agg" → "employee"
-    let agg_name_lower = stream_name
-        .strip_prefix("deql_")?
-        .strip_suffix("_agg")?;
+    None
+}
 
-    // Get payload fields from DeReg (also validates the aggregate exists)
-    let (agg_name, field_names) = get_payload_fields_for_aggregate(org_id, agg_name_lower).await?;
-    let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+/// Execute a SQL query against deql_events via the cluster search path.
+/// Used by both $Agg and projection virtual streams.
+async fn execute_virtual_sql(
+    org_id: &str,
+    trace_id: &str,
+    sql: &str,
+) -> Option<Result<config::meta::search::Response, infra::errors::Error>> {
+    use super::cluster;
+    use proto::cluster_rpc::SearchQuery;
 
-    // Extract aggregate_id filter from user's SQL (if present)
-    let aggregate_id_filter = extract_aggregate_id_filter(sql);
-
-    // Build fold SQL using the shared builder
-    let fold_sql = o2_deql::query::agg_sql::build_agg_sql(
-        &agg_name,
-        &field_refs,
-        aggregate_id_filter.as_deref(),
-        0,
-        10000,
-    );
-
-    tracing::debug!(
-        org_id = %org_id,
-        stream = %stream_name,
-        aggregate = %agg_name,
-        rewritten_sql = %fold_sql,
-        trace_id = %trace_id,
-        "DeQL virtual stream: executing fold query"
-    );
-
-    // Build search request targeting deql_events (same as /agg API)
     let end_time = now_micros();
     let start_time = end_time - (365 * 24 * 60 * 60 * 1_000_000);
     let search_req = config::meta::search::Request {
         query: config::meta::search::Query {
-            sql: fold_sql,
+            sql: sql.to_string(),
             start_time,
             end_time,
             from: 0,
@@ -86,22 +110,18 @@ pub async fn try_search_virtual(
         ..Default::default()
     };
 
-    // Execute via the cluster search path directly (avoids async recursion).
-    use super::cluster;
-    use proto::cluster_rpc::SearchQuery;
-
     let trace_id_str = trace_id.to_string();
     let query: SearchQuery = search_req.query.clone().into();
     let mut request = config::datafusion::request::Request::new(
         trace_id_str.clone(),
         org_id.to_string(),
         StreamType::Logs,
-        0, // timeout (use default)
-        None, // user_id
+        0,
+        None,
         Some((search_req.query.start_time, search_req.query.end_time)),
-        None, // search_event_type
-        0,    // histogram_interval
-        false, // overwrite_cache
+        None,
+        0,
+        false,
     );
     request.set_use_cache(false);
 
@@ -110,6 +130,19 @@ pub async fn try_search_virtual(
         Ok(response) => Some(Ok(response)),
         Err(e) => Some(Err(e)),
     }
+}
+
+/// Get projection SQL from DeReg by name (case-insensitive).
+pub async fn get_projection_sql(org_id: &str, proj_name: &str) -> Option<String> {
+    use crate::handler::http::request::dereg::get_deql_state;
+
+    let deql_state = get_deql_state().await;
+    let org_dereg = deql_state.org_map.get_or_init(org_id).await;
+    let dereg = org_dereg.read().await;
+
+    // Look up projection by name (case-insensitive)
+    let projection = dereg.get_projection_ci(proj_name)?;
+    Some(projection.body.sql.clone())
 }
 
 /// Extract the primary stream/table name from a SQL FROM clause.
@@ -186,32 +219,40 @@ mod tests {
     #[test]
     fn test_extract_stream_name_simple() {
         assert_eq!(
-            extract_stream_name("SELECT * FROM deql_employee_agg"),
-            Some("deql_employee_agg".to_string())
+            extract_stream_name("SELECT * FROM deql_agg_employee"),
+            Some("deql_agg_employee".to_string())
         );
     }
 
     #[test]
     fn test_extract_stream_name_with_where() {
         assert_eq!(
-            extract_stream_name("SELECT * FROM deql_employee_agg WHERE aggregate_id = 'X'"),
-            Some("deql_employee_agg".to_string())
+            extract_stream_name("SELECT * FROM deql_agg_employee WHERE aggregate_id = 'X'"),
+            Some("deql_agg_employee".to_string())
         );
     }
 
     #[test]
     fn test_extract_stream_name_quoted() {
         assert_eq!(
-            extract_stream_name("SELECT * FROM \"deql_employee_agg\" WHERE x = 1"),
-            Some("deql_employee_agg".to_string())
+            extract_stream_name("SELECT * FROM \"deql_agg_employee\" WHERE x = 1"),
+            Some("deql_agg_employee".to_string())
         );
     }
 
     #[test]
     fn test_extract_stream_name_quoted_no_where() {
         assert_eq!(
-            extract_stream_name("SELECT * FROM \"deql_employee_agg\""),
-            Some("deql_employee_agg".to_string())
+            extract_stream_name("SELECT * FROM \"deql_agg_employee\""),
+            Some("deql_agg_employee".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_stream_name_projection() {
+        assert_eq!(
+            extract_stream_name("SELECT * FROM deql_prj_newhirereport"),
+            Some("deql_prj_newhirereport".to_string())
         );
     }
 
