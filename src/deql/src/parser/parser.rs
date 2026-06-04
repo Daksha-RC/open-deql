@@ -253,9 +253,10 @@ impl Parser {
             TokenKind::Projection => self.parse_create_projection(start_span, or_replace),
             TokenKind::Eventstore => self.parse_create_eventstore(start_span, or_replace),
             TokenKind::Template => self.parse_create_template(start_span, or_replace),
+            TokenKind::Inspection => self.parse_create_inspection(start_span, or_replace),
             _ => {
                 self.error(format!(
-                    "expected AGGREGATE, COMMAND, EVENT, DECISION, PROJECTION, EVENTSTORE, or TEMPLATE after CREATE, found '{}'",
+                    "expected AGGREGATE, COMMAND, EVENT, DECISION, PROJECTION, EVENTSTORE, TEMPLATE, or INSPECTION after CREATE, found '{}'",
                     self.peek().lexeme
                 ));
                 Err(())
@@ -1268,6 +1269,64 @@ impl Parser {
         // End offset is the start of the terminating token (semicolon or EOF)
         let end_offset = self.peek().span.start;
         self.source[start_offset..end_offset].trim().to_string()
+    }
+
+    // -----------------------------------------------------------------------
+    // CREATE INSPECTION
+    // -----------------------------------------------------------------------
+
+    fn parse_create_inspection(
+        &mut self,
+        start: Span,
+        or_replace: bool,
+    ) -> Result<Spanned<DeqlStatement>, ()> {
+        self.advance(); // consume INSPECTION
+
+        let name = self.expect_identifier()?;
+
+        // ON DECISION <decision_name>
+        if !self.check(TokenKind::On) {
+            self.error("expected ON DECISION after inspection name".to_string());
+            return Err(());
+        }
+        self.advance(); // consume ON
+        self.expect(TokenKind::Decision)?; // consume DECISION
+        let decision = self.expect_identifier()?;
+
+        // FROM <stream_name>
+        self.expect(TokenKind::From)?;
+        let from = self.parse_dotted_reference()?;
+
+        // INTO <template_name>
+        self.expect(TokenKind::Into)?;
+        let into_template = self.expect_identifier()?;
+
+        // Optional WHERE <guard>
+        let guard = if self.check(TokenKind::Where) {
+            self.advance();
+            let frag = self.capture_sql_until(&[TokenKind::Semicolon]);
+            if frag.sql.is_empty() {
+                None
+            } else {
+                Some(frag)
+            }
+        } else {
+            None
+        };
+
+        let end = self.expect(TokenKind::Semicolon)?;
+
+        Ok(Spanned {
+            node: DeqlStatement::CreateInspection(CreateInspection {
+                or_replace,
+                name,
+                decision,
+                from,
+                into_template,
+                guard,
+            }),
+            span: start.merge(end.span),
+        })
     }
 
     // -----------------------------------------------------------------------

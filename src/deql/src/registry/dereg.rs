@@ -131,6 +131,17 @@ impl DeReg {
                     or_replace: t.or_replace,
                 })
             }
+            DeqlStatement::CreateInspection(i) => {
+                // Inspections are NOT registered in the in-memory AST hashmap.
+                // We only return the RegistrationResult so the handler can persist
+                // the definition to dereg_meta_store.
+                Ok(RegistrationResult {
+                    event_type: "InspectionCreated",
+                    concept_type: ConceptKind::Inspection,
+                    concept_name: i.name.node.clone(),
+                    or_replace: i.or_replace,
+                })
+            }
             _ => Err(DeRegError::NotFound {
                 concept_kind: ConceptKind::Validate,
                 name: "unsupported statement type".to_string(),

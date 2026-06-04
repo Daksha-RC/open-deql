@@ -577,6 +577,43 @@ pub fn deql_routes() -> Router {
             "/{org_id}/deql/aggregates/{agg}/agg",
             get(deql::agg_query::get_agg),
         )
+        // INSPECT DECISION control API
+        .route(
+            "/{org_id}/deql/inspect/run",
+            post(deql::inspect::run),
+        )
+        .route(
+            "/{org_id}/deql/inspect/status",
+            get(deql::inspect::status),
+        )
+        .route(
+            "/{org_id}/deql/inspect/decision",
+            get(deql::inspect::list_definitions),
+        )
+        .route(
+            "/{org_id}/deql/inspect/outputs",
+            get(deql::inspect::list_all_outputs).delete(deql::inspect::drop_output_global),
+        )
+        .route(
+            "/{org_id}/deql/inspect/{name}/validate",
+            post(deql::inspect::validate),
+        )
+        .route(
+            "/{org_id}/deql/inspect/{name}/start",
+            post(deql::inspect::start),
+        )
+        .route(
+            "/{org_id}/deql/inspect/{name}/stop",
+            post(deql::inspect::stop),
+        )
+        .route(
+            "/{org_id}/deql/inspect/{name}/outputs",
+            get(deql::inspect::list_outputs).delete(deql::inspect::drop_outputs),
+        )
+        .route(
+            "/{org_id}/deql/inspect/{name}",
+            get(deql::inspect::get_definition),
+        )
         // DeQL command execution
         .route(
             "/{org_id}/deql/{aggregate}/{commandname}",

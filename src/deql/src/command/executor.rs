@@ -212,7 +212,7 @@ fn extract_bind_params(execute: &Execute) -> HashMap<String, String> {
 }
 
 /// Substitute `:field` references in SQL with literal values.
-fn substitute_bind_params(
+pub fn substitute_bind_params(
     sql: &str,
     params: &HashMap<String, String>,
     context: &str,
@@ -252,7 +252,7 @@ fn extract_aggregate_id_field(state_sql: &str) -> Option<String> {
 }
 
 /// Resolve aggregate ID from decision and bind params.
-fn resolve_aggregate_id(
+pub fn resolve_aggregate_id(
     decision: &CreateDecision,
     params: &HashMap<String, String>,
     command_fields: &crate::parser::ast::CreateCommand,
@@ -322,9 +322,12 @@ fn scalar_to_json(value: &ScalarValue) -> serde_json::Value {
 }
 
 /// Convert a ScalarValue to a SQL literal string.
-fn scalar_to_sql_literal(value: &ScalarValue) -> String {
+pub fn scalar_to_sql_literal(value: &ScalarValue) -> String {
     match value {
-        ScalarValue::Utf8(Some(s)) => format!("'{s}'"),
+        ScalarValue::Utf8(Some(s)) => {
+            let escaped = s.replace('\'', "''");
+            format!("'{escaped}'")
+        }
         ScalarValue::Int64(Some(i)) => i.to_string(),
         ScalarValue::Float64(Some(f)) => f.to_string(),
         ScalarValue::Boolean(Some(b)) => b.to_string(),
@@ -338,7 +341,7 @@ fn scalar_to_sql_literal(value: &ScalarValue) -> String {
 // ============================================================================
 
 /// Evaluate guard expression. Returns true if the branch should execute.
-async fn evaluate_guard(
+pub async fn evaluate_guard(
     guard_sql: &str,
     params: &HashMap<String, String>,
     state_row: &HashMap<String, ScalarValue>,
@@ -485,7 +488,7 @@ fn replace_bare_identifiers_with_null(sql: &str) -> String {
 // ============================================================================
 
 /// Evaluate EMIT AS expressions for an emit item.
-async fn evaluate_emit_expressions(
+pub async fn evaluate_emit_expressions(
     emit_item: &EmitItem,
     params: &HashMap<String, String>,
     state_row: &HashMap<String, ScalarValue>,
@@ -737,7 +740,7 @@ pub async fn execute_command(
 }
 
 /// Execute STATE AS query and return state row.
-async fn execute_state_query(
+pub async fn execute_state_query(
     sql: &str,
     ctx: &SessionContext,
     decision_name: &str,
@@ -911,5 +914,53 @@ mod tests {
             "escaped quote content must be preserved; got: {result}"
         );
         assert!(result.contains("NULL"), "current_name should become NULL");
+    }
+
+    #[test]
+    fn test_scalar_to_sql_literal_escaped_quotes() {
+        use crate::executor::scalar_to_sql_literal;
+        use datafusion::scalar::ScalarValue;
+
+        // Test single quote escaping
+        let value = ScalarValue::Utf8(Some("O'Brien".to_string()));
+        let result = scalar_to_sql_literal(&value);
+        assert_eq!(result, "'O''Brien'");
+
+        // Test multiple quotes
+        let value = ScalarValue::Utf8(Some("It's a 'test'".to_string()));
+        let result = scalar_to_sql_literal(&value);
+        assert_eq!(result, "'It''s a ''test'''");
+    }
+
+    #[test]
+    fn test_scalar_to_sql_literal_utf8_multibyte() {
+        use crate::executor::scalar_to_sql_literal;
+        use datafusion::scalar::ScalarValue;
+
+        // Test Chinese characters
+        let value = ScalarValue::Utf8(Some("世界".to_string()));
+        let result = scalar_to_sql_literal(&value);
+        assert_eq!(result, "'世界'");
+
+        // Test emoji
+        let value = ScalarValue::Utf8(Some("Hello 🌍".to_string()));
+        let result = scalar_to_sql_literal(&value);
+        assert_eq!(result, "'Hello 🌍'");
+
+        // Test mixed with escaped quote
+        let value = ScalarValue::Utf8(Some("It's 世界 🌍".to_string()));
+        let result = scalar_to_sql_literal(&value);
+        assert_eq!(result, "'It''s 世界 🌍'");
+    }
+
+    #[test]
+    fn test_scalar_to_sql_literal_other_types() {
+        use crate::executor::scalar_to_sql_literal;
+        use datafusion::scalar::ScalarValue;
+
+        assert_eq!(scalar_to_sql_literal(&ScalarValue::Int64(Some(42))), "42");
+        assert_eq!(scalar_to_sql_literal(&ScalarValue::Float64(Some(3.14))), "3.14");
+        assert_eq!(scalar_to_sql_literal(&ScalarValue::Boolean(Some(true))), "true");
+        assert_eq!(scalar_to_sql_literal(&ScalarValue::Null), "NULL");
     }
 }

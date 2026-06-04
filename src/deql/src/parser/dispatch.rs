@@ -76,6 +76,7 @@ fn starts_with_deql_concept(s: &str) -> bool {
         || starts_with_word(s, "PROJECTION")
         || starts_with_word(s, "EVENTSTORE")
         || starts_with_word(s, "TEMPLATE")
+        || starts_with_word(s, "INSPECTION")
 }
 
 /// Strip leading block comments (`/* ... */`) and line comments (`-- ...`)

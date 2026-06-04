@@ -42,6 +42,9 @@ pub struct DeqlState {
     pub rehydrate_state_map: OrgRehydrateStateMap,
     /// Per-stream offset tip: key = "{org_id}/deql_events", value = highest _offset seen
     pub offset_tip_map: DashMap<String, std::sync::atomic::AtomicI64>,
+    /// Per-org inspection runtime state (output tables, running handle, serial counters)
+    #[cfg(feature = "deql")]
+    pub inspection_map: DashMap<String, std::sync::Arc<crate::service::deql_inspect::InspectionOrgState>>,
 }
 
 impl DeqlState {
@@ -52,11 +55,29 @@ impl DeqlState {
             lock_map: OrgLockMap::new(),
             rehydrate_state_map: Arc::new(RwLock::new(HashMap::new())),
             offset_tip_map: DashMap::new(),
+            #[cfg(feature = "deql")]
+            inspection_map: DashMap::new(),
         }
     }
 }
 
 static DEQL_STATE: OnceCell<Arc<DeqlState>> = OnceCell::const_new();
+
+impl DeqlState {
+    /// Get or create inspection state for an org.
+    #[cfg(feature = "deql")]
+    pub async fn inspection_state(
+        &self,
+        org_id: &str,
+    ) -> std::sync::Arc<crate::service::deql_inspect::InspectionOrgState> {
+        self.inspection_map
+            .entry(org_id.to_string())
+            .or_insert_with(|| {
+                std::sync::Arc::new(crate::service::deql_inspect::InspectionOrgState::new())
+            })
+            .clone()
+    }
+}
 
 /// Get (or initialize) the global DeQL state.
 pub async fn get_deql_state() -> &'static Arc<DeqlState> {
@@ -361,7 +382,7 @@ pub async fn definitions(Path(org_id): Path<String>, req: Request<Body>) -> Resp
             org_id: Set(org_id.clone()),
             stream_id: Set(prepared.stream_id.clone()),
             event_type: Set(prepared.registration.event_type.to_string()),
-            concept_type: Set(format!("{:?}", prepared.registration.concept_type).to_uppercase()),
+            concept_type: Set(prepared.registration.concept_type.storage_type().to_string()),
             concept_key: Set(concept_key),
             occurred_at: Set(chrono::Utc::now().into()),
             status: Set("ok".to_string()),

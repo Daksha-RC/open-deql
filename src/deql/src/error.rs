@@ -34,6 +34,25 @@ impl fmt::Display for ConceptKind {
     }
 }
 
+impl ConceptKind {
+    /// Returns the concept_type string stored in `dereg_meta_store`.
+    /// Most concepts use the uppercase Debug name, but Inspection uses
+    /// "DES_INSPECTION" to distinguish from future PRJ_INSPECTION.
+    pub fn storage_type(&self) -> &'static str {
+        match self {
+            ConceptKind::Aggregate => "AGGREGATE",
+            ConceptKind::Command => "COMMAND",
+            ConceptKind::Event => "EVENT",
+            ConceptKind::Decision => "DECISION",
+            ConceptKind::Projection => "PROJECTION",
+            ConceptKind::Inspection => "DES_INSPECTION",
+            ConceptKind::EventStore => "EVENTSTORE",
+            ConceptKind::Template => "TEMPLATE",
+            ConceptKind::Validate => "VALIDATE",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum DeRegError {
     DuplicateName {

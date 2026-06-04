@@ -22,6 +22,7 @@ pub fn pretty_print_statement(stmt: &DeqlStatement) -> String {
         DeqlStatement::CreateProjection(p) => format_create_projection(p),
         DeqlStatement::CreateEventStore(es) => format_create_eventstore(es),
         DeqlStatement::CreateTemplate(t) => format_create_template(t),
+        DeqlStatement::CreateInspection(i) => format_create_inspection(i),
         DeqlStatement::Execute(ex) => format_execute(ex),
         DeqlStatement::InspectDecision(i) => format_inspect_decision(i),
         DeqlStatement::InspectProjection(i) => format_inspect_projection(i),
@@ -300,6 +301,25 @@ fn format_create_template(t: &CreateTemplate) -> String {
 
     out.push_str(");");
     out
+}
+
+fn format_create_inspection(i: &CreateInspection) -> String {
+    let mut s = String::new();
+    s.push_str(or_replace_str(i.or_replace));
+    s.push_str("INSPECTION ");
+    s.push_str(&i.name.node);
+    s.push_str("\n  ON DECISION ");
+    s.push_str(&i.decision.node);
+    s.push_str("\n  FROM ");
+    s.push_str(&i.from.node);
+    s.push_str("\n  INTO ");
+    s.push_str(&i.into_template.node);
+    if let Some(ref guard) = i.guard {
+        s.push_str("\n  WHERE ");
+        s.push_str(&guard.sql);
+    }
+    s.push(';');
+    s
 }
 
 fn format_execute(ex: &Execute) -> String {

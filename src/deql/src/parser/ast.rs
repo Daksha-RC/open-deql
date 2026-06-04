@@ -25,6 +25,7 @@ pub enum DeqlStatement {
     CreateProjection(CreateProjection),
     CreateEventStore(CreateEventStore),
     CreateTemplate(CreateTemplate),
+    CreateInspection(CreateInspection),
     Execute(Execute),
     InspectDecision(InspectDecision),
     InspectProjection(InspectProjection),
@@ -192,6 +193,18 @@ pub struct CreateTemplate {
 pub struct TemplateParam {
     pub name: Spanned<String>,
     pub data_type: Option<Spanned<DeqlType>>,
+}
+
+/// CREATE INSPECTION — a stored, reusable inspection definition.
+/// Not executed at creation time; controlled via START/STOP APIs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateInspection {
+    pub or_replace: bool,
+    pub name: Spanned<String>,
+    pub decision: Spanned<String>,
+    pub from: Spanned<String>,
+    pub into_template: Spanned<String>,
+    pub guard: Option<SqlFragment>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -23,6 +23,7 @@ pub fn build_meta(stmt: &DeqlStatement) -> Value {
         DeqlStatement::CreateProjection(p) => build_projection_meta(p),
         DeqlStatement::CreateEventStore(es) => build_eventstore_meta(es),
         DeqlStatement::CreateTemplate(t) => build_template_meta(t),
+        DeqlStatement::CreateInspection(i) => build_inspection_meta(i),
         _ => json!({}),
     }
 }
@@ -184,6 +185,17 @@ fn build_template_meta(t: &CreateTemplate) -> Value {
     json!({
         "parameters": params,
         "or_replace": t.or_replace,
+    })
+}
+
+fn build_inspection_meta(i: &CreateInspection) -> Value {
+    json!({
+        "name": i.name.node,
+        "decision_name": i.decision.node,
+        "input_table": i.from.node,
+        "output_table": i.into_template.node,
+        "guard_filter": i.guard.as_ref().map(|g| &g.sql),
+        "or_replace": i.or_replace,
     })
 }
 
