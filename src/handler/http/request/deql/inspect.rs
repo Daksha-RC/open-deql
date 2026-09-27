@@ -402,6 +402,7 @@ pub async fn start(
         range: range_filter,
         cancel,
         run_id: output_table.clone(),
+        decision_name: definition.decision_name.clone(),
     };
 
     // Spawn background task
@@ -1095,6 +1096,7 @@ pub async fn run(
         range: range_filter,
         cancel,
         run_id: output_table.clone(),
+        decision_name: decision_name.clone(),
     };
 
     crate::service::deql_inspect::execute_inspection(exec_params, inspect_state.clone()).await;

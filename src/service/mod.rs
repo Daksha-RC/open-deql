@@ -26,6 +26,8 @@ pub mod compact;
 pub mod dashboards;
 pub mod db;
 #[cfg(feature = "deql")]
+pub mod deql;
+#[cfg(feature = "deql")]
 pub mod deql_inspect;
 pub mod enrichment;
 pub mod enrichment_table;

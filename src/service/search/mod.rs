@@ -108,6 +108,8 @@ pub(crate) mod cardinality;
 pub(crate) mod cluster;
 pub(crate) mod datafusion;
 #[cfg(feature = "deql")]
+pub(crate) mod deql_inspection_rewrite;
+#[cfg(feature = "deql")]
 pub(crate) mod deql_virtual_rewrite;
 pub(crate) mod grpc;
 pub(crate) mod grpc_search;
@@ -142,6 +144,13 @@ pub async fn search(
     // Short-circuit before entering the standard search path.
     #[cfg(feature = "deql")]
     if let Some(response) = deql_virtual_rewrite::try_search_virtual(trace_id, org_id, stream_type, user_id.clone(), in_req).await {
+        return response;
+    }
+
+    // R3.7: Handle queries targeting DeQL inspection streams (deql_ins_*, deql_brn_*)
+    // Short-circuit before entering the standard search path.
+    #[cfg(feature = "deql")]
+    if let Some(response) = deql_inspection_rewrite::try_search_inspection(trace_id, org_id, stream_type, user_id.clone(), in_req).await {
         return response;
     }
 

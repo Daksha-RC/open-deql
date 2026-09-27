@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use chrono::{DateTime, Utc};
+use datafusion::datasource::TableProvider;
 use parking_lot::RwLock;
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -81,6 +82,9 @@ pub struct InspectionOrgState {
     pub serial_counters: Arc<RwLock<HashMap<String, u32>>>,
     /// Currently running inspection — at most ONE per org.
     pub running: Arc<RwLock<Option<RunHandle>>>,
+    /// DataFusion TableProvider instances for inspection output tables.
+    /// These are the in-memory providers that make tables queryable via DataFusion.
+    pub table_providers: Arc<RwLock<HashMap<String, Arc<dyn TableProvider>>>>,
 }
 
 /// Metadata about an in-memory output table.
@@ -129,6 +133,7 @@ impl InspectionOrgState {
             outputs: Arc::new(RwLock::new(HashMap::new())),
             serial_counters: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(RwLock::new(None)),
+            table_providers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -245,6 +250,25 @@ impl InspectionOrgState {
         }
 
         dropped
+    }
+
+    /// Get the TableProvider for a given table name, if it exists.
+    pub fn get_table_provider(&self, table_name: &str) -> Option<Arc<dyn TableProvider>> {
+        self.table_providers.read().get(table_name).cloned()
+    }
+
+    /// Register a TableProvider for a given table name.
+    pub fn register_table_provider(&self, table_name: &str, provider: Arc<dyn TableProvider>) {
+        self.table_providers.write().insert(table_name.to_string(), provider);
+    }
+
+    /// Update memory_bytes for a specific table entry.
+    /// This updates the OutputTableEntry's memory_bytes field.
+    pub fn update_memory(&self, table_name: &str, bytes: usize) {
+        let mut outputs = self.outputs.write();
+        if let Some(entry) = outputs.get_mut(table_name) {
+            entry.memory_bytes = bytes;
+        }
     }
 }
 
@@ -1127,6 +1151,63 @@ pub async fn deregister_output_from_catalog(
     Ok(())
 }
 
+/// Cleanup ephemeral streams on server startup.
+///
+/// Removes `deql_ins_*` and `deql_brn_*` streams from the catalog.
+/// These are ephemeral streams created by DeQL inspection with metadata
+/// `ephemeral: "true"`.
+///
+/// This prevents stale ephemeral entries from persisting across server restarts
+/// after a crash or unclean shutdown.
+pub async fn cleanup_ephemeral_streams(org_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use config::meta::stream::StreamType;
+    use crate::service::db::schema;
+
+    // List all logs streams for this org from the cache
+    let streams = schema::list_streams_from_cache(org_id, StreamType::Logs).await;
+
+    // Filter for ephemeral streams with deql_ins_* or deql_brn_* prefix
+    // These streams are marked with ephemeral metadata during registration
+    let ephemeral_streams: Vec<String> = streams
+        .into_iter()
+        .filter(|name| {
+            // Check if it's a deql inspection or branching table
+            name.starts_with("deql_ins_") || name.starts_with("deql_brn_")
+        })
+        .collect();
+
+    if ephemeral_streams.is_empty() {
+        log::debug!("No ephemeral streams to cleanup for org {}", org_id);
+        return Ok(());
+    }
+
+    // Delete each ephemeral stream from the catalog
+    for stream_name in &ephemeral_streams {
+        log::info!(
+            "Cleaning up ephemeral stream: {}/{}",
+            org_id,
+            stream_name
+        );
+        if let Err(e) = infra::schema::delete(org_id, StreamType::Logs, stream_name, None).await {
+            log::error!(
+                "Failed to delete ephemeral stream {}/{}: {}",
+                org_id,
+                stream_name,
+                e
+            );
+            // Continue with other streams - best effort cleanup
+        }
+    }
+
+    log::info!(
+        "Cleaned up {} ephemeral streams for org {}",
+        ephemeral_streams.len(),
+        org_id
+    );
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Execution Parameters & Background Task
 // ---------------------------------------------------------------------------
@@ -1148,6 +1229,7 @@ pub struct ExecutionParams {
     pub range: Option<(String, String)>,  // (from_id, to_id)
     pub cancel: CancellationToken,
     pub run_id: String,
+    pub decision_name: String,
 }
 
 /// Build a source query with filters applied in order: RANGE → WHERE → OFFSET → LIMIT
@@ -1373,6 +1455,138 @@ pub async fn execute_inspection(
     } else {
         OutputStatus::Done
     };
+
+    // Handle upsert: check if table already exists and append to it
+    #[cfg(feature = "deql")]
+    {
+        use crate::service::deql::InspectionTableProvider;
+
+        // Get the current memory bytes before any changes
+        let mut new_memory_bytes = 0usize;
+
+        if let Some(existing_provider) = inspect_state.get_table_provider(&params.output_table) {
+            // Downcast to InspectionTableProvider to call append_batches
+            if let Some(inspection_provider) = existing_provider.as_any().downcast_ref::<InspectionTableProvider>() {
+                // Upsert: append to existing provider
+                inspection_provider.append_batches(output_batches);
+                
+                // Also append to branching table if it exists
+                if let Some(brn_provider) = inspect_state.get_table_provider(&params.branching_table) {
+                    if let Some(brn_inspection_provider) = brn_provider.as_any().downcast_ref::<InspectionTableProvider>() {
+                        brn_inspection_provider.append_batches(branching_batches);
+                    }
+                }
+
+                // Update stats in existing OutputTableEntry if present
+                {
+                    let mut outputs = inspect_state.outputs.write();
+                    if let Some(entry) = outputs.get_mut(&params.output_table) {
+                        entry.rows_processed += global_row_idx;
+                        entry.accepted += total_accepted;
+                        entry.rejected += total_rejected;
+                        entry.errors += total_errors;
+                        entry.status = status.clone();
+                    }
+                    if let Some(entry) = outputs.get_mut(&params.branching_table) {
+                        entry.rows_processed += global_row_idx;
+                        entry.accepted += total_accepted;
+                        entry.rejected += total_rejected;
+                        entry.errors += total_errors;
+                        entry.status = status.clone();
+                    }
+                }
+
+                new_memory_bytes = inspect_state.table_providers.read()
+                    .get(&params.output_table)
+                    .and_then(|p| p.as_any().downcast_ref::<InspectionTableProvider>())
+                    .map(|p| p.memory_bytes())
+                    .unwrap_or(0)
+                    + inspect_state.table_providers.read()
+                    .get(&params.branching_table)
+                    .and_then(|p| p.as_any().downcast_ref::<InspectionTableProvider>())
+                    .map(|p| p.memory_bytes())
+                    .unwrap_or(0);
+            } else {
+                tracing::error!("Failed to downcast table provider to InspectionTableProvider for {}", params.output_table);
+                // Fall through to create new providers
+            }
+        } else {
+            // Fresh: create new providers and register them
+            let output_provider = Arc::new(InspectionTableProvider::new(params.output_schema.clone()));
+            output_provider.append_batches(output_batches);
+            inspect_state.register_table_provider(&params.output_table, output_provider.clone());
+
+            let brn_provider = Arc::new(InspectionTableProvider::new(params.branching_schema.clone()));
+            brn_provider.append_batches(branching_batches);
+            inspect_state.register_table_provider(&params.branching_table, brn_provider.clone());
+
+            // Register in catalog if not already done
+            if let Err(e) = register_output_in_catalog(
+                &params.org_id,
+                &params.output_table,
+                &params.output_schema,
+            )
+            .await
+            {
+                tracing::warn!("Failed to register output table in catalog: {}", e);
+            }
+
+            if let Err(e) = register_output_in_catalog(
+                &params.org_id,
+                &params.branching_table,
+                &params.branching_schema,
+            )
+            .await
+            {
+                tracing::warn!("Failed to register branching table in catalog: {}", e);
+            }
+
+            // Create new OutputTableEntry
+            {
+                let mut outputs = inspect_state.outputs.write();
+                outputs.insert(
+                    params.output_table.clone(),
+                    OutputTableEntry {
+                        table_name: params.output_table.clone(),
+                        branching_table_name: params.branching_table.clone(),
+                        inspection_name: Some(params.decision_name.clone()),
+                        decision_name: params.decision_name.clone(),
+                        status: status.clone(),
+                        rows_processed: global_row_idx,
+                        accepted: total_accepted,
+                        rejected: total_rejected,
+                        errors: total_errors,
+                        schema: params.output_schema.clone(),
+                        created_at: Utc::now(),
+                        memory_bytes: 0, // Will be updated below
+                    },
+                );
+                outputs.insert(
+                    params.branching_table.clone(),
+                    OutputTableEntry {
+                        table_name: params.branching_table.clone(),
+                        branching_table_name: params.branching_table.clone(),
+                        inspection_name: Some(params.decision_name.clone()),
+                        decision_name: params.decision_name.clone(),
+                        status: status.clone(),
+                        rows_processed: global_row_idx,
+                        accepted: total_accepted,
+                        rejected: total_rejected,
+                        errors: total_errors,
+                        schema: params.branching_schema.clone(),
+                        created_at: Utc::now(),
+                        memory_bytes: 0, // Will be updated below
+                    },
+                );
+            }
+
+            new_memory_bytes = output_provider.memory_bytes() + brn_provider.memory_bytes();
+        }
+
+        // Update memory_bytes in OutputTableEntry
+        inspect_state.update_memory(&params.output_table, new_memory_bytes);
+        inspect_state.update_memory(&params.branching_table, new_memory_bytes);
+    }
 
     // Update final state
     inspect_state.clear_running();

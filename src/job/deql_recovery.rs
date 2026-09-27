@@ -48,7 +48,12 @@ pub async fn deql_startup_recovery() {
         "DeQL startup recovery: rehydrating org(s)"
     );
 
-    // 2. Rehydrate each org sequentially (avoids thundering herd on DB)
+    // 2. Cleanup ephemeral streams for each org before rehydration
+    for org_id in &org_ids {
+        cleanup_ephemeral_streams_for_org(org_id).await;
+    }
+
+    // 3. Rehydrate each org sequentially (avoids thundering herd on DB)
     for org_id in &org_ids {
         recover_org(org_id).await;
     }
@@ -57,6 +62,29 @@ pub async fn deql_startup_recovery() {
         org_count = org_ids.len(),
         "DeQL startup recovery: completed for all orgs"
     );
+}
+
+/// Cleanup ephemeral streams (deql_ins_*, deql_brn_*) from catalog.
+///
+/// Removes stale ephemeral entries that may remain after a crash or unclean shutdown.
+async fn cleanup_ephemeral_streams_for_org(org_id: &str) {
+    use crate::service::deql_inspect;
+    
+    match deql_inspect::cleanup_ephemeral_streams(org_id).await {
+        Ok(()) => {
+            tracing::debug!(
+                org_id = %org_id,
+                "DeQL startup recovery: ephemeral stream cleanup completed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                org_id = %org_id,
+                error = %e,
+                "DeQL startup recovery: ephemeral stream cleanup failed"
+            );
+        }
+    }
 }
 
 /// Rehydrate a single org and register its virtual stream schemas.
