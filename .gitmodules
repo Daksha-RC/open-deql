@@ -1,9 +1,3 @@
 [submodule ".ai-meta"]
 	path = .ai-meta
 	url = git@github.com:Daksha-RC/deql-dev-meta.git
-[submodule "deql-cli"]
-	path = deql-cli
-	url = git@github.com:Daksha-RC/deql-cli.git
-[submodule "deql-lang"]
-	path = deql-lang
-	url = git@github.com:deql-lang/deql-lang.git
