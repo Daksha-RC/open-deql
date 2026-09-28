@@ -13,7 +13,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import configService from "@/services/config";
+import { configQuery } from "@/services/config.queries";
+import { queryClient } from "@/composables/query/queryClient";
 
 /**
  * Approach:
@@ -25,7 +26,7 @@ import configService from "@/services/config";
  */
 
 class BuildVersionChecker {
-  private readonly STORAGE_KEY = 'o2_initial_commit_hash';
+  private readonly STORAGE_KEY = "o2_initial_commit_hash";
   private isChecking = false;
   private lastCheckTime = 0;
   private cacheDuration = 5 * 60 * 1000; // Cache for 5 minutes
@@ -38,7 +39,7 @@ class BuildVersionChecker {
     try {
       return localStorage.getItem(this.STORAGE_KEY);
     } catch (error) {
-      console.warn('Failed to read from localStorage:', error);
+      console.warn("Failed to read from localStorage:", error);
       return null;
     }
   }
@@ -52,7 +53,7 @@ class BuildVersionChecker {
     try {
       localStorage.setItem(this.STORAGE_KEY, commitHash);
     } catch (error) {
-      console.warn('Failed to write to localStorage:', error);
+      console.warn("Failed to write to localStorage:", error);
     }
   }
 
@@ -63,12 +64,17 @@ class BuildVersionChecker {
     const now = Date.now();
 
     // Return cached version if still fresh
-    if (this.cachedConfig && (now - this.lastCheckTime) < this.cacheDuration) {
+    if (this.cachedConfig && now - this.lastCheckTime < this.cacheDuration) {
       return this.cachedConfig.commit_hash;
     }
 
-    const response = await configService.get_config();
-    this.cachedConfig = response.data;
+    const options = configQuery();
+    await queryClient.invalidateQueries({
+      queryKey: options.queryKey,
+      exact: true,
+      refetchType: "none",
+    });
+    this.cachedConfig = await queryClient.fetchQuery(options);
     this.lastCheckTime = now;
 
     return this.cachedConfig.commit_hash;
@@ -125,10 +131,10 @@ class BuildVersionChecker {
     if (error instanceof Error) {
       return error.message;
     }
-    if ('message' in error && typeof error.message === 'string') {
+    if ("message" in error && typeof error.message === "string") {
       return error.message;
     }
-    return '';
+    return "";
   }
 
   /**
@@ -139,7 +145,9 @@ class BuildVersionChecker {
     const errorMessage = this.getErrorMessage(error);
 
     // Check if it's a chunk load error
-    const isChunkError = /Loading chunk|Failed to fetch dynamically imported module/i.test(errorMessage);
+    const isChunkError = /Loading chunk|Failed to fetch dynamically imported module/i.test(
+      errorMessage,
+    );
 
     if (!isChunkError) {
       return false;

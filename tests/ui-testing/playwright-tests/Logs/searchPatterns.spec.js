@@ -20,8 +20,13 @@ const patternsTestData = require("../../../test-data/patterns_test_data.json");
 const { ingestCustomData, enableLogPatternsExtraction, waitForStreamData } = require('../utils/data-ingestion.js');
 const { getOrgIdentifier } = require('../utils/cloud-auth.js');
 
-// Dedicated stream for pattern tests with proper configuration
-const PATTERNS_STREAM = "e2e_http_patterns";
+// Dedicated stream for pattern tests with proper configuration.
+// Unique per-run suffix so concurrent alpha runs never share the name: on the shared
+// cloud org a fixed name meant one run's pre-test cleanup was deleting the stream while
+// another run's beforeAll ingested into it, returning 400 "stream is being deleted" and
+// leaving the stream absent for selectStream. cleanup.spec.js reclaims these via the
+// `/^e2e_http_patterns/` prefix pattern.
+const PATTERNS_STREAM = `e2e_http_patterns_${Date.now().toString(36)}`;
 
 // Track if data has been ingested (for serial test execution)
 let dataIngested = false;
@@ -40,13 +45,11 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
      */
     async function setupPatternsView(page, pm, timeRange = '1hour') {
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         // Set time range
         if (timeRange === '1hour') {
@@ -57,14 +60,24 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         }
 
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
-        return await pm.logsPage.waitForPatternsToLoad(60000);
+        let result = await pm.logsPage.waitForPatternsToLoad(60000);
+
+        // Pattern extraction is async on the backend; under alpha indexing load it can still
+        // be empty/timeout after the first 60s wait (the CI flake here). Re-run the query to
+        // re-trigger extraction and wait once more before giving up — resilience for the
+        // data-dependency, not an assertion mask (callers still assert the returned state).
+        if (result !== 'patterns' && result !== 'statistics') {
+            testLogger.warn(`Patterns not ready (${result}) — re-running query and retrying once`);
+            await pm.logsPage.clickRefreshButton();
+            result = await pm.logsPage.waitForPatternsToLoad(60000);
+        }
+
+        return result;
     }
 
     test.beforeAll(async ({ browser }) => {
@@ -81,7 +94,6 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         try {
             // Navigate to establish session
             await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-            await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
             // Ingest pattern-rich data with fresh timestamps
             const baseTimestamp = Date.now() * 1000; // microseconds
@@ -91,12 +103,21 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
             }));
 
             testLogger.info(`Ingesting ${freshData.length} logs to stream: ${PATTERNS_STREAM}`);
-            const ingestResponse = await ingestCustomData(page, PATTERNS_STREAM, freshData);
+            // Retry on the transient "stream is being deleted" (400) that a concurrent run's
+            // cleanup can trigger — the delete completes, then the POST recreates the stream.
+            let ingestResponse;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                ingestResponse = await ingestCustomData(page, PATTERNS_STREAM, freshData);
+                if (ingestResponse.status === 200) break;
+                const msg = JSON.stringify(ingestResponse.data || {});
+                testLogger.warn(`Pattern data ingestion attempt ${attempt} returned ${ingestResponse.status}`, { data: msg.slice(0, 160) });
+                if (attempt < 3) await page.waitForTimeout(3000);
+            }
 
             if (ingestResponse.status === 200) {
-                testLogger.info('Pattern data ingested successfully', { status: ingestResponse.status });
+                testLogger.info('Pattern data ingested successfully', { status: ingestResponse.status, stream: PATTERNS_STREAM });
             } else {
-                testLogger.error('Pattern data ingestion failed', { status: ingestResponse.status, data: ingestResponse.data });
+                testLogger.error('Pattern data ingestion failed after retries', { status: ingestResponse.status, data: ingestResponse.data });
             }
 
             // Enable log patterns extraction on the stream
@@ -111,7 +132,10 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
                 testLogger.warn('Stream data polling timed out, proceeding anyway...');
             }
 
-            dataIngested = true;
+            // Only latch the "already ingested" guard when the stream actually landed, so a
+            // transient ingest failure doesn't make every test in the serial block run
+            // against a non-existent stream.
+            dataIngested = ingestResponse.status === 200;
         } finally {
             await context.close();
         }
@@ -127,7 +151,6 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         pm = new PageManager(page);
 
         // Post-authentication stabilization wait
-        await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
 
         testLogger.info(`Test setup completed - using ${PATTERNS_STREAM} stream`);
     });
@@ -144,7 +167,6 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify Patterns toggle is visible (Enterprise)');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // STRONG ASSERTION: Patterns toggle must be visible in Enterprise edition
         await pm.logsPage.expectPatternsToggleVisible();
@@ -156,26 +178,22 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify patterns view activates on toggle click');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Select stream and set time range
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         // Click patterns toggle
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // STRONG ASSERTION: Patterns toggle should be in selected state
         await pm.logsPage.expectPatternsToggleSelected();
@@ -194,35 +212,34 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify pattern view shows valid state');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         // Switch to patterns view
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for patterns to load
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
         if (result === 'statistics') {
-            // Statistics element is visible - verify it shows pattern count
+            // The old "N patterns found" summary was removed in the patterns UI
+            // redesign; the severity filter row now stands in for it and only
+            // renders once patterns exist, so assert on that contract instead of
+            // on summary copy that no longer exists.
             await pm.logsPage.expectPatternStatisticsVisible();
             const statsText = await pm.logsPage.getPatternStatisticsText();
-            expect(statsText).toContain('patterns found');
-            testLogger.info(`Statistics: ${statsText}`);
+            expect(statsText.trim().length).toBeGreaterThan(0);
+            testLogger.info(`Severity filter: ${statsText}`);
         } else if (result === 'patterns') {
             // Pattern cards are visible (statistics element may not exist in UI)
             await pm.logsPage.expectPatternCardsVisible();
@@ -246,24 +263,20 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify pattern cards display correct information');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -298,24 +311,20 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify pattern details dialog opens on card click');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -347,24 +356,20 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify Previous/Next navigation in pattern details');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -372,30 +377,25 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
             const cardCount = await pm.logsPage.getPatternCardCount();
 
             if (cardCount >= 2) {
-                // Open first pattern details
-                await pm.logsPage.clickPatternDetailsIcon(0);
+                const absoluteIndex = await pm.logsPage.clickPatternDetailsIcon(0);
                 await pm.logsPage.expectPatternDetailsDialogOpen();
 
-                // STRONG ASSERTION: Previous should be disabled on first pattern
-                await pm.logsPage.expectPatternDetailPreviousBtnDisabled();
-
-                // STRONG ASSERTION: Next should be enabled
-                await pm.logsPage.expectPatternDetailNextBtnEnabled();
-
-                // Navigate to next pattern
-                await pm.logsPage.clickPatternDetailNextBtn();
-
-                // Verify we're on pattern 2
-                await pm.logsPage.waitForPatternDetailIndex(2);
-
-                // STRONG ASSERTION: Previous should now be enabled
-                await pm.logsPage.expectPatternDetailPreviousBtnEnabled();
-
-                // Navigate back
-                await pm.logsPage.clickPatternDetailPreviousBtn();
-
-                // Verify we're back on pattern 1
-                await pm.logsPage.waitForPatternDetailIndex(1);
+                if (absoluteIndex === 0) {
+                    await pm.logsPage.expectPatternDetailPreviousBtnDisabled();
+                    await pm.logsPage.expectPatternDetailNextBtnEnabled();
+                    await pm.logsPage.clickPatternDetailNextBtn();
+                    await pm.logsPage.waitForPatternDetailIndex(2);
+                    await pm.logsPage.expectPatternDetailPreviousBtnEnabled();
+                    await pm.logsPage.clickPatternDetailPreviousBtn();
+                    await pm.logsPage.waitForPatternDetailIndex(1);
+                } else {
+                    await pm.logsPage.expectPatternDetailPreviousBtnEnabled();
+                    await pm.logsPage.clickPatternDetailPreviousBtn();
+                    await pm.logsPage.waitForPatternDetailIndex(absoluteIndex);
+                    await pm.logsPage.expectPatternDetailNextBtnEnabled();
+                    await pm.logsPage.clickPatternDetailNextBtn();
+                    await pm.logsPage.waitForPatternDetailIndex(absoluteIndex + 1);
+                }
 
                 await pm.logsPage.closePatternDetailsDialog();
                 testLogger.info('Navigation between patterns works correctly');
@@ -413,24 +413,20 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify Include button functionality');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -442,7 +438,6 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
 
                 // Click include button
                 await pm.logsPage.clickPatternIncludeBtn(0);
-                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
 
                 // ASSERTION: After clicking Include, page should navigate away from patterns view
                 // Verify logs table is visible (pattern view is exited)
@@ -463,24 +458,20 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify Exclude button functionality');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -492,7 +483,6 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
 
                 // Click exclude button
                 await pm.logsPage.clickPatternExcludeBtn(0);
-                await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
 
                 // ASSERTION: After clicking Exclude, page should navigate away from patterns view
                 // Verify logs table is visible (pattern view is exited)
@@ -517,21 +507,17 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify empty state handling');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Use a short time range that's likely to have no patterns
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.setTimeToPast30Seconds();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -552,24 +538,20 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         testLogger.info('Test: Verify details icon opens pattern details dialog');
 
         await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         await pm.logsPage.selectStream(PATTERNS_STREAM);
 
         // Switch off quick mode (required for patterns)
         await pm.logsPage.clickQuickModeToggle();
-        await page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
 
         await pm.logsPage.clickDateTimeButton();
         await pm.logsPage.clickRelative1HourOrFallback();
         await pm.logsPage.clickRefreshButton();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         // Wait for logs to load first
         await pm.logsPage.waitForLogsTableToLoad();
 
         await pm.logsPage.clickPatternsToggle();
-        await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
 
         const result = await pm.logsPage.waitForPatternsToLoad(60000);
 
@@ -660,9 +642,12 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
 
         for (let i = 0; i < Math.min(cardCount, 5); i++) {
             const patternText = await pm.logsPage.getPatternCardTemplateText(i);
-            const hasWildcards = patternText.includes('<:') ||
-                               patternText.includes('<*>') ||
-                               patternText.includes('[<:');
+
+            // Check for wildcard chip DOM elements (rendered as .wildcard-chip)
+            // textContent returns short labels like "str"/"num" rather than the
+            // raw template format like "<:STR>"/"<:NUM>"
+            const chipCount = await pm.logsPage.getPatternCardWildcardChipCount(i);
+            const hasWildcards = chipCount > 0;
 
             if (hasWildcards) {
                 patternsWithWildcards++;
@@ -705,8 +690,7 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
 
         // Find wildcard chips - they have class 'wildcard-chip' in PatternCard.vue
         // Tooltips only appear when tok.sampleValues.length > 0 (see PatternCard.vue:48)
-        const wildcardChips = page.locator('.wildcard-chip');
-        const chipCount = await wildcardChips.count();
+        const chipCount = await pm.logsPage.getWildcardChipCount();
         testLogger.info(`Found ${chipCount} wildcard chips on page`);
 
         // ASSERTION: Must have wildcard chips to test
@@ -719,27 +703,24 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         const chipsToTry = Math.min(chipCount, 5);
 
         for (let i = 0; i < chipsToTry && !tooltipFound; i++) {
-            const chip = wildcardChips.nth(i);
-            const isVisible = await chip.isVisible().catch(() => false);
-
+            const isVisible = await pm.logsPage.isWildcardChipVisible(i);
             if (!isVisible) continue;
 
-            const chipText = await chip.textContent().catch(() => '');
+            const chipText = await pm.logsPage.getWildcardChipText(i);
             testLogger.info(`Trying chip ${i}: ${chipText}`);
 
             // Hover over the chip
-            await chip.hover();
+            await pm.logsPage.hoverWildcardChip(i);
 
-            // Wait for Quasar tooltip (delay is 300ms + render time)
+            // Wait for tooltip (delay is 300ms + render time)
             await page.waitForTimeout(500);
 
             // Check if tooltip appeared
-            const tooltip = page.locator('.q-tooltip');
-            const tooltipVisible = await tooltip.isVisible().catch(() => false);
+            const tooltipVisible = await pm.logsPage.isTooltipVisible(1000);
 
             if (tooltipVisible) {
                 tooltipFound = true;
-                tooltipContent = await tooltip.innerText().catch(() => '');
+                tooltipContent = await pm.logsPage.getTooltipText(1000) || '';
                 testLogger.info(`✅ Tooltip found on chip ${i}: ${tooltipContent.substring(0, 100)}`);
 
                 // ASSERTION: Tooltip content must not be empty
@@ -765,11 +746,12 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
             testLogger.info('This is data-dependent: tooltips only appear when sampleValues are populated');
 
             // ASSERTION: At minimum, chips must render with proper text
-            // Wildcard formats: <*> for variables, <:NAME> for named tokens (e.g., <:TIMESTAMP>)
-            const firstChipText = await wildcardChips.first().textContent().catch(() => '');
+            // wildcardLabel() maps <:STR>→"str", <:NUM>→"num", <*>→"<*>" etc.
+            // chips display short labels, not raw angle-bracket tokens
+            const firstChipText = await pm.logsPage.getWildcardChipText(0);
             expect(firstChipText.length).toBeGreaterThan(0);
-            // Match any wildcard format: <*>, <:WORD>, or angle brackets with content
-            expect(firstChipText).toMatch(/<[*:]|<\*>|<:[A-Z]/);
+            // Match wildcard chip labels: <*> literal or short type label (str, num, ip, ts, etc.)
+            expect(firstChipText).toMatch(/^[a-z0-9]+$|^<\*>$/);
             testLogger.info('✅ Wildcard chips render correctly (no sampleValues in data for tooltips)');
         }
 
@@ -795,15 +777,12 @@ test.describe("Search Patterns Feature", { tag: ['@enterprise', '@searchPatterns
         const anomalyBadgeInfo = [];
 
         for (let i = 0; i < Math.min(cardCount, 10); i++) {
-            const badgeSelector = `[data-test="pattern-card-${i}-anomaly-badge"]`;
-            const badge = page.locator(badgeSelector);
-            // Use timeout to handle badges that render with slight delay
-            const isVisible = await badge.isVisible({ timeout: 500 }).catch(() => false);
+            const isVisible = await pm.logsPage.isPatternAnomaly(i);
 
             if (isVisible) {
                 patternsWithAnomalyBadge++;
-                const badgeText = await badge.textContent().catch(() => '');
-                anomalyBadgeInfo.push({ index: i, text: badgeText.trim() });
+                const badgeText = await pm.logsPage.getPatternAnomalyBadgeText(i);
+                anomalyBadgeInfo.push({ index: i, text: badgeText });
             }
         }
 

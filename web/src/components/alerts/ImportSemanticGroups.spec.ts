@@ -15,12 +15,8 @@
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
-
-installQuasar({ plugins: [Dialog, Notify] });
 
 const mockBack = vi.fn();
 vi.mock("vue-router", () => ({
@@ -36,21 +32,76 @@ const mockDiffData = vi.hoisted(() => ({
   modifications: [
     {
       current: { id: "mod-1", display: "Existing Group", fields: ["host"], normalize: false },
-      proposed: { id: "mod-1", display: "Updated Group", fields: ["host", "region"], normalize: false },
+      proposed: {
+        id: "mod-1",
+        display: "Updated Group",
+        fields: ["host", "region"],
+        normalize: false,
+      },
     },
   ],
   unchanged: [{ id: "unch-1", display: "Stable Group", fields: ["level"], normalize: false }],
 }));
 
-vi.mock("@/services/alerts", () => ({
-  default: {
-    previewSemanticGroupsDiff: vi.fn().mockResolvedValue({ data: mockDiffData }),
-    saveSemanticGroups: vi.fn().mockResolvedValue({ data: {} }),
-  },
-}));
+vi.mock("@/services/alerts", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      previewSemanticGroupsDiff: vi.fn().mockResolvedValue({ data: mockDiffData }),
+      saveSemanticGroups: vi.fn().mockResolvedValue({ data: {} }),
+    },
+  });
+});
 
 import ImportSemanticGroups from "@/components/alerts/ImportSemanticGroups.vue";
+import { queryClient } from "@/composables/query/queryClient";
 import alertsService from "@/services/alerts";
+import { serviceStreamKeys } from "@/services/service_streams.querykeys";
+
+const ODialogStub = {
+  name: "ODialog",
+  inheritAttrs: false,
+  template: `
+    <div
+      v-if="open"
+      :data-test="'o-dialog-stub'"
+      :data-title="title"
+      :data-sub-title="subTitle"
+      :data-size="size"
+      :data-primary-label="primaryButtonLabel"
+    >
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+      <button data-test="o-dialog-primary" @click="$emit('click:primary')">{{ primaryButtonLabel }}</button>
+      <button data-test="o-dialog-secondary" @click="$emit('click:secondary')">secondary</button>
+      <button data-test="o-dialog-neutral" @click="$emit('click:neutral')">neutral</button>
+      <button data-test="o-dialog-close" @click="$emit('update:open', false)">close</button>
+    </div>
+  `,
+  props: [
+    "open",
+    "persistent",
+    "size",
+    "title",
+    "subTitle",
+    "showClose",
+    "width",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+};
 
 async function mountComp(props: Record<string, any> = {}) {
   return mount(ImportSemanticGroups, {
@@ -67,6 +118,7 @@ async function mountComp(props: Record<string, any> = {}) {
           props: ["title", "testPrefix", "isImporting", "showSplitter", "editorHeights"],
           emits: ["back", "cancel", "import", "update:jsonArray"],
         },
+        ODialog: ODialogStub,
       },
     },
   });
@@ -310,6 +362,25 @@ describe("ImportSemanticGroups - applyChanges", () => {
     expect(mockBack).toHaveBeenCalled();
   });
 
+  // The groups are cached, and dimension analytics is computed from them, so an import expires the whole scope.
+  it("expires the service-correlation cache after a successful apply, and not after a failed one", async () => {
+    const scope = { queryKey: serviceStreamKeys.all("default") };
+    const spy = vi.spyOn(queryClient, "invalidateQueries");
+    const w = await mountComp();
+    (w.vm as any).diffData = mockDiffData;
+    (w.vm as any).selectedAdditions = ["add-1"];
+
+    vi.mocked(alertsService.saveSemanticGroups).mockRejectedValueOnce(new Error("boom"));
+    await (w.vm as any).applyChanges();
+    await flushPromises();
+    expect(spy).not.toHaveBeenCalledWith(scope);
+
+    await (w.vm as any).applyChanges();
+    await flushPromises();
+    expect(spy).toHaveBeenCalledWith(scope);
+    spy.mockRestore();
+  });
+
   it("sets isApplying to false after completion", async () => {
     const w = await mountComp();
     (w.vm as any).diffData = mockDiffData;
@@ -325,6 +396,75 @@ describe("ImportSemanticGroups - handleBack", () => {
     const w = await mountComp();
     (w.vm as any).handleBack();
     expect(mockBack).toHaveBeenCalled();
+  });
+});
+
+describe("ImportSemanticGroups - ODialog integration", () => {
+  it("group details dialog is hidden by default", async () => {
+    const w = await mountComp();
+    const dialogs = w.findAll('[data-test="o-dialog-stub"]');
+    expect(dialogs.length).toBe(0);
+  });
+
+  it("opens group details ODialog when viewGroup is called", async () => {
+    const w = await mountComp();
+    (w.vm as any).viewGroup(mockDiffData.additions[0]);
+    await flushPromises();
+    const dialogs = w.findAll('[data-test="o-dialog-stub"]');
+    expect(dialogs.length).toBe(1);
+    expect(dialogs[0].attributes("data-title")).toBe("New Group 1");
+    expect(dialogs[0].attributes("data-sub-title")).toBe("ID: add-1");
+    expect(dialogs[0].attributes("data-size")).toBe("md");
+    expect(dialogs[0].attributes("data-primary-label")).toBe("Close");
+  });
+
+  it("opens modification ODialog when viewModification is called", async () => {
+    const w = await mountComp();
+    (w.vm as any).viewModification(mockDiffData.modifications[0]);
+    await flushPromises();
+    const dialogs = w.findAll('[data-test="o-dialog-stub"]');
+    expect(dialogs.length).toBe(1);
+    expect(dialogs[0].attributes("data-title")).toBe("Updated Group");
+    expect(dialogs[0].attributes("data-sub-title")).toBe("Compare Changes");
+    expect(dialogs[0].attributes("data-size")).toBe("lg");
+  });
+
+  it("closes group details ODialog when primary button is clicked", async () => {
+    const w = await mountComp();
+    (w.vm as any).viewGroup(mockDiffData.additions[0]);
+    await flushPromises();
+    expect((w.vm as any).showGroupDialog).toBe(true);
+    await w.find('[data-test="o-dialog-primary"]').trigger("click");
+    await flushPromises();
+    expect((w.vm as any).showGroupDialog).toBe(false);
+  });
+
+  it("closes modification ODialog when primary button is clicked", async () => {
+    const w = await mountComp();
+    (w.vm as any).viewModification(mockDiffData.modifications[0]);
+    await flushPromises();
+    expect((w.vm as any).showModificationDialog).toBe(true);
+    await w.find('[data-test="o-dialog-primary"]').trigger("click");
+    await flushPromises();
+    expect((w.vm as any).showModificationDialog).toBe(false);
+  });
+
+  it("closes group details ODialog via update:open emit", async () => {
+    const w = await mountComp();
+    (w.vm as any).viewGroup(mockDiffData.additions[0]);
+    await flushPromises();
+    await w.find('[data-test="o-dialog-close"]').trigger("click");
+    await flushPromises();
+    expect((w.vm as any).showGroupDialog).toBe(false);
+  });
+
+  it("closes modification ODialog via update:open emit", async () => {
+    const w = await mountComp();
+    (w.vm as any).viewModification(mockDiffData.modifications[0]);
+    await flushPromises();
+    await w.find('[data-test="o-dialog-close"]').trigger("click");
+    await flushPromises();
+    expect((w.vm as any).showModificationDialog).toBe(false);
   });
 });
 

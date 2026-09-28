@@ -17,536 +17,950 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <!-- eslint-disable vue/v-on-event-hyphenation -->
 <!-- eslint-disable vue/attribute-hyphenation -->
 
-
 <template>
-  <q-page class="q-pa-none" style="min-height: inherit; height: calc(100vh - 44px);">
-    <div>
-      <div class="card-container tw:mb-[0.625rem]">
-      <div class="tw:flex tw:justify-between tw:items-center tw:px-4 tw:py-3 tw:full-width tw:h-[68px] tw:border-b-[1px]"
+  <OPageLayout
+    :title="t('serviceAccounts.header')"
+    icon="manage-accounts"
+    :subtitle="t('serviceAccounts.headerSubtitle')"
+    bleed
+  >
+    <template #actions>
+      <OButton
+        data-test="service-accounts-add-btn"
+        variant="primary"
+        size="sm"
+        @click="addRoutePush({})"
       >
-
-        <div
-            class="q-table__title full-width tw:font-[600]"
-            data-test="service-accounts-title-text"
-          >
-            {{ t("serviceAccounts.header") }}
-          </div>
-          <div class="full-width tw:flex tw:justify-end">
-            <q-input
+        {{ t("serviceAccounts.add") }}
+      </OButton>
+    </template>
+    <div class="min-h-0 w-full flex-1 overflow-hidden">
+      <div class="bg-card-glass-bg h-full">
+        <OTable
+          :frame="false"
+          :data="serviceAccountsState.service_accounts_users"
+          :columns="columns"
+          row-key="email"
+          :loading="loading"
+          :forbidden="forbidden"
+          pagination="client"
+          :page-size="20"
+          :page-size-options="[20, 50, 100, 250, 500]"
+          :footer-title="t('serviceAccounts.header')"
+          sorting="client"
+          selection="multiple"
+          :selected-ids="selectedAccountEmails"
+          :is-row-selectable="isRowSelectable"
+          v-model:global-filter="filterQuery"
+          :show-global-filter="false"
+          filter-mode="client"
+          :default-columns="false"
+          show-index
+          :enable-column-resize="true"
+          :persist-columns="true"
+          table-id="iam-service-accounts-list"
+          @update:selected-ids="handleSelectedIdsUpdate"
+        >
+          <template #toolbar>
+            <div class="flex w-full min-w-0 items-center gap-2 max-md:contents">
+              <OSearchInput
                 v-model="filterQuery"
-                borderless
-                dense
-                class="q-ml-auto no-border o2-search-input tw:h-[36px]"
                 :placeholder="t('serviceAccounts.search')"
-              >
-                <template #prepend>
-                  <q-icon class="o2-search-input-icon" name="search" />
-                </template>
-              </q-input>
-              <q-btn
-                class="q-ml-sm o2-primary-button tw:h-[36px]"
-                flat
-                no-caps
-                :label="t(`serviceAccounts.add`)"
-                @click="addRoutePush({})"
+                class="flex-1"
+                data-test="iam-service-accounts-search-input"
               />
-          </div>
-      </div>
-      </div>
-      <div class="tw:w-full tw:h-full">
-        <div class="card-container tw:h-[calc(100vh-127px)]">
-          <q-table
-            ref="qTable"
-            class="o2-quasar-table o2-row-md o2-quasar-table-header-sticky"
-            :rows="visibleRows"
-            :columns="columns"
-            row-key="email"
-            selection="multiple"
-            v-model:selected="selectedAccounts"
-            :pagination="pagination"
-            :filter="filterQuery"
-            :style="hasVisibleRows ? 'height: calc(100vh - 127px); overflow-y: auto;' : ''"
-          >
-            <template #no-data>
-              <NoData></NoData>
-            </template>
-
-            <template v-slot:body-selection="scope">
-              <q-td auto-width>
-                <q-checkbox v-model="scope.selected" size="sm" class="o2-table-checkbox" :disable="scope.row.is_system" />
-              </q-td>
-            </template>
-
-            <template #body-cell-email="props">
-              <q-td :props="props">
-                <template v-if="props.row.is_system">
-                  <span class="text-weight-medium">AI SRE Agent</span>
-                  <q-badge color="blue-2" text-color="blue-8" label="system" class="q-ml-sm q-px-xs" style="font-size: 10px;" />
-                </template>
-                <template v-else>{{ props.row.email }}</template>
-              </q-td>
-            </template>
-
-            <template #body-cell-first_name="props">
-              <q-td :props="props">
-                <template v-if="props.row.is_system && props.row.description">{{ props.row.description }}</template>
-                <template v-else>{{ props.row.first_name }}</template>
-              </q-td>
-            </template>
-
-            <template #body-cell-token="props">
-            <q-td :props="props" side>
-              <span class="tw:font-mono">{{ props.row.token || '************' }}</span>
-            </q-td>
+            </div>
+          </template>
+          <template #toolbar-trailing>
+            <ORefreshButton
+              layout="inline"
+              variant="outline"
+              :last-run-at="lastUpdatedAt"
+              :loading="fetching"
+              shortcut-id="iamServiceAccountsRefresh"
+              data-test="iam-service-accounts-refresh-btn"
+              @click="refreshServiceAccounts"
+            />
+          </template>
+          <template #empty>
+            <OEmptyState
+              size="hero"
+              preset="no-service-accounts"
+              :filtered="!!filterQuery"
+              @action="(id) => (id === 'clear-filters' ? (filterQuery = '') : addRoutePush({}))"
+            />
           </template>
 
-            <template #body-cell-actions="props">
-              <q-td :props="props" side>
-                <template v-if="props.row.is_system">
-                  <q-badge color="grey-6" :label="t('serviceAccounts.systemManaged', 'System Managed')" class="q-px-sm q-py-xs">
-                    <q-tooltip v-if="props.row.description">{{ props.row.description }}</q-tooltip>
-                  </q-badge>
-                </template>
-                <template v-else>
-                  <q-btn
-                    data-test="service-accounts-refresh"
-                    :title="t('serviceAccounts.refresh')"
-                    icon="refresh"
-                    class="q-ml-xs"
-                    padding="sm"
-                    unelevated
-                    size="sm"
-                    round
-                    flat
-                    style="cursor: pointer !important"
-                    @click="confirmRefreshAction(props.row)"
-                  >
-                  </q-btn>
-                  <q-btn
-                    data-test="service-accounts-edit"
-                    :title="t('serviceAccounts.update')"
-                    icon="edit"
-                    class="q-ml-xs"
-                    padding="sm"
-                    unelevated
-                    size="sm"
-                    round
-                    flat
-                    @click="addRoutePush(props)"
-                    style="cursor: pointer !important"
-                  >
-                  </q-btn>
-                  <q-btn
-                    data-test="service-accounts-delete"
-                    :title="t('serviceAccounts.delete')"
-                    class="q-ml-xs"
-                    :icon="outlinedDelete"
-                    padding="sm"
-                    unelevated
-                    size="sm"
-                    round
-                    flat
-                    style="cursor: pointer !important"
-                    @click="confirmDeleteAction(props)"
-                  >
-                  </q-btn>
-                </template>
-              </q-td>
+          <template #cell-email="{ row }">
+            <template v-if="row.is_system">
+              <span data-test="service-accounts-system-account-label" class="font-medium">{{
+                row.first_name
+              }}</span>
+              <OTag
+                data-test="service-accounts-system-badge"
+                type="serviceAccountKind"
+                value="system"
+                class="ms-2"
+              />
             </template>
-            <template #bottom="scope">
-              <div class="tw:flex tw:items-center tw:justify-between tw:w-full tw:h-[48px]">
-                <div class="o2-table-footer-title tw:flex tw:items-center tw:w-[200px] tw:mr-md">
-                  {{ resultTotal }} {{ t('serviceAccounts.header') }}
-                </div>
-                <q-btn
-                  v-if="selectedAccounts.length > 0"
-                  data-test="service-accounts-list-delete-accounts-btn"
-                  class="flex items-center q-mr-sm no-border o2-secondary-button tw:h-[36px]"
-                  :class="
-                    store.state.theme === 'dark'
-                      ? 'o2-secondary-button-dark'
-                      : 'o2-secondary-button-light'
-                  "
-                  no-caps
-                  dense
-                  @click="openBulkDeleteDialog"
-                >
-                  <q-icon name="delete" size="16px" />
-                  <span class="tw:ml-2">Delete</span>
-                </q-btn>
-                <QTablePagination
-                  :scope="scope"
-                  :resultTotal="resultTotal"
-                  :perPageOptions="perPageOptions"
-                  position="bottom"
-                  @update:changeRecordPerPage="changePagination"
-                />
+            <template v-else-if="isSyntheticSA(row.email)">
+              <!-- UI-created accounts store `<name>.<org>@sa.internal`; show
+                     the friendly name first, full identifier (the Basic-auth
+                     username) beneath it. -->
+              <div :data-test="`service-accounts-email-${row.email}`" class="flex flex-col">
+                <span class="font-medium">{{ saDisplayName(row.email) }}</span>
+                <span class="text-text-secondary text-xs">{{ row.email }}</span>
               </div>
             </template>
+            <template v-else>
+              <span :data-test="`service-accounts-email-${row.email}`"
+                ><OUserCell :value="row.email"
+              /></span>
+            </template>
+          </template>
 
-            <template v-slot:header="props">
-                  <q-tr :props="props">
-                    <!-- Adding this block to render the select-all checkbox -->
-                    <q-th v-if="columns.length > 0" auto-width>
-                      <q-checkbox
-                        v-model="props.selected"
-                        size="sm"
-                        :class="store.state.theme === 'dark' ? 'o2-table-checkbox-dark' : 'o2-table-checkbox-light'"
-                        class="o2-table-checkbox"
-                      />
-                    </q-th>
+          <template #cell-first_name="{ row }">
+            <template v-if="row.is_system && row.description">{{ row.description }}</template>
+            <template v-else>{{ row.first_name }}</template>
+          </template>
 
-                    <!-- Rendering the rest of the columns -->
-                    <q-th
-                      v-for="col in props.cols"
-                      :key="col.name"
-                      :props="props"
-                      :class="col.classes"
-                      :style="col.style"
-                    >
-                      {{ col.label }}
-                    </q-th>
-                  </q-tr>
+          <template v-if="showRolesColumn" #cell-roles="{ row }">
+            <span
+              :data-test="`service-accounts-roles-${row.email}`"
+              class="text-text-secondary truncate text-xs"
+              :title="serviceAccountRolesText(row.email)"
+              >{{ serviceAccountRolesText(row.email) }}</span
+            >
+          </template>
+
+          <template #cell-token="{ row }">
+            <OCodeCell
+              :data-test="`service-accounts-token-${row.email}`"
+              :value="row.token || '—'"
+              :copy="false"
+            />
+          </template>
+
+          <!-- Relative age, not a raw timestamp: on a credentials list "3 days ago"
+               is the auditable fact, and recently minted accounts carry a dot so a
+               new key stands out without reading dates. -->
+          <template #cell-created_at="{ row }">
+            <span
+              :data-test="`service-accounts-created-${row.email}`"
+              class="inline-flex min-w-0 items-center justify-end gap-1.5"
+            >
+              <span
+                v-if="isRecentlyCreated(row)"
+                class="bg-badge-teal-soft-text h-1.5 w-1.5 shrink-0 rounded-full"
+              />
+              <OTimeCell
+                :value="row.created_at"
+                unit="us"
+                mode="relative"
+                :timezone="store.state.timezone"
+              />
+            </span>
+          </template>
+
+          <template #cell-actions="{ row }">
+            <template v-if="row.is_system">
+              <span
+                data-test="service-accounts-system-managed-badge"
+                class="inline-flex items-center gap-1"
+              >
+                <OTag type="serviceAccountKind" value="managed" />
+                <OTooltip :content="t('serviceAccounts.row.managedByTooltip')" />
+              </span>
+            </template>
+            <template v-else>
+              <OButton
+                data-test="service-accounts-refresh"
+                :title="t('serviceAccounts.rotate')"
+                variant="ghost"
+                size="icon-sm"
+                icon-left="refresh"
+                class="max-md:hidden"
+                @click="confirmRefreshAction(row)"
+              />
+              <OButton
+                data-test="service-accounts-edit"
+                data-row-action="edit"
+                :title="t('serviceAccounts.update')"
+                variant="ghost"
+                size="icon-sm"
+                icon-left="edit"
+                class="max-md:hidden"
+                @click="addRoutePush(row)"
+              />
+              <OButton
+                data-test="service-accounts-delete"
+                data-row-action="delete"
+                :title="t('serviceAccounts.deleteServiceAccount')"
+                variant="ghost"
+                size="icon-sm"
+                icon-left="delete"
+                class="max-md:hidden"
+                @click="confirmDeleteAction(row)"
+              />
+              <ODropdown side="bottom" align="end">
+                <template #trigger>
+                  <OButton
+                    icon-left="more-vert"
+                    :title="t('dashboard.moreActions')"
+                    variant="ghost"
+                    size="icon-xs-sq"
+                    class="md:hidden"
+                    data-test="service-accounts-row-more-actions"
+                    @click.stop
+                  />
                 </template>
-          </q-table>
+                <ODropdownItem
+                  icon-left="refresh"
+                  class="md:hidden"
+                  data-test="service-accounts-refresh-menu"
+                  @select="confirmRefreshAction(row)"
+                >
+                  <span>{{ t("serviceAccounts.rotate") }}</span>
+                </ODropdownItem>
+                <ODropdownItem
+                  icon-left="edit"
+                  class="md:hidden"
+                  data-test="service-accounts-edit-menu"
+                  @select="addRoutePush(row)"
+                >
+                  <span>{{ t("serviceAccounts.update") }}</span>
+                </ODropdownItem>
+                <ODropdownItem
+                  icon-left="delete"
+                  variant="destructive"
+                  class="md:hidden"
+                  data-test="service-accounts-delete-menu"
+                  @select="confirmDeleteAction(row)"
+                >
+                  <span>{{ t("serviceAccounts.deleteServiceAccount") }}</span>
+                </ODropdownItem>
+              </ODropdown>
+            </template>
+          </template>
+
+          <template #bottom>
+            <span class="text-xs font-normal max-md:hidden"
+              >{{ serviceAccountsState.service_accounts_users.length }}
+              {{ t("serviceAccounts.header") }}</span
+            >
+            <OButton
+              v-if="selectedAccounts.length > 0"
+              data-test="service-accounts-list-delete-accounts-btn"
+              variant="outline-destructive"
+              size="sm"
+              :loading="bulkDeleteLoading"
+              @click="openBulkDeleteDialog"
+              icon-left="delete"
+            >
+              {{ t("serviceAccounts.bulkDelete") }}
+            </OButton>
+          </template>
+        </OTable>
       </div>
-      </div>
-  </div>
-    <q-dialog
-      v-model="showAddUserDialog"
-      position="right"
-      full-height
-      maximized
-    >
-      <add-service-account
-        style="width: 30vw"
-        v-model="selectedUser"
-        :isUpdated="isUpdated"
-        @updated="addMember"
-        @cancel:hideform="hideForm"
-      />
-    </q-dialog>
-
-    <q-dialog v-model="confirmRefresh">
-      <q-card style="width: 240px">
-        <q-card-section class="confirmBody">
-          <div class="head">{{ t("serviceAccounts.confirmRefreshHead") }}</div>
-          <div class="para">{{ t("serviceAccounts.confirmRefreshMsg") }}</div>
-        </q-card-section>
-
-        <q-card-actions class="confirmActions">
-          <q-btn
-            v-close-popup="true"
-            unelevated
-            no-caps
-            class="q-mr-sm"
-            data-test="cancel-refresh-service-token"
-          >
-            {{ t("user.cancel") }}
-          </q-btn>
-          <q-btn
-            data-test="confirm-refresh-service-token"
-            v-close-popup="true"
-            unelevated
-            no-caps
-            class="no-border"
-            color="primary"
-            @click="refreshServiceToken(toBeRefreshed)"
-          >
-            {{ t("user.ok") }}
-          </q-btn>
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-    <q-dialog v-model="confirmDelete">
-      <q-card style="width: 240px">
-        <q-card-section class="confirmBody">
-          <div class="head">{{ t("serviceAccounts.confirmDeleteHead") }}</div>
-          <div class="para">{{ t("serviceAccounts.confirmDeleteMsg") }}</div>
-        </q-card-section>
-
-        <q-card-actions class="confirmActions">
-          <q-btn v-close-popup="true" unelevated no-caps class="q-mr-sm">
-            {{ t("user.cancel") }}
-          </q-btn>
-          <q-btn
-            v-close-popup="true"
-            unelevated
-            no-caps
-            class="no-border"
-            color="primary"
-            @click="deleteUser"
-          >
-            {{ t("user.ok") }}
-          </q-btn>
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-
-    <q-dialog v-model="confirmBulkDelete">
-      <q-card style="width: 280px">
-        <q-card-section class="confirmBody">
-          <div class="head">Delete Service Accounts</div>
-          <div class="para">Are you sure you want to delete {{ selectedAccounts.length }} service account(s)?</div>
-        </q-card-section>
-
-        <q-card-actions class="confirmActions">
-          <q-btn v-close-popup="true" unelevated no-caps class="q-mr-sm">
-            Cancel
-          </q-btn>
-          <q-btn
-            v-close-popup="true"
-            unelevated
-            no-caps
-            class="no-border"
-            color="primary"
-            @click="bulkDeleteServiceAccounts"
-          >
-            OK
-          </q-btn>
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
-
-    <q-dialog v-model="isShowToken"  persistent>
-  <q-card style="width: 40vw; max-height: 90vh; overflow-y: auto;">
-    <q-card-section  class="text-h6 dialog-heading tw:flex tw:justify-between tw:items-center" >
-      <div>Service Account Token </div>
-          <q-btn data-test="sa-cancel-button" dense flat icon="cancel" size="md" @click="isShowToken = false" style="cursor: pointer" />
-    </q-card-section>
-
-    <q-card-section>
-
-      <div class="tw:flex tw:items-center tw:gap-2" style="padding: 0rem 1rem;  border-radius: 8px;">
-  <!-- Token section taking 75% of the width -->
-  <div
-    class="text-h6 text-center tw:truncate el-border"
-    style="flex: 3;  padding: 0.5rem; border-radius: 6px; font-family: monospace; text-align: center; overflow: hidden;"
-  >
-    {{  serviceToken }}
-  </div>
-  <!-- Buttons section taking 25% of the width -->
-  <div class="tw:flex tw:justify-end tw:gap-1" style="flex: 1; max-width: 25%;">
-    <q-btn
-      @click.stop="copyToClipboard(serviceToken)"
-      size="lg"
-      dense
-      outline
-      :title="t('serviceAccounts.copyToken')"
-      icon="content_copy"
-      class="q-mr-xs"
-    />
-    <q-btn
-      @click.stop="downloadTokenAsFile(serviceToken)"
-      size="lg"
-      dense
-      outline
-      :title="t('serviceAccounts.downloadToken')"
-      icon="file_download"
-    />
-  </div>
-  
-</div>
-
-    <div class="q-pt-md flex items-center warning-text">
-      <q-icon name="info" class="q-mr-xs " size="16px" />
-      <span class="text-p">Make sure to copy / download the token. You will not be able to see it again.
-      </span>
     </div>
-   
-    </q-card-section>
+    <AddServiceAccount
+      v-model:open="showAddUserDialog"
+      v-model="selectedUser"
+      :isUpdated="isUpdated"
+      @updated="addMember"
+    />
 
-  </q-card>
-</q-dialog>
-  </q-page>
+    <ConfirmDialog
+      data-test="service-accounts-list-refresh-dialog"
+      v-model="confirmRefresh"
+      :title="t('serviceAccounts.confirmRefreshHead')"
+      :message="t('serviceAccounts.confirmRefreshMsg', { identifier: toBeRefreshed.email })"
+      :ok-label="t('serviceAccounts.confirmRefreshBtn')"
+      ok-color="destructive"
+      @update:ok="refreshServiceToken(toBeRefreshed)"
+      @update:cancel="confirmRefresh = false"
+    />
+
+    <ConfirmDialog
+      data-test="service-accounts-list-delete-dialog"
+      v-model="confirmDelete"
+      :title="t('serviceAccounts.confirmDeleteHead')"
+      :message="t('serviceAccounts.confirmDeleteMsg', { identifier: deleteUserEmailIdentifier })"
+      :ok-label="t('serviceAccounts.confirmDeleteBtn')"
+      ok-color="destructive"
+      @update:ok="deleteUser"
+      @update:cancel="confirmDelete = false"
+    />
+
+    <ConfirmDialog
+      data-test="service-accounts-list-bulk-delete-dialog"
+      v-model="confirmBulkDelete"
+      :title="t('serviceAccounts.confirmBulkDeleteHead')"
+      :message="t('serviceAccounts.confirmBulkDeleteMsg', { count: selectedAccounts.length })"
+      :ok-label="t('serviceAccounts.confirmBulkDeleteBtn', { count: selectedAccounts.length })"
+      ok-color="destructive"
+      @update:ok="bulkDeleteServiceAccounts"
+      @update:cancel="confirmBulkDelete = false"
+    />
+
+    <ODialog
+      data-test="service-accounts-list-token-dialog"
+      v-model:open="isShowToken"
+      persistent
+      size="md"
+      :title="t('serviceAccounts.tokenReveal.step1Title')"
+    >
+      <!-- Single screen: access is granted in the create form itself, so the
+           old two-step wizard collapsed to just the token reveal, followed by
+           an access summary (creation only — rotate shows the token alone). -->
+      <div data-test="service-accounts-token-wizard">
+        <div data-test="service-accounts-token-step-1">
+          <OBanner
+            variant="warning"
+            icon="warning"
+            dense
+            data-test="service-accounts-token-copy-hint"
+            class="mb-3"
+          >
+            {{ t("serviceAccounts.tokenReveal.copyHint") }}
+          </OBanner>
+
+          <OTabs v-model="tokenTab" dense align="left">
+            <OTab name="curl" :label="t('serviceAccounts.tokenReveal.curl')" />
+            <OTab name="header" :label="t('serviceAccounts.tokenReveal.header')" />
+            <OTab name="env" :label="t('serviceAccounts.tokenReveal.env')" />
+          </OTabs>
+
+          <OTabPanels v-model="tokenTab" animated>
+            <OTabPanel name="curl">
+              <OCodeBlock
+                data-test="service-accounts-token-curl-code"
+                :code="tokenCurlSnippet"
+                lang="bash"
+                wrap
+                :copy-message="t('serviceAccounts.toast.tokenCopied')"
+              />
+            </OTabPanel>
+            <OTabPanel name="header">
+              <OCodeBlock
+                data-test="service-accounts-token-header-code"
+                :code="tokenHeaderSnippet"
+                lang="http"
+                wrap
+                :copy-message="t('serviceAccounts.toast.tokenCopied')"
+              />
+            </OTabPanel>
+            <OTabPanel name="env">
+              <OCodeBlock
+                data-test="service-accounts-token-env-code"
+                :code="tokenEnvSnippet"
+                lang="bash"
+                wrap
+                :copy-message="t('serviceAccounts.toast.tokenCopied')"
+              />
+            </OTabPanel>
+          </OTabPanels>
+
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            <OButton
+              data-test="service-accounts-list-token-copy-btn"
+              variant="outline"
+              size="sm"
+              icon-left="content-copy"
+              :title="t('serviceAccounts.copyToken')"
+              @click.stop="
+                copyToClipboard(serviceToken, t, {
+                  successMessage: t('serviceAccounts.toast.tokenCopied'),
+                  timeout: 5000,
+                })
+              "
+            >
+              {{ t("serviceAccounts.copyToken") }}
+            </OButton>
+
+            <OButton
+              data-test="service-accounts-list-token-download-btn"
+              variant="outline"
+              size="sm"
+              icon-left="file-download"
+              :title="t('serviceAccounts.downloadToken')"
+              @click.stop="downloadTokenAsFile(serviceToken)"
+            >
+              {{ t("serviceAccounts.downloadToken") }}
+            </OButton>
+          </div>
+
+          <!-- ── Access grant status ──
+               Pending: the create flow's grant fan-out has not settled yet
+               (the token is shown immediately; grants resolve behind it).
+               Summary: what was granted / what failed.
+               Otherwise (rotate, or created with nothing selected): the
+               grant nudge + quick links — rotate keeps this guidance too,
+               since the account may well have no permissions. -->
+          <div
+            v-if="tokenAccessPending"
+            data-test="service-accounts-token-access-pending"
+            class="mt-4 flex items-center gap-2"
+          >
+            <OSpinner size="xs" />
+            <span class="text-text-secondary text-xs">{{
+              t("serviceAccounts.tokenReveal.applying")
+            }}</span>
+          </div>
+
+          <div
+            v-else-if="hasAccessGrants || hasAccessFailures"
+            data-test="service-accounts-token-access-summary"
+            class="mt-4"
+          >
+            <div v-if="tokenAccess?.assigned.roles.length" class="mb-2">
+              <div class="text-text-secondary mb-1 text-xs font-medium">
+                {{ t("serviceAccounts.tokenReveal.rolesAssignedLabel") }}
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <OBadge
+                  v-for="role in tokenAccess.assigned.roles"
+                  :key="role"
+                  variant="success"
+                  icon="check"
+                  size="sm"
+                  >{{ role }}</OBadge
+                >
+              </div>
+            </div>
+            <div v-if="tokenAccess?.assigned.groups.length" class="mb-2">
+              <div class="text-text-secondary mb-1 text-xs font-medium">
+                {{ t("serviceAccounts.tokenReveal.groupsAssignedLabel") }}
+              </div>
+              <div class="flex flex-wrap gap-1.5">
+                <OBadge
+                  v-for="group in tokenAccess.assigned.groups"
+                  :key="group"
+                  variant="success"
+                  icon="check"
+                  size="sm"
+                  >{{ group }}</OBadge
+                >
+              </div>
+            </div>
+
+            <div
+              v-if="failedRolesText"
+              data-test="service-accounts-token-access-failed"
+              class="mb-1 flex items-start gap-2"
+            >
+              <OIcon name="warning" size="sm" class="text-status-warning-text mt-0.5 shrink-0" />
+              <span class="text-text-secondary text-xs">{{ failedRolesText }}</span>
+            </div>
+            <div v-if="failedGroupsText" class="mb-1 flex items-start gap-2">
+              <OIcon name="warning" size="sm" class="text-status-warning-text mt-0.5 shrink-0" />
+              <span class="text-text-secondary text-xs">{{ failedGroupsText }}</span>
+            </div>
+            <p v-if="hasAccessFailures" class="text-text-secondary mt-1 text-xs">
+              {{ t("serviceAccounts.tokenReveal.failedHint") }}
+            </p>
+          </div>
+
+          <div v-else class="mt-4">
+            <div data-test="service-accounts-list-token-next-step" class="flex items-start gap-2">
+              <OIcon
+                v-if="showGroupLink"
+                name="warning"
+                size="sm"
+                class="text-status-warning-text mt-0.5"
+              />
+              <span class="text-text-secondary text-xs">{{ tokenNextStepHint }}</span>
+            </div>
+
+            <div v-if="showGroupLink" class="mt-3 flex flex-wrap items-center justify-center gap-3">
+              <router-link
+                data-test="service-accounts-list-token-add-to-role"
+                :to="roleLinkTarget"
+                class="group rounded-default border-border-default text-text-body hover:border-primary hover:bg-primary/5 inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs transition-colors"
+                @click="isShowToken = false"
+              >
+                <OIcon name="shield" size="sm" class="text-primary shrink-0" />
+                <span class="font-medium">{{ t("serviceAccounts.tokenReveal.addToRole") }}</span>
+                <OIcon
+                  name="arrow-right"
+                  size="sm"
+                  class="text-text-secondary shrink-0 transition-transform group-hover:translate-x-0.5"
+                />
+              </router-link>
+              <router-link
+                data-test="service-accounts-list-token-add-to-group"
+                :to="groupLinkTarget"
+                class="group rounded-default border-border-default text-text-body hover:border-primary hover:bg-primary/5 inline-flex items-center gap-1.5 border px-2.5 py-1.5 text-xs transition-colors"
+                @click="isShowToken = false"
+              >
+                <OIcon name="group" size="sm" class="text-primary shrink-0" />
+                <span class="font-medium">{{ t("serviceAccounts.tokenReveal.addToGroup") }}</span>
+                <OIcon
+                  name="arrow-right"
+                  size="sm"
+                  class="text-text-secondary shrink-0 transition-transform group-hover:translate-x-0.5"
+                />
+              </router-link>
+            </div>
+          </div>
+
+          <div class="border-border-default mt-4 flex justify-end border-t pt-3">
+            <OButton
+              data-test="service-accounts-token-done-btn"
+              variant="primary"
+              size="sm"
+              @click="isShowToken = false"
+            >
+              {{ t("serviceAccounts.tokenReveal.done") }}
+            </OButton>
+          </div>
+        </div>
+      </div>
+    </ODialog>
+  </OPageLayout>
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, onActivated, onBeforeMount, onMounted, watch } from "vue";
+import { useOrgId } from "@/composables/query/useOrgId";
+import { useQuery } from "@tanstack/vue-query";
+import { serviceAccountsQuery } from "@/services/service_accounts.queries";
+import { allUserRolesQuery } from "@/services/users.queries";
+import { queryClient } from "@/composables/query/queryClient";
+import { defineComponent, ref, onBeforeMount, computed, watch } from "vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownItem from "@/lib/overlay/Dropdown/ODropdownItem.vue";
+import ODialog from "@/lib/overlay/Dialog/ODialog.vue";
+import ConfirmDialog from "@/components/ConfirmDialog.vue";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import ORefreshButton from "@/lib/core/RefreshButton/ORefreshButton.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
+import OBadge from "@/lib/core/Badge/OBadge.vue";
+import OBanner from "@/lib/feedback/Banner/OBanner.vue";
+import OCodeBlock from "@/lib/core/Code/OCodeBlock.vue";
+import OCodeCell from "@/lib/core/Table/cells/OCodeCell.vue";
+import OUserCell from "@/lib/core/Table/cells/OUserCell.vue";
+import OTimeCell from "@/lib/core/Table/cells/OTimeCell.vue";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
-import { useQuasar, type QTableProps, date } from "quasar";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped } from "@/types/i18n";
 import config from "@/aws-exports";
 import AddServiceAccount from "./AddServiceAccount.vue";
-import QTablePagination from "@/components/shared/grid/Pagination.vue";
-import usersService from "@/services/users";
-import NoData from "@/components/shared/grid/NoData.vue";
-import organizationsService from "@/services/organizations";
-import segment from "@/services/segment_analytics";
 import {
-  getImageURL,
-  verifyOrganizationStatus,
-  maskText,
-} from "@/utils/zincutils";
-import { outlinedDelete,outlinedVisibility } from "@quasar/extras/material-icons-outlined";
+  isSyntheticServiceAccountEmail,
+  serviceAccountDisplayName,
+} from "./AddServiceAccount.schema";
+import OTable from "@/lib/core/Table/OTable.vue";
+import type { OTableColumnDef } from "@/lib/core/Table/OTable.types";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
+import OTabs from "@/lib/navigation/Tabs/OTabs.vue";
+import OTab from "@/lib/navigation/Tabs/OTab.vue";
+import OTabPanels from "@/lib/navigation/Tabs/OTabPanels.vue";
+import OTabPanel from "@/lib/navigation/Tabs/OTabPanel.vue";
+import OSpinner from "@/lib/feedback/Spinner/OSpinner.vue";
+import { copyToClipboard } from "@/utils/clipboard";
+import { formatDate } from "@/utils/date";
+import { b64EncodeStandard } from "@/utils/formatters";
+import { getImageURL, verifyOrganizationStatus } from "@/utils/zincutils";
+import { COL } from "@/lib/core/Table/OTable.types";
 
 // @ts-ignore
 import usePermissions from "@/composables/iam/usePermissions";
-import { computed, nextTick } from "vue";
-import { getRoles } from "@/services/iam";
 import service_accounts from "@/services/service_accounts";
 import { useReo } from "@/services/reodotdev_analytics";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { useShortcuts } from "@/lib/vue-shortcut-manager";
+import { focusSearchInput, isInputFocused } from "@/utils/keyboardShortcuts";
 export default defineComponent({
   name: "ServiceAccountsList",
-  components: { QTablePagination,  NoData,AddServiceAccount, },
+  components: {
+    OEmptyState,
+    AddServiceAccount,
+    ConfirmDialog,
+    OButton,
+    ODropdown,
+    ODropdownItem,
+    ODialog,
+    OIcon,
+    OPageLayout,
+    OTooltip,
+    ORefreshButton,
+    OTable,
+    OTag,
+    OBadge,
+    OBanner,
+    OCodeBlock,
+    OCodeCell,
+    OUserCell,
+    OTimeCell,
+    OSearchInput,
+    OTabs,
+    OTab,
+    OTabPanels,
+    OTabPanel,
+    OSpinner,
+  },
   emits: [],
-  setup(props, { emit }) {
+  setup() {
     const store = useStore();
     const router = useRouter();
-    const { t } = useI18n();
-    const $q = useQuasar();
+    const { t } = useI18nTyped();
     const { track } = useReo();
     const resultTotal = ref<number>(0);
     const confirmDelete = ref<boolean>(false);
     const selectedUser: any = ref({});
     const orgData: any = ref(store.state.selectedOrganization);
-    const qTable: any = ref(null);
     const isUpdated = ref(false);
     const showAddUserDialog = ref(false);
     const { serviceAccountsState } = usePermissions();
     const isEnterprise = ref(false);
     const isCurrentUserInternal = ref(false);
     const isShowToken = ref(false);
-    const confirmRefresh  = ref(false);
+    const confirmRefresh = ref(false);
     const filterQuery = ref("");
-    const toBeRefreshed = ref({
+    const toBeRefreshed = ref<{ email?: string }>({});
 
+    const serviceToken = ref("");
+    const tokenAccountEmail = ref("");
+
+    const tokenTab = ref("curl");
+
+    // Access-grant outcome from the create flow ({ assigned, failed } buckets
+    // of role/group names), shown under the token. Null on token rotate.
+    const tokenAccess = ref<{
+      assigned: { roles: string[]; groups: string[] };
+      failed: { roles: string[]; groups: string[] };
+    } | null>(null);
+    // True while the create flow's grant fan-out is still settling — the token
+    // is revealed immediately and the outcome fills in when it resolves.
+    const tokenAccessPending = ref(false);
+
+    const hasAccessGrants = computed(
+      () =>
+        !!tokenAccess.value &&
+        tokenAccess.value.assigned.roles.length + tokenAccess.value.assigned.groups.length > 0,
+    );
+    const hasAccessFailures = computed(
+      () =>
+        !!tokenAccess.value &&
+        tokenAccess.value.failed.roles.length + tokenAccess.value.failed.groups.length > 0,
+    );
+    const failedRolesText = computed(() =>
+      tokenAccess.value?.failed.roles.length
+        ? t("serviceAccounts.tokenReveal.failedRoles", {
+            roles: tokenAccess.value.failed.roles.join(", "),
+          })
+        : "",
+    );
+    const failedGroupsText = computed(() =>
+      tokenAccess.value?.failed.groups.length
+        ? t("serviceAccounts.tokenReveal.failedGroups", {
+            groups: tokenAccess.value.failed.groups.join(", "),
+          })
+        : "",
+    );
+
+    // OpenObserve authenticates API requests with HTTP Basic auth —
+    // base64("<identifier>:<token>"), NOT a Bearer token. The service account's
+    // email is the username and the token is the password.
+    const tokenEndpoint = computed(() =>
+      config.isCloud === "true" ? "https://api.openobserve.ai" : window.location.origin,
+    );
+
+    const tokenBasicCredential = computed(() =>
+      b64EncodeStandard(
+        `${tokenAccountEmail.value || "IDENTIFIER"}:${serviceToken.value || "YOUR_TOKEN"}`,
+      ),
+    );
+
+    const tokenCurlSnippet = computed(() => {
+      const orgId = store.state.selectedOrganization.identifier;
+      // `curl -u user:pass` builds the Basic auth header itself, so the example
+      // stays copy-paste runnable. Simplest authenticated GET: list streams.
+      return `curl -u "${tokenAccountEmail.value || "IDENTIFIER"}:${serviceToken.value || "YOUR_TOKEN"}" \\\n  "${tokenEndpoint.value}/api/${orgId}/streams"`;
     });
 
-    const serviceToken  = ref("");
+    const tokenHeaderSnippet = computed(() => {
+      return `Authorization: Basic ${tokenBasicCredential.value}`;
+    });
+
+    const tokenEnvSnippet = computed(() => {
+      const orgId = store.state.selectedOrganization.identifier;
+      return `OPENOBSERVE_AUTH="Basic ${tokenBasicCredential.value}"\nOPENOBSERVE_ORG_ID=${orgId}`;
+    });
+
+    // Enterprise/Cloud builds have a Groups UI, so a freshly created account
+    // can be granted permissions in one click. OSS has no Groups page, so it
+    // only gets the plain usage hint.
+    const showGroupLink = computed(
+      () => config.isEnterprise === "true" || config.isCloud === "true",
+    );
+
+    // Step 2 framing: enterprise/cloud nudges toward the Groups page (with a
+    // link below); OSS has no Groups UI, so it points to Roles & Groups in copy.
+    const tokenNextStepHint = computed(() => {
+      if (showGroupLink.value) return t("serviceAccounts.tokenReveal.nextStepGrant");
+      return t("serviceAccounts.tokenReveal.nextStepOss");
+    });
+
+    const groupLinkTarget = computed(() => ({
+      name: "groups",
+      query: {
+        org_identifier: store.state.selectedOrganization.identifier,
+        member: tokenAccountEmail.value,
+      },
+    }));
+
+    const roleLinkTarget = computed(() => ({
+      name: "roles",
+      query: {
+        org_identifier: store.state.selectedOrganization.identifier,
+        member: tokenAccountEmail.value,
+      },
+    }));
+
+    const revealToken = (token: string, email: string, access: typeof tokenAccess.value = null) => {
+      serviceToken.value = token;
+      tokenAccountEmail.value = email;
+      tokenTab.value = "curl";
+      tokenAccess.value = access;
+      tokenAccessPending.value = false;
+      isShowToken.value = true;
+    };
+
+    // UI-created accounts use the synthetic `<name>.<org>@sa.internal`
+    // identifier; the list shows the friendly name for those.
+    const isSyntheticSA = (email: string) =>
+      isSyntheticServiceAccountEmail(email, store.state.selectedOrganization.identifier);
+    const saDisplayName = (email: string) =>
+      serviceAccountDisplayName(email, store.state.selectedOrganization.identifier);
 
     const serviceAccounts = ref([]);
     const selectedAccounts: any = ref([]);
     const confirmBulkDelete = ref(false);
+    const bulkDeleteLoading = ref(false);
 
-    onBeforeMount(()=>{
-      getServiceAccountsUsers();
-    })
+    // Email -> role names for the Roles column; one batched org-wide request instead of per-row lookups.
+    const serviceAccountRoles = ref<Record<string, string[]> | null>(null);
 
-    const columns: any = ref<QTableProps["columns"]>([
+    const loadServiceAccountRoles = async (force = false) => {
+      if (!showRolesColumn) return;
+      try {
+        const options = allUserRolesQuery(store.state.selectedOrganization.identifier);
+        if (force) {
+          await queryClient.invalidateQueries({
+            queryKey: options.queryKey,
+            exact: true,
+            refetchType: "none",
+          });
+        }
+        serviceAccountRoles.value = (await queryClient.fetchQuery(options)) ?? {};
+      } catch {
+        // Silent: roles are context for this column, not load-bearing — the
+        // list stays fully usable without them.
+        serviceAccountRoles.value = null;
+      }
+    };
+
+    const serviceAccountRolesText = (email: string): string => {
+      const roles = serviceAccountRoles.value?.[email];
+      return roles?.length ? roles.join(", ") : "—";
+    };
+
+    onBeforeMount(async () => {
+      // Not forced: a route-change read stays cached. Only the refresh button
+      // and the post-write reloads below pass `true`.
+      await getServiceAccountsUsers();
+      loadServiceAccountRoles();
+
+      // Only `action=update&email=…` auto-opens the edit dialog so a shared
+      // edit link still lands directly on the user's form. `action=add` is
+      // intentionally NOT handled here — the dialog only opens via the
+      // "Add Service Account" button click; refreshing on an `action=add`
+      // URL should leave the user on the list view.
+      const query = router.currentRoute.value.query;
+      if (query.action === "update" && query.email) {
+        const match = serviceAccountsState.service_accounts_users.find(
+          (m: any) => m.email === query.email,
+        );
+        if (match) addUser({ row: match }, true);
+      }
+    });
+
+    // Roles/Groups are an enterprise/cloud-only concept (OSS has no RBAC UI),
+    // so the column — and the lookup backing it — is skipped entirely there.
+    const showRolesColumn = config.isEnterprise === "true" || config.isCloud === "true";
+
+    const columns: OTableColumnDef[] = [
       {
-        name: "#",
-        label: "#",
-        field: "#",
-        align: "left",
-        style: "width: 67px;",
-      },
-      {
-        name: "email",
-        field: "email",
-        label: t("user.email"),
-        align: "left",
+        id: "email",
+        header: t("serviceAccounts.list.col.identifier"),
+        accessorKey: "email",
         sortable: true,
+        resizable: true,
+        hideable: true,
+        size: COL.email,
+        meta: { align: "left" },
       },
       {
-        name: "first_name",
-        field: "first_name",
-        label: t("user.description"),
-        align: "left",
+        id: "first_name",
+        header: t("user.description"),
+        accessorKey: "first_name",
         sortable: true,
-        style: "width: 150px;",
+        resizable: true,
+        hideable: true,
+        size: COL.description,
+        minSize: 160,
+        meta: { align: "left", flex: true },
+      },
+      ...(showRolesColumn
+        ? [
+            {
+              id: "roles",
+              header: t("serviceAccounts.list.col.roles"),
+              accessorKey: "roles",
+              sortable: false,
+              resizable: true,
+              hideable: true,
+              size: 160,
+              minSize: 120,
+              meta: { align: "left" },
+            } satisfies OTableColumnDef,
+          ]
+        : []),
+      {
+        id: "token",
+        header: t("serviceAccounts.list.col.token"),
+        accessorKey: "token",
+        sortable: false,
+        resizable: true,
+        hideable: true,
+        size: 150,
+        meta: { align: "left" },
       },
       {
-        name: "token",
-        field: "token",
-        label: t("serviceAccounts.token"),
-        align: "left",
-        sortable: false,
-        style: "width: 230px;", //because token might take more space for displaying the token , eye button and copy button
+        id: "created_at",
+        header: t("serviceAccounts.list.col.created"),
+        accessorKey: "created_at",
+        sortable: true,
+        resizable: true,
+        hideable: true,
+        size: 170,
+        meta: { align: "left" },
       },
       {
-        name: "actions",
-        field: "actions",
-        label: t("user.actions"),
-        align: "center",
-        sortable: false,
-        classes: "actions-column",
+        id: "actions",
+        header: t("user.actions"),
+        isAction: true,
+        pinned: "right",
+        size: 130,
+        meta: { align: "center", actionCount: 3 },
       },
-    ]);
+    ];
     const userEmail: any = ref("");
-    const options = ref([{ label: "Admin", value: "admin" }]);
+    const options = ref([{ label: t("iam.roleAdmin"), value: "admin" }]);
     const selectedRole = ref(options.value[0].value);
     const currentUserRole = ref("");
     let deleteUserEmail = "";
+    const deleteUserEmailIdentifier = ref("");
 
-    interface OptionType {
-      label: String;
-      value: number | String;
-    }
-    const perPageOptions: any = [
-      { label: "20", value: 20 },
-      { label: "50", value: 50 },
-      { label: "100", value: 100 },
-      { label: "250", value: 250 },
-      { label: "500", value: 500 },
-    ];
-    const maxRecordToReturn = ref<number>(100);
-    const selectedPerPage = ref<number>(20);
-    const pagination: any = ref({
-      rowsPerPage: 20,
+    const selectedAccountEmails = computed(() => selectedAccounts.value.map((a: any) => a.email));
+
+    const handleSelectedIdsUpdate = (ids: string[]) => {
+      const accountsMap = new Map(
+        serviceAccountsState.service_accounts_users.map((a: any) => [a.email, a]),
+      );
+      selectedAccounts.value = ids.map((id) => accountsMap.get(id)).filter(Boolean);
+    };
+
+    const confirmDeleteAction = (row: any) => {
+      confirmDelete.value = true;
+      deleteUserEmail = row.email;
+      deleteUserEmailIdentifier.value = row.email;
+    };
+    const orgIdForList = useOrgId();
+    const serviceAccountsList = useQuery(() =>
+      Object.assign(serviceAccountsQuery(orgIdForList.value), { enabled: !!orgIdForList.value }),
+    );
+
+    const loading = serviceAccountsList.isPending;
+    // A request is in flight while rows stay on screen — the refresh button's
+    // spinner. `loading` is the skeleton, which only a cold read wants.
+    const fetching = serviceAccountsList.isFetching;
+    // Epoch ms of the last successful read — drives the button's "1m ago" label.
+    const lastUpdatedAt = serviceAccountsList.dataUpdatedAt;
+    // A 403 lands in the query's error rather than a loader's catch, so derive the no-access state from it.
+    const forbidden = computed(() => {
+      const e: any = serviceAccountsList.error.value;
+      return e?.status === 403 || e?.response?.status === 403;
+    });
+    // Bound to refresh / post-write reloads: always hits the server.
+    const refreshServiceAccounts = () => {
+      loadServiceAccountRoles(true);
+      return getServiceAccountsUsers(true);
+    };
+
+    const applyServiceAccounts = (accounts: any[]) => {
+      resultTotal.value = accounts.length;
+      currentUserRole.value = "";
+      serviceAccountsState.service_accounts_users = accounts.map((data: any) => {
+        return {
+          email: data.email,
+          first_name: data.first_name,
+          last_name: data.last_name,
+          token: data.token || "",
+          role: data.role || "ServiceAccount",
+          is_system: data.is_system || false,
+          description: data.description || null,
+          created_at: data.created_at || 0,
+        };
+      });
+    };
+
+    // The table is the query now: a service-account write invalidates the scope
+    // and these rows repaint without this component asking.
+    watch(serviceAccountsList.data, (rows: any) => {
+      if (rows) applyServiceAccounts(rows);
     });
 
-    const changePagination = (val: { label: string; value: any }) => {
-      selectedPerPage.value = val.value;
-      pagination.value.rowsPerPage = val.value;
-      qTable.value.setPagination(pagination.value);
-    };
-
-    const currentUser = computed(() => store.state.userInfo.email);
-
-
-
-    const changeMaxRecordToReturn = (val: any) => {
-      maxRecordToReturn.value = val;
-    };
-
-    const confirmDeleteAction = (props: any) => {
-      confirmDelete.value = true;
-      deleteUserEmail = props.row.email;
-    };
-    const getServiceAccountsUsers = async () =>{
-      const dismiss = $q.notify({
-        spinner: true,
-        message: "Please wait while loading service accounts...",
-      });
-
-      return new Promise((resolve, reject) => {
-        service_accounts
-          .list(
-            store.state.selectedOrganization.identifier
-          )
-          .then((res) => {
-            resultTotal.value = res.data.data.length;
-            let counter = 1;
-            currentUserRole.value = "";
-            serviceAccountsState.service_accounts_users = res.data.data.map((data: any) => {
-              return {
-                "#": counter <= 9 ? `0${counter++}` : counter++,
-                email: maskText(data.email),
-                first_name: data.first_name,
-                last_name: data.last_name,
-                token: data.token || '',
-                role: data.role || 'ServiceAccount',
-                is_system: data.is_system || false,
-                description: data.description || null,
-              };
-            });
-
-            dismiss();
-
-            resolve(true);
-          })
-          .catch((err) => {
-            dismiss();
-            reject(false);
+    // The cold-read toast, kept: shown only while there is nothing on screen.
+    let dismissLoadingToast: (() => void) | null = null;
+    watch(
+      loading,
+      (isCold) => {
+        if (isCold && !dismissLoadingToast) {
+          dismissLoadingToast = toast({
+            variant: "loading",
+            message: t("serviceAccounts.toast.loading"),
+            timeout: 0,
           });
-      });
-    }
+        } else if (!isCold && dismissLoadingToast) {
+          dismissLoadingToast();
+          dismissLoadingToast = null;
+        }
+      },
+      { immediate: true },
+    );
+
+    watch(serviceAccountsList.error, (error: any) => {
+      if (!error) return;
+      dismissLoadingToast?.();
+      dismissLoadingToast = null;
+    });
+
+    // Only an explicit call reads: refresh, post-write reload, search. Mount and
+    // invalidation-driven repaints come from the query itself. The cold-read
+    // toast is driven by `loading` above, so it is not sequenced here.
+    const getServiceAccountsUsers = async (force = false) => {
+      if (force) await serviceAccountsList.refetch();
+      return true;
+    };
     const addUser = (props: any, is_updated: boolean) => {
       isUpdated.value = is_updated;
-      selectedUser.value.organization =
-        store.state.selectedOrganization.identifier;
+      selectedUser.value.organization = store.state.selectedOrganization.identifier;
 
       if (props.row != undefined) {
         selectedUser.value = props.row;
@@ -557,26 +971,21 @@ export default defineComponent({
         showAddUserDialog.value = true;
       }, 100);
     };
-    const addRoutePush = (props: any) => {
-      if (props.row != undefined) {
+    const addRoutePush = (row: any) => {
+      if (row?.email) {
         router.push({
           name: "serviceAccounts",
           query: {
             action: "update",
             org_identifier: store.state.selectedOrganization.identifier,
-            email: props.row.email,
+            email: row.email,
           },
         });
-        addUser(
-          {
-            row: props.row,
-          },
-          true
-        );
+        addUser({ row }, true);
       } else {
         track("Button Click", {
           button: "Add Service Account",
-          page: "Service Accounts"
+          page: "Service Accounts",
         });
         addUser({}, false);
         router.push({
@@ -599,59 +1008,101 @@ export default defineComponent({
     };
 
     const redactToken = (token: string): string => {
-      if (!token || token.length === 0) return '*'.repeat(12);
+      if (!token || token.length === 0) return "*".repeat(12);
       if (token.length < 4) {
         // For tokens shorter than 4 chars, show available chars and pad to 12
-        return token + '*'.repeat(12 - token.length);
+        return token + "*".repeat(12 - token.length);
       } else {
         // For tokens 4+ chars, show first 4 chars + asterisks (matches backend)
-        return token.slice(0, 4) + '*'.repeat(8);
+        return token.slice(0, 4) + "*".repeat(8);
       }
     };
 
-    const addMember = async (res: any, data: any, operationType: string) => {
-      showAddUserDialog.value = false;
-      if (res.code == 200 ) {
-        if (operationType == "created") {
-            $q.notify({
-              color: "positive",
-              message: "Service Account created successfully.",
-            });
+    // ── Account age (created_at is epoch MICROseconds) ───────────────────────
+    // A key minted in the last week is the audit-relevant one, so it gets a dot in
+    // the Created column and its own tile in the strip.
+    const RECENT_ACCOUNT_MS = 7 * 24 * 60 * 60 * 1000;
+    const isRecentlyCreated = (row: any): boolean => {
+      const micros = Number(row?.created_at);
+      if (!micros || !Number.isFinite(micros) || micros <= 0) return false;
+      return Date.now() - micros / 1000 <= RECENT_ACCOUNT_MS;
+    };
 
-          serviceToken.value = res.token;
-          isShowToken.value = true;
-          if (
-            store.state.selectedOrganization.identifier == data.organization
-          ) {
+    // Kept for the tests and any caller that still wants the absolute string; the
+    // Created column itself now renders a relative OTimeCell.
+    const formatCreatedAt = (createdAt: number): string => {
+      if (!createdAt) return "—";
+      const iso = new Date(createdAt / 1000).toISOString();
+      return formatDate(iso, "YYYY-MM-DD HH:mm:ss");
+    };
+
+    const downloadTokenAsFile = (token: string) => {
+      const blob = new Blob([token], { type: "text/plain" });
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = "service_account_token.txt";
+      link.click();
+      URL.revokeObjectURL(link.href); // Cleanup
+    };
+
+    const addMember = async (
+      res: any,
+      data: any,
+      operationType: string,
+      access: typeof tokenAccess.value | Promise<typeof tokenAccess.value> = null,
+    ) => {
+      showAddUserDialog.value = false;
+      if (res.code == 200) {
+        if (operationType == "created") {
+          toast({
+            message: t("serviceAccounts.toast.created"),
+            variant: "success",
+          });
+
+          // The grant fan-out may still be in flight (the dialog emits its
+          // promise so the show-once token is never blocked on it). Reveal
+          // the token immediately; fill the access outcome in when it lands.
+          if (access && typeof (access as any).then === "function") {
+            revealToken(res.token, data.email, null);
+            tokenAccessPending.value = true;
+            (access as Promise<typeof tokenAccess.value>).then((resolved) => {
+              tokenAccess.value = resolved;
+              tokenAccessPending.value = false;
+            });
+          } else {
+            revealToken(res.token, data.email, access as typeof tokenAccess.value);
+          }
+          if (store.state.selectedOrganization.identifier == data.organization) {
             const user = {
-              "#":
-              serviceAccountsState.service_accounts_users.length + 1 <= 9
-                  ? `0${serviceAccountsState.service_accounts_users.length + 1}`
-                  : serviceAccountsState.service_accounts_users.length + 1,
               email: data.email,
               first_name: data.first_name,
               last_name: data.last_name,
-              token: res.token ? redactToken(res.token) : '',
+              token: res.token ? redactToken(res.token) : "",
+              // created_at is stored as epoch microseconds (matches the list API
+              // and formatCreatedAt); the freshly created row uses "now".
+              created_at: data.created_at || Date.now() * 1000,
             };
 
-            serviceAccountsState.service_accounts_users.push(user);
+            serviceAccountsState.service_accounts_users = [
+              ...serviceAccountsState.service_accounts_users,
+              user,
+            ];
             resultTotal.value = serviceAccountsState.service_accounts_users.length;
           }
         } else {
           setTimeout(() => {
-            $q.notify({
-              color: "positive",
-              message: "Service Account updated successfully.",
+            toast({
+              message: t("serviceAccounts.toast.updated"),
+              variant: "success",
             });
           }, 2000);
-          serviceAccountsState.service_accounts_users.forEach((member: any, key: number) => {
-            if (member.email == data.email) {
-              serviceAccountsState.service_accounts_users[key] = {
-                ...serviceAccountsState.service_accounts_users[key],
-                ...data,
-              };
-            }
-          });
+          serviceAccountsState.service_accounts_users =
+            serviceAccountsState.service_accounts_users.map((member: any) => {
+              if (member.email == data.email) {
+                return { ...member, ...data };
+              }
+              return member;
+            });
         }
       }
       router.replace({
@@ -663,25 +1114,25 @@ export default defineComponent({
     };
 
     const deleteUser = async () => {
+      confirmDelete.value = false;
       service_accounts
         .delete(store.state.selectedOrganization.identifier, deleteUserEmail)
         .then(async (res: any) => {
           if (res.data.code == 200) {
-            $q.notify({
-              color: "positive",
-              message: "Service Account deleted successfully.",
+            toast({
+              message: t("serviceAccounts.toast.deleted"),
+              variant: "success",
             });
-            await getServiceAccountsUsers();
+            await getServiceAccountsUsers(true);
           }
         })
         .catch((err: any) => {
-          if(err.response?.status != 403){
-            $q.notify({
-            color: "negative",
-            message: err.response?.data?.message || "Error while deleting user.",
+          if (err.response?.status != 403) {
+            toast({
+              message: err.response?.data?.message || t("serviceAccounts.toast.deleteError"),
+              variant: "error",
             });
           }
-
         });
     };
 
@@ -690,103 +1141,92 @@ export default defineComponent({
     };
 
     const bulkDeleteServiceAccounts = async () => {
+      bulkDeleteLoading.value = true;
       const accountEmails = selectedAccounts.value
         .filter((account: any) => !isSystemAccount(account.email))
         .map((account: any) => account.email);
 
       try {
-        const res = await service_accounts.bulkDelete(
-          store.state.selectedOrganization.identifier,
-          { ids: accountEmails }
-        );
+        const res = await service_accounts.bulkDelete(store.state.selectedOrganization.identifier, {
+          ids: accountEmails,
+        });
         const { successful, unsuccessful } = res.data;
 
         if (successful.length > 0 && unsuccessful.length === 0) {
-          $q.notify({
-            color: "positive",
-            message: `Successfully deleted ${successful.length} service account(s)`,
-            timeout: 2000,
+          toast({
+            message: t("serviceAccounts.toast.bulkDeleteSuccess", { count: successful.length }),
+            variant: "success",
           });
         } else if (successful.length > 0 && unsuccessful.length > 0) {
-          $q.notify({
-            color: "warning",
-            message: `Deleted ${successful.length} service account(s), but ${unsuccessful.length} failed`,
-            timeout: 3000,
+          toast({
+            message: t("serviceAccounts.toast.bulkDeletePartial", {
+              count: successful.length,
+              failed: unsuccessful.length,
+            }),
+            variant: "warning",
           });
         } else if (unsuccessful.length > 0) {
-          $q.notify({
-            color: "negative",
-            message: `Failed to delete ${unsuccessful.length} service account(s)`,
-            timeout: 2000,
+          toast({
+            message: t("serviceAccounts.toast.bulkDeleteFailed", { count: unsuccessful.length }),
+            variant: "error",
           });
         }
 
         selectedAccounts.value = [];
         confirmBulkDelete.value = false;
-        await getServiceAccountsUsers();
+        await getServiceAccountsUsers(true);
       } catch (err: any) {
         if (err.response?.status != 403 || err?.status != 403) {
-          $q.notify({
-            color: "negative",
-            message: err?.response?.data?.message || err?.message || "Error while deleting service accounts",
-            timeout: 2000,
+          toast({
+            message:
+              err?.response?.data?.message ||
+              err?.message ||
+              t("serviceAccounts.toast.bulkDeleteError"),
+            variant: "error",
           });
         }
+      } finally {
+        bulkDeleteLoading.value = false;
       }
     };
 
-    const refreshServiceToken = async (row:any) =>{
+    const refreshServiceToken = async (row: any) => {
+      confirmRefresh.value = false;
       row.isLoading = true;
-      await service_accounts.refresh_token(store.state.selectedOrganization.identifier,row.email).then((res)=>{
-          serviceToken.value = res.data.token;
-          isShowToken.value = true;
+      await service_accounts
+        .refresh_token(store.state.selectedOrganization.identifier, row.email)
+        .then((res) => {
+          revealToken(res.data.token, row.email);
 
-        $q.notify({
-          color: "positive",
-          message: "Service token refreshed successfully.",
+          toast({
+            message: t("serviceAccounts.toast.rotated"),
+            variant: "success",
+          });
+
+          getServiceAccountsUsers(true);
+        })
+        .catch((err) => {
+          if (err.response?.status != 403) {
+            toast({
+              message: err.response?.data?.message || t("serviceAccounts.toast.rotateError"),
+              variant: "error",
+            });
+          }
+        })
+        .finally(() => {
+          row.isLoading = false;
         });
-
-        getServiceAccountsUsers();
-      }).catch((err)=>{
-        if(err.response?.status != 403){
-          $q.notify({
-          color: "negative",
-          message: err.response?.data?.message || "Error while refreshing token.",
-          });
-        }
-
-      }).finally(()=>{
-        row.isLoading = false;
-      });
-
-    }
-    const  copyToClipboard = (text:string) => {
-      navigator.clipboard.writeText(text).then(() => {
-        $q.notify({
-            type: "positive",
-            message: `token Copied Successfully!`,
-            timeout: 5000,
-          });
-      }).catch(() => {
-          $q.notify({
-            type: "negative",
-            message: "Error while copy content.",
-            timeout: 5000,
-          });
-      });
-    }
-
-    const downloadTokenAsFile = (token:string) => {
-      const blob = new Blob([token], { type: "text/plain" });
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = "service_account_token.txt";
-      link.click();
-      URL.revokeObjectURL(link.href); // Cleanup
+    };
+    const isSystemAccount = (email: string) => {
+      return email.startsWith("o2-sre-agent.org-") && email.endsWith("@openobserve.internal");
     };
 
-    const isSystemAccount = (email: string) => {
-      return email.startsWith('o2-sre-agent.org-') && email.endsWith('@openobserve.internal');
+    // System-managed accounts cannot be bulk-deleted, so they are not
+    // selectable: the checkbox renders disabled and they are excluded from
+    // "select all". This surfaces the constraint up-front instead of silently
+    // skipping them at delete time.
+    const isRowSelectable = (row: any) => {
+      return !(row?.is_system || isSystemAccount(row?.email || ""));
     };
 
     const confirmRefreshAction = (row: any) => {
@@ -794,41 +1234,39 @@ export default defineComponent({
       toBeRefreshed.value = row;
     };
 
-    const filterData = (rows: any, terms: any) => {
-      var filtered = [];
-      terms = terms.toLowerCase();
-      for (var i = 0; i < rows.length; i++) {
-        if (
-          rows[i]["first_name"]?.toLowerCase().includes(terms) ||
-          rows[i]["last_name"]?.toLowerCase().includes(terms) ||
-          rows[i]["email"]?.toLowerCase().includes(terms)
-        ) {
-          filtered.push(rows[i]);
-        }
-      }
-      return filtered;
-    };
-
-    const visibleRows = computed(() => {
-      if (!filterQuery.value) return serviceAccountsState.service_accounts_users || []
-      return filterData(serviceAccountsState.service_accounts_users || [], filterQuery.value)
-    });
-    const hasVisibleRows = computed(() => visibleRows.value.length > 0);
-
-    // Watch visibleRows to sync resultTotal with search filter
-    watch(visibleRows, (newVisibleRows) => {
-      resultTotal.value = newVisibleRows.length;
-    }, { immediate: true });
-
+    // ── Keyboard shortcuts ────────────────────────────────────────────────
+    useShortcuts([
+      {
+        id: "iamServiceAccountsAdd",
+        handler: () => {
+          if (!isInputFocused()) addRoutePush({});
+        },
+      },
+      {
+        id: "iamServiceAccountsRefresh",
+        handler: () => {
+          if (!isInputFocused()) refreshServiceAccounts();
+        },
+      },
+      {
+        id: "iamServiceAccountsFocusSearch",
+        handler: () => {
+          focusSearchInput("iam-service-accounts-search-input");
+        },
+      },
+    ]);
     return {
-      $q,
+      refreshServiceAccounts,
       t,
-      qTable,
       router,
       store,
       config,
       serviceAccountsState,
       columns,
+      loading,
+      fetching,
+      lastUpdatedAt,
+      forbidden,
       orgData,
       confirmDelete,
       serviceAccounts,
@@ -839,26 +1277,33 @@ export default defineComponent({
       hideForm,
       addUser,
       confirmDeleteAction,
-      outlinedVisibility,
+      visibility: "visibility",
       deleteUser,
       getServiceAccountsUsers,
-      pagination,
-      resultTotal,
       selectedUser,
-      perPageOptions,
-      selectedPerPage,
-      changePagination,
-      maxRecordToReturn,
-      changeMaxRecordToReturn,
-      outlinedDelete,
       refreshServiceToken,
       copyToClipboard,
-      downloadTokenAsFile,
       isShowToken,
       serviceToken,
+      tokenTab,
+      tokenAccess,
+      tokenAccessPending,
+      hasAccessGrants,
+      hasAccessFailures,
+      failedRolesText,
+      failedGroupsText,
+      isSyntheticSA,
+      saDisplayName,
+      revealToken,
+      tokenCurlSnippet,
+      tokenHeaderSnippet,
+      tokenEnvSnippet,
+      tokenNextStepHint,
+      showGroupLink,
+      groupLinkTarget,
+      roleLinkTarget,
       confirmRefreshAction,
       filterQuery,
-      filterData,
       userEmail,
       selectedRole,
       options,
@@ -869,24 +1314,24 @@ export default defineComponent({
       isCurrentUserInternal,
       toBeRefreshed,
       confirmRefresh,
-      visibleRows,
-      hasVisibleRows,
       selectedAccounts,
+      selectedAccountEmails,
+      handleSelectedIdsUpdate,
       confirmBulkDelete,
+      bulkDeleteLoading,
       openBulkDeleteDialog,
       bulkDeleteServiceAccounts,
       redactToken,
+      formatCreatedAt,
+      isRecentlyCreated,
+      downloadTokenAsFile,
       isSystemAccount,
+      isRowSelectable,
+      deleteUserEmailIdentifier,
+      showRolesColumn,
+      serviceAccountRoles,
+      serviceAccountRolesText,
     };
   },
 });
 </script>
-
-
-<style lang="scss" scoped>
-.warning-text {
-  color: #ec960c;
-}
-
-
-</style>

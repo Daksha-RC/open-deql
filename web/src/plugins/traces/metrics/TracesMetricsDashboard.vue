@@ -15,18 +15,19 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="traces-metrics-dashboard tw:w-full">
+  <div data-test="traces-metrics-dashboard" class="traces-metrics-dashboard w-full overflow-hidden">
     <!-- Charts Section -->
     <transition name="slide-fade">
       <div
         v-if="show"
-        class="charts-wrapper tw:py-0! tw:min-h-[8.5rem] tw:h-[10rem]"
+        class="charts-wrapper dashboard-strip h-40 min-h-[8.5rem] overflow-hidden py-0! will-change-[transform,opacity]"
       >
-        <div class="charts-container">
+        <div class="dark:border-[rgba(255,255,255,0.1)] dark:hover:shadow-sm">
           <RenderDashboardCharts
             v-if="show"
             ref="dashboardChartsRef"
             :viewOnly="true"
+            :frame="false"
             :dashboardData="dashboardData || {}"
             :currentTimeObj="currentTimeObj"
             :allowAlertCreation="false"
@@ -54,11 +55,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       v-if="showAnalysisDashboard"
       :streamName="streamName"
       streamType="traces"
-      :timeRange="originalTimeRangeBeforeSelection || timeRange"
+      :timeRange="originalTimeRangeBeforeSelection || effectiveTimeRange"
       :rateFilter="analysisRateFilter"
       :durationFilter="analysisDurationFilter"
       :errorFilter="analysisErrorFilter"
-      :baseFilter="filter"
+      :baseFilter="parsedEffectiveFilter"
       :streamFields="streamFields"
       :analysisType="defaultAnalysisTab"
       :availableAnalysisTypes="['volume', 'error', 'duration']"
@@ -68,16 +69,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts" setup>
-import {
-  ref,
-  watch,
-  onMounted,
-  onBeforeUnmount,
-  computed,
-  defineAsyncComponent,
-} from "vue";
+import { ref, onMounted, onBeforeUnmount, computed, defineAsyncComponent, nextTick } from "vue";
 import { useStore } from "vuex";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped, raw } from "@/types/i18n";
 import useNotifications from "@/composables/useNotifications";
 import { convertDashboardSchemaVersion } from "@/utils/dashboard/convertDashboardSchemaVersion";
 import metrics from "./metrics.json";
@@ -85,7 +79,6 @@ import { deepCopy, formatTimeWithSuffix } from "@/utils/zincutils";
 import useTraces from "@/composables/useTraces";
 import { parseDurationWhereClause } from "@/composables/useDurationPercentiles";
 import { parseSpanKindWhereClause } from "@/utils/traces/constants";
-import useParser from "@/composables/useParser";
 
 const RenderDashboardCharts = defineAsyncComponent(
   () => import("@/views/Dashboards/RenderDashboardCharts.vue"),
@@ -95,9 +88,7 @@ const TracesMetricsContextMenu = defineAsyncComponent(
   () => import("./TracesMetricsContextMenu.vue"),
 );
 
-const TracesAnalysisDashboard = defineAsyncComponent(
-  () => import("./TracesAnalysisDashboard.vue"),
-);
+const TracesAnalysisDashboard = defineAsyncComponent(() => import("./TracesAnalysisDashboard.vue"));
 
 export interface TimeRange {
   startTime: number;
@@ -106,8 +97,6 @@ export interface TimeRange {
 
 const props = defineProps<{
   streamName: string;
-  timeRange: TimeRange;
-  filter?: string;
   show?: boolean;
   streamFields?: any[];
 }>();
@@ -118,28 +107,64 @@ const emit = defineEmits<{
 }>();
 
 const { showErrorNotification } = useNotifications();
-const store = useStore();
-const { searchObj } = useTraces();
-const { t } = useI18n();
+useStore();
+const { searchObj, tracesParser } = useTraces();
+const { t } = useI18nTyped();
 
-const autoRefreshEnabled = ref(false);
+// Read filter and timeRange directly from the shared composable rather than via props.
+// The props go stale during synchronous call chains (e.g., auto_query_enabled
+// triggers searchData → getQueryData → getDashboardData → loadDashboard before
+// Vue has re-rendered SearchResult and propagated the new prop). Reading from the
+// composable — the same object buildSearch() reads — guarantees the latest value.
+const effectiveFilter = computed(() => searchObj.data.editorValue);
+
+// Query editor text may contain human-readable duration/span_kind literals
+// (e.g. duration <= '1.64s') for display; decode them back to raw SQL values
+// (microseconds, numeric OTEL keys) before use in any generated query.
+const parseEffectiveFilter = (): string => {
+  const trimmed = effectiveFilter.value?.trim();
+  if (!trimmed) return "";
+  const parsed = parseDurationWhereClause(
+    trimmed,
+    tracesParser.value,
+    searchObj.data.stream.selectedStream.value,
+  );
+  return parseSpanKindWhereClause(
+    typeof parsed === "string" ? parsed : trimmed,
+    tracesParser.value,
+    searchObj.data.stream.selectedStream.value,
+  );
+};
+const parsedEffectiveFilter = computed(() => parseEffectiveFilter());
+
+const effectiveTimeRange = computed<TimeRange>(() => ({
+  startTime: searchObj.data.datetime.startTime,
+  endTime: searchObj.data.datetime.endTime,
+}));
+
 const autoRefreshIntervalId = ref<number | null>(null);
 const error = ref<string | null>(null);
 const dashboardChartsRef = ref<any>(null);
 const currentTimeObj = ref({
   __global: {
-    start_time: new Date(props.timeRange.startTime),
-    end_time: new Date(props.timeRange.endTime),
+    start_time: new Date(effectiveTimeRange.value.startTime),
+    end_time: new Date(effectiveTimeRange.value.endTime),
   },
 });
 
 const dashboardData = ref(null);
 
 // Unified Analysis Dashboard state
+interface AnalysisFilter {
+  start: number;
+  end: number;
+  timeStart?: number;
+  timeEnd?: number;
+}
 const showAnalysisDashboard = ref(false);
-const analysisDurationFilter = ref({ start: 0, end: 0 });
-const analysisRateFilter = ref({ start: 0, end: 0 });
-const analysisErrorFilter = ref({ start: 0, end: 0 });
+const analysisDurationFilter = ref<AnalysisFilter | undefined>({ start: 0, end: 0 });
+const analysisRateFilter = ref<AnalysisFilter | undefined>({ start: 0, end: 0 });
+const analysisErrorFilter = ref<AnalysisFilter | undefined>({ start: 0, end: 0 });
 const defaultAnalysisTab = ref<"duration" | "volume" | "error">("volume");
 // Store the original time range before selection for baseline comparison
 const originalTimeRangeBeforeSelection = ref<TimeRange | null>(null);
@@ -154,22 +179,27 @@ const streamFields = computed(() => {
     return props.streamFields;
   }
 
-  // Prefer user-defined schema if available
-  if (searchObj.data.stream.userDefinedSchema?.length > 0) {
-    return searchObj.data.stream.userDefinedSchema;
+  // Prefer user-defined schema if available.
+  // Set dynamically on shared stream state; not part of useTraces defaults.
+  const userDefinedSchema = searchObj.data.stream.userDefinedSchema;
+  if (userDefinedSchema?.length > 0) {
+    return userDefinedSchema;
   }
 
   return searchObj.data.stream.selectedStreamFields || [];
 });
 
-// Use filters from searchObj
-const showErrorOnly = computed({
-  get: () => searchObj.meta.showErrorOnly,
-  set: (val) => {
-    searchObj.meta.showErrorOnly = val;
-  },
-});
-const rangeFilters = computed(() => searchObj.meta.metricsRangeFilters);
+// Runtime entries carry timeStart/timeEnd (set below); the useTraces Map generic omits them.
+type MetricsRangeFilter = {
+  panelTitle: string;
+  start: number | null;
+  end: number | null;
+  timeStart?: number | null;
+  timeEnd?: number | null;
+};
+const rangeFilters = computed(
+  () => searchObj.meta.metricsRangeFilters as Map<string, MetricsRangeFilter>,
+);
 
 // Check if ANY RED panel has a time-based brush selection
 // This controls the visibility of the "Analyze Dimensions" button
@@ -203,16 +233,13 @@ const contextMenuPosition = ref({ x: 0, y: 0 });
 const contextMenuValue = ref(0);
 const contextMenuFieldName = ref("");
 const contextMenuData = ref<any>(null);
-const sqlParser = ref<any>(null);
 
 const getBaseFilters = () => {
   let baseFilters = [];
   rangeFilters.value.forEach((rangeFilter) => {
     if (rangeFilter.panelTitle === "Duration") {
       if (rangeFilter.start !== null && rangeFilter.end !== null) {
-        baseFilters.push(
-          `duration >= ${rangeFilter.start} and duration <= ${rangeFilter.end}`,
-        );
+        baseFilters.push(`duration >= ${rangeFilter.start} and duration <= ${rangeFilter.end}`);
       } else {
         baseFilters.push(
           `duration ${rangeFilter.start ? ">=" : "<="} ${rangeFilter.start || rangeFilter.end}`,
@@ -221,23 +248,8 @@ const getBaseFilters = () => {
     }
   });
 
-  // Add user-provided filters from query editor, parsing any human-readable
-  // duration values (e.g. '1.50ms') back to raw microseconds for SQL,
-  // and span_kind labels (e.g. 'Server') back to numeric OTEL keys (e.g. '2').
-  if (props.filter?.trim().length) {
-    const parsed = parseDurationWhereClause(
-      props.filter.trim(),
-      sqlParser.value,
-      searchObj.data.stream.selectedStream.value,
-    );
-    baseFilters.push(
-      parseSpanKindWhereClause(
-        typeof parsed === "string" ? parsed : props.filter.trim(),
-        sqlParser.value,
-        searchObj.data.stream.selectedStream.value,
-      ),
-    );
-  }
+  const parsedFilter = parseEffectiveFilter();
+  if (parsedFilter) baseFilters.push(parsedFilter);
 
   return baseFilters;
 };
@@ -248,8 +260,8 @@ const loadDashboard = async () => {
 
     currentTimeObj.value = {
       __global: {
-        start_time: new Date(props.timeRange.startTime),
-        end_time: new Date(props.timeRange.endTime),
+        start_time: new Date(effectiveTimeRange.value.startTime),
+        end_time: new Date(effectiveTimeRange.value.endTime),
       },
     };
 
@@ -258,81 +270,63 @@ const loadDashboard = async () => {
 
     const isSpansMode = searchObj.meta.searchMode === "spans";
     const baseFilters: string[] = getBaseFilters();
-    convertedDashboard.tabs[0].panels.forEach((panel, index) => {
-      // Build WHERE clause based on filters
-      let whereClause = "";
+    convertedDashboard.tabs[0].panels.forEach(
+      (panel: { title?: string; queries: { query: string }[] }, index: number) => {
+        // Build WHERE clause based on filters
+        let whereClause = "";
 
-      // Special handling for "Errors" panel - always filter by error status
-      if (panel.title === "Errors") {
-        const errorFilters = ["span_status = 'ERROR'"];
-        if (props.filter?.trim().length) {
-          // Parse human-readable duration values back to raw µs for SQL,
-          // and span_kind labels back to numeric OTEL keys.
-          const parsedFilter = parseDurationWhereClause(
-            props.filter.trim(),
-            sqlParser.value,
-            searchObj.data.stream.selectedStream.value,
-          );
-          errorFilters.push(
-            parseSpanKindWhereClause(
-              typeof parsedFilter === "string"
-                ? parsedFilter
-                : props.filter.trim(),
-              sqlParser.value,
-              searchObj.data.stream.selectedStream.value,
-            ),
-          );
+        // Special handling for "Errors" panel - always filter by error status
+        if (panel.title === "Errors") {
+          const errorFilters = ["span_status = 'ERROR'"];
+          const parsedFilter = parseEffectiveFilter();
+          if (parsedFilter) errorFilters.push(parsedFilter);
+
+          if (baseFilters.length) {
+            errorFilters.push(...baseFilters);
+          }
+
+          whereClause = errorFilters.length ? "WHERE " + errorFilters.join(" AND ") : "";
+        } else if (panel.title === "Duration" && !isSpansMode) {
+          // Traces mode: restrict Duration percentiles to root spans only so that
+          // each trace contributes exactly one duration value. Root spans are
+          // identified by an absent reference_parent_span_id (NULL or empty string).
+          const durationFilters = [...baseFilters];
+          if (durationFilters.length) whereClause = "WHERE " + durationFilters.join(" AND ");
+        } else {
+          // Spans mode Duration, and Rate panel for both modes: apply combined filters
+          whereClause = baseFilters.length ? "WHERE " + baseFilters.join(" AND ") : "";
         }
 
-        if (baseFilters.length) {
-          errorFilters.push(...baseFilters);
+        const streamName = searchObj.data.stream.selectedStream.value;
+
+        // Build the final query: substitute placeholders then apply mode transforms
+        let query = panel["queries"][0].query
+          .replace("[STREAM_NAME]", () => `"${streamName}"`)
+          .replace("[WHERE_CLAUSE]", () => whereClause);
+
+        // Spans mode: replace trace-level distinct counts with span-level counts
+        // in the Rate and Errors panels.
+        if (isSpansMode && (panel.title === "Rate" || panel.title === "Errors")) {
+          query = query
+            .replace(
+              /approx_distinct\(trace_id\)\s+filter\s*\(where\s+span_status\s*=\s*'ERROR'\)/gi,
+              "count(*) FILTER (WHERE span_status = 'ERROR')",
+            )
+            .replace(/approx_distinct\(trace_id\)/gi, "count(*)");
         }
 
-        whereClause = errorFilters.length
-          ? "WHERE " + errorFilters.join(" AND ")
-          : "";
-      } else if (panel.title === "Duration" && !isSpansMode) {
-        // Traces mode: restrict Duration percentiles to root spans only so that
-        // each trace contributes exactly one duration value. Root spans are
-        // identified by an absent reference_parent_span_id (NULL or empty string).
-        const durationFilters = [...baseFilters];
-        if (durationFilters.length)
-          whereClause = "WHERE " + durationFilters.join(" AND ");
-      } else {
-        // Spans mode Duration, and Rate panel for both modes: apply combined filters
-        whereClause = baseFilters.length
-          ? "WHERE " + baseFilters.join(" AND ")
-          : "";
-      }
-
-      const streamName = searchObj.data.stream.selectedStream.value;
-
-      // Build the final query: substitute placeholders then apply mode transforms
-      let query = panel["queries"][0].query
-        .replace("[STREAM_NAME]", () => `"${streamName}"`)
-        .replace("[WHERE_CLAUSE]", () => whereClause);
-
-      // Spans mode: replace trace-level distinct counts with span-level counts
-      // in the Rate and Errors panels.
-      if (isSpansMode && (panel.title === "Rate" || panel.title === "Errors")) {
-        query = query
-          .replace(
-            /approx_distinct\(trace_id\)\s+filter\s*\(where\s+span_status\s*=\s*'ERROR'\)/gi,
-            "count(*) FILTER (WHERE span_status = 'ERROR')",
-          )
-          .replace(/approx_distinct\(trace_id\)/gi, "count(*)");
-      }
-
-      convertedDashboard.tabs[0].panels[index]["queries"][0].query = query;
-    });
+        convertedDashboard.tabs[0].panels[index]["queries"][0].query = query;
+      },
+    );
 
     dashboardData.value = convertedDashboard;
 
     updateLayout();
   } catch (err: any) {
     console.error("Error loading dashboard:", err);
-    error.value = err.message || "Failed to load metrics dashboard";
-    showErrorNotification(error.value);
+    const message: string = err.message || t("traces.failedToLoadMetricsDashboard");
+    error.value = message;
+    showErrorNotification(raw(message));
   }
 };
 
@@ -347,23 +341,18 @@ const refreshDashboard = () => {
 };
 
 const createRangeFilter = (
-  data,
-  start = null,
-  end = null,
-  timeStart = null,
-  timeEnd = null,
+  data: { id?: string; title?: string } | undefined,
+  start: number | null = null,
+  end: number | null = null,
+  timeStart: number | null = null,
+  timeEnd: number | null = null,
 ) => {
   const panelId = data?.id;
   const panelTitle = data?.title || "Chart";
 
   // Support Duration, Rate, and Errors panels
-  if (
-    panelId &&
-    (panelTitle === "Duration" ||
-      panelTitle === "Rate" ||
-      panelTitle === "Errors")
-  ) {
-    searchObj.meta.metricsRangeFilters.set(panelId, {
+  if (panelId && (panelTitle === "Duration" || panelTitle === "Rate" || panelTitle === "Errors")) {
+    (searchObj.meta.metricsRangeFilters as Map<string, MetricsRangeFilter>).set(panelId, {
       panelTitle,
       start: start ? Math.floor(start) : null,
       end: end ? Math.floor(end) : null,
@@ -391,9 +380,7 @@ const emitFiltersToQueryEditor = () => {
           `duration >= '${formatTimeWithSuffix(rangeFilter.start)}' and duration <= '${formatTimeWithSuffix(rangeFilter.end)}'`,
         );
       } else if (rangeFilter.start !== null) {
-        filters.push(
-          `duration >= '${formatTimeWithSuffix(rangeFilter.start)}'`,
-        );
+        filters.push(`duration >= '${formatTimeWithSuffix(rangeFilter.start)}'`);
       } else if (rangeFilter.end !== null) {
         filters.push(`duration <= '${formatTimeWithSuffix(rangeFilter.end)}'`);
       }
@@ -407,7 +394,7 @@ const emitFiltersToQueryEditor = () => {
   emit("filters-updated", filters);
 };
 
-const onDataZoom = ({
+const onDataZoom = async ({
   start,
   end,
   start1,
@@ -426,11 +413,16 @@ const onDataZoom = ({
     // Store the original time range BEFORE selection for volume analysis baseline
     // This must be done before emit() which triggers the parent to update the datetime control
     originalTimeRangeBeforeSelection.value = {
-      startTime: props.timeRange.startTime,
-      endTime: props.timeRange.endTime,
+      startTime: effectiveTimeRange.value.startTime,
+      endTime: effectiveTimeRange.value.endTime,
     };
 
     searchObj.meta.metricsRangeFilters.clear();
+
+    // All panels emit time-range-selected to update global datetime control
+    emit("time-range-selected", { start, end });
+
+    await nextTick();
 
     // For Rate and Errors panels: use placeholder values to indicate time-based selection
     // Volume/Error analysis will use the time range, not Y-axis values
@@ -450,27 +442,7 @@ const onDataZoom = ({
 
       createRangeFilter(data, start1, end1, timeStartMicros, timeEndMicros);
     }
-
-    // All panels emit time-range-selected to update global datetime control
-    emit("time-range-selected", { start, end });
   }
-};
-
-const removeRangeFilter = (panelId: string) => {
-  searchObj.meta.metricsRangeFilters.delete(panelId);
-  // Increment version to trigger reactivity
-  rangeFiltersVersion.value++;
-
-  // Emit updated filters to parent to update Query Editor
-  emitFiltersToQueryEditor();
-};
-
-const formatTimestamp = (timestamp: number) => {
-  const date = new Date(timestamp);
-  const hours = String(date.getHours()).padStart(2, "0");
-  const minutes = String(date.getMinutes()).padStart(2, "0");
-  const seconds = String(date.getSeconds()).padStart(2, "0");
-  return `${hours}:${minutes}:${seconds}`;
 };
 
 const handleChartContextMenu = (event: any) => {
@@ -492,81 +464,6 @@ const handleChartContextMenu = (event: any) => {
 
 const hideContextMenu = () => {
   contextMenuVisible.value = false;
-};
-
-const openAnalysisDashboard = () => {
-  // Get the current duration range from existing filters
-  let durationStart = null;
-  let durationEnd = null;
-
-  rangeFilters.value.forEach((filter) => {
-    if (filter.panelTitle === "Duration") {
-      durationStart = filter.start;
-      durationEnd = filter.end;
-    }
-  });
-
-  // Set the duration filter for analysis
-  analysisDurationFilter.value = {
-    start: durationStart || 0,
-    end: durationEnd || Number.MAX_SAFE_INTEGER,
-  };
-
-  showAnalysisDashboard.value = true;
-};
-
-const openVolumeAnalysisDashboard = () => {
-  // Get the current rate range from existing filters
-  let rateStart = null;
-  let rateEnd = null;
-  let timeStart = null;
-  let timeEnd = null;
-
-  rangeFilters.value.forEach((filter) => {
-    if (filter.panelTitle === "Rate") {
-      rateStart = filter.start;
-      rateEnd = filter.end;
-      timeStart = filter.timeStart;
-      timeEnd = filter.timeEnd;
-    }
-  });
-
-  // Set the rate filter for analysis
-  analysisRateFilter.value = {
-    start: rateStart || 0,
-    end: rateEnd || Number.MAX_SAFE_INTEGER,
-    timeStart: timeStart || undefined,
-    timeEnd: timeEnd || undefined,
-  };
-
-  showVolumeAnalysisDashboard.value = true;
-};
-
-const openErrorAnalysisDashboard = () => {
-  // Get the current error range from existing filters
-  let errorStart = null;
-  let errorEnd = null;
-  let timeStart = null;
-  let timeEnd = null;
-
-  rangeFilters.value.forEach((filter) => {
-    if (filter.panelTitle === "Errors") {
-      errorStart = filter.start;
-      errorEnd = filter.end;
-      timeStart = filter.timeStart;
-      timeEnd = filter.timeEnd;
-    }
-  });
-
-  // Set the error filter for analysis
-  analysisErrorFilter.value = {
-    start: errorStart || 0,
-    end: errorEnd || Number.MAX_SAFE_INTEGER,
-    timeStart: timeStart || undefined,
-    timeEnd: timeEnd || undefined,
-  };
-
-  showErrorAnalysisDashboard.value = true;
 };
 
 // Unified function to open analysis dashboard with all filters populated
@@ -668,26 +565,6 @@ const handleContextMenuSelect = (selection: {
   hideContextMenu();
 };
 
-const toggleAutoRefresh = () => {
-  autoRefreshEnabled.value = !autoRefreshEnabled.value;
-
-  if (autoRefreshEnabled.value) {
-    startAutoRefresh();
-  } else {
-    stopAutoRefresh();
-  }
-};
-
-const startAutoRefresh = () => {
-  if (autoRefreshIntervalId.value !== null) {
-    stopAutoRefresh();
-  }
-
-  autoRefreshIntervalId.value = window.setInterval(() => {
-    refreshDashboard();
-  }, 30000); // 30 seconds
-};
-
 const stopAutoRefresh = () => {
   if (autoRefreshIntervalId.value !== null) {
     clearInterval(autoRefreshIntervalId.value);
@@ -695,10 +572,8 @@ const stopAutoRefresh = () => {
   }
 };
 
-onMounted(async () => {
+onMounted(() => {
   loadDashboard();
-  const { sqlParser: loadSqlParser } = useParser();
-  sqlParser.value = await loadSqlParser();
 });
 
 onBeforeUnmount(() => {
@@ -717,20 +592,25 @@ defineExpose({
 });
 </script>
 
-<style lang="scss" scoped>
-.traces-metrics-dashboard {
-  overflow: hidden;
-
-  :deep(.card-container) {
-    box-shadow: none;
-
-    :first-child {
-      padding: 0 0.0625rem !important;
-    }
-  }
+<style scoped>
+/* keep(lib-override:render-dashboard-charts): RenderDashboardCharts renders its
+   own DOM (reached via :deep). Tighten the side padding AND collapse the top
+   padding/margin it adds for full dashboards (container pt-2 + inner .displayDiv
+   mt-2 = 1rem). In this compact traces view the charts live in a fixed h-40
+   (10rem) overflow-hidden wrapper, so that extra 1rem pushes the plot past the
+   clip line and cuts off the x-axis. Zeroing it restores the main-branch fit. */
+.charts-wrapper :deep(.render-dashboard-charts-container) {
+  padding-left: 0.2rem;
+  padding-right: 0.2rem;
+  padding-top: 0;
 }
 
-// Slide fade transition
+.charts-wrapper :deep(.displayDiv) {
+  margin-top: 0;
+}
+
+/* keep(complex-state): slide-fade-* drive the <transition name="slide-fade">
+   reveal (enter/leave phases) — Tailwind can't express transition-group state. */
 .slide-fade-enter-active,
 .slide-fade-leave-active {
   transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
@@ -738,43 +618,25 @@ defineExpose({
 
 .slide-fade-enter-from {
   opacity: 0;
-  transform: translateY(-10px);
+  transform: translateY(-0.625rem);
   max-height: 0;
 }
 
 .slide-fade-enter-to {
   opacity: 1;
   transform: translateY(0);
-  max-height: 500px;
+  max-height: 31.25rem;
 }
 
 .slide-fade-leave-from {
   opacity: 1;
   transform: translateY(0);
-  max-height: 500px;
+  max-height: 31.25rem;
 }
 
 .slide-fade-leave-to {
   opacity: 0;
-  transform: translateY(-10px);
+  transform: translateY(-0.625rem);
   max-height: 0;
-}
-
-// Charts wrapper
-.charts-wrapper {
-  padding: 0.25rem;
-  overflow: hidden;
-  will-change: transform, opacity;
-}
-
-// Dark mode support
-body.body--dark {
-  .charts-container {
-    border-color: rgba(255, 255, 255, 0.1);
-
-    &:hover {
-      box-shadow: 0 2px 8px rgba(255, 255, 255, 0.08);
-    }
-  }
 }
 </style>

@@ -16,8 +16,6 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, VueWrapper, flushPromises } from "@vue/test-utils";
 import { ref, computed, reactive } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import * as quasar from "quasar";
 import store from "@/test/unit/helpers/store";
 import router from "@/test/unit/helpers/router";
 
@@ -113,17 +111,9 @@ const makeSearchObj = () =>
       showDetailTab: false,
       showTraceDetails: false,
       sqlMode: false,
-      searchMode: "traces" as
-        | "traces"
-        | "spans"
-        | "service-graph"
-        | "services-catalog",
-      showErrorOnly: false,
+      searchMode: "traces" as "traces" | "spans" | "service-graph" | "services-catalog",
       queryEditorPlaceholderFlag: true,
-      metricsRangeFilters: new Map<
-        string,
-        { panelTitle: string; start: number; end: number }
-      >(),
+      metricsRangeFilters: new Map<string, { panelTitle: string; start: number; end: number }>(),
       resultGrid: {
         wrapCells: false,
         manualRemoveFields: false,
@@ -252,11 +242,6 @@ vi.mock("@/composables/useTraces", () => ({
 import SearchBar from "@/plugins/traces/SearchBar.vue";
 
 // ---------------------------------------------------------------------------
-// Quasar setup
-// ---------------------------------------------------------------------------
-installQuasar({ plugins: [quasar.Dialog, quasar.Notify] });
-
-// ---------------------------------------------------------------------------
 // DOM anchor node required by attachTo
 // ---------------------------------------------------------------------------
 const appNode = document.createElement("div");
@@ -300,14 +285,50 @@ const sharedStubs = {
     },
   },
   SyntaxGuide: {
-    template:
-      '<div data-test="logs-search-bar-sql-mode-toggle-btn" class="syntax-guide-stub" />',
-    props: ["sqlmode"],
+    template: '<div data-test="traces-search-bar-syntax-guide-btn" class="syntax-guide-stub" />',
+    props: ["sqlmode", "menuItem"],
   },
   ShareButton: {
-    template:
-      '<button data-test="logs-search-bar-share-link-btn" class="share-btn-stub" />',
+    template: '<button data-test="logs-search-bar-share-link-btn" class="share-btn-stub" />',
     props: ["url", "buttonClass", "buttonSize"],
+  },
+  // OToggleGroup: stub to render inline without Reka UI context requirements
+  OToggleGroup: {
+    name: "OToggleGroup",
+    template:
+      '<div class="o-toggle-group-stub logs-visualize-toggle button-group" v-bind="$attrs"><slot /></div>',
+    props: ["modelValue"],
+    emits: ["update:modelValue"],
+  },
+  // OToggleGroupItem: stub that emits the value up to the parent OToggleGroup
+  OToggleGroupItem: {
+    name: "OToggleGroupItem",
+    template: `<button
+      class="o-toggle-group-item-stub"
+      :class="{ selected: isSelected }"
+      :data-state="isSelected ? 'on' : 'off'"
+      v-bind="$attrs"
+      @click="$parent.$emit('update:modelValue', value)"
+    ><slot name="icon-left" /><slot /></button>`,
+    props: ["value", "size"],
+    computed: {
+      isSelected() {
+        return this.$parent?.modelValue === this.value;
+      },
+    },
+  },
+  // ODropdown stub to render portal content inline
+  ODropdown: {
+    name: "ODropdown",
+    template: '<div class="o-dropdown-stub" v-bind="$attrs"><slot name="trigger" /><slot /></div>',
+    emits: ["update:open"],
+    props: ["open", "side", "align", "sideOffset"],
+  },
+  ODropdownItem: {
+    name: "ODropdownItem",
+    template:
+      '<div class="o-dropdown-item-stub" v-bind="$attrs" @click="$emit(\'select\')"><slot name="icon-left" /><slot /></div>',
+    emits: ["select"],
   },
 };
 
@@ -370,20 +391,16 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(wrapper.find(".button-group.logs-visualize-toggle").exists()).toBe(
+      // OToggleGroup replaces the old .button-group.logs-visualize-toggle div.
+      // All four modes render as in-page tabs — Service Graph and Services
+      // Catalog switch views inline on the Traces page (`?tab=`).
+      expect(wrapper.find(".o-toggle-group-stub").exists()).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-mode-spans-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-mode-traces-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="traces-service-graph-toggle"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-mode-services-catalog-btn"]').exists()).toBe(
         true,
       );
-      expect(
-        wrapper.find('[data-test="traces-search-mode-traces-btn"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="traces-service-graph-toggle"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper
-          .find('[data-test="traces-search-mode-services-catalog-btn"]')
-          .exists(),
-      ).toBe(true);
     });
   });
 
@@ -398,25 +415,19 @@ describe("SearchBar", () => {
       await sgBtn.trigger("click");
 
       expect(wrapper.emitted("update:searchMode")).toBeTruthy();
-      expect(wrapper.emitted("update:searchMode")![0]).toEqual([
-        "service-graph",
-      ]);
+      expect(wrapper.emitted("update:searchMode")![0]).toEqual(["service-graph"]);
     });
 
     it("should emit update:searchMode with 'services-catalog' when the services-catalog button is clicked", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const scBtn = wrapper.find(
-        '[data-test="traces-search-mode-services-catalog-btn"]',
-      );
+      const scBtn = wrapper.find('[data-test="traces-search-mode-services-catalog-btn"]');
       expect(scBtn.exists()).toBe(true);
       await scBtn.trigger("click");
 
       expect(wrapper.emitted("update:searchMode")).toBeTruthy();
-      expect(wrapper.emitted("update:searchMode")![0]).toEqual([
-        "services-catalog",
-      ]);
+      expect(wrapper.emitted("update:searchMode")![0]).toEqual(["services-catalog"]);
     });
   });
 
@@ -427,19 +438,9 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="traces-search-bar-reset-filters-btn"]')
-          .exists(),
-      ).toBe(true);
-      expect(
-        wrapper
-          .find('[data-test="logs-search-bar-date-time-dropdown"]')
-          .exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-date-time-dropdown"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(true);
     });
 
     it("should hide search controls when searchMode is 'service-graph'", async () => {
@@ -447,19 +448,11 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="traces-search-bar-reset-filters-btn"]')
-          .exists(),
-      ).toBe(false);
-      expect(
-        wrapper
-          .find('[data-test="logs-search-bar-date-time-dropdown"]')
-          .exists(),
-      ).toBe(false);
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').exists()).toBe(
+        false,
+      );
+      expect(wrapper.find('[data-test="logs-search-bar-date-time-dropdown"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(false);
     });
 
     it("should hide search controls when searchMode is 'services-catalog'", async () => {
@@ -467,19 +460,11 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="traces-search-bar-reset-filters-btn"]')
-          .exists(),
-      ).toBe(false);
-      expect(
-        wrapper
-          .find('[data-test="logs-search-bar-date-time-dropdown"]')
-          .exists(),
-      ).toBe(false);
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').exists()).toBe(
+        false,
+      );
+      expect(wrapper.find('[data-test="logs-search-bar-date-time-dropdown"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(false);
     });
 
     it("should re-show controls when searchMode changes back to 'traces'", async () => {
@@ -487,16 +472,49 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(false);
 
       searchObjInstance.meta.searchMode = "traces";
       await wrapper.vm.$nextTick();
 
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("per-mode toolbars", () => {
+    it("should show the Service Graph toolbar (DateTime, refresh, view toggles) in service-graph mode", async () => {
+      searchObjInstance.meta.searchMode = "service-graph";
+      wrapper = mountSearchBar();
+      await flushPromises();
+
+      expect(wrapper.find('[data-test="service-graph-date-time-picker"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="service-graph-refresh-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="service-graph-tree-view-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="service-graph-graph-view-btn"]').exists()).toBe(true);
+      // Services Catalog toolbar is not co-mounted
+      expect(wrapper.find('[data-test="services-catalog-date-time-picker"]').exists()).toBe(false);
+    });
+
+    it("should show the Services Catalog toolbar (DateTime) in services-catalog mode", async () => {
+      searchObjInstance.meta.searchMode = "services-catalog";
+      wrapper = mountSearchBar();
+      await flushPromises();
+
+      expect(wrapper.find('[data-test="services-catalog-date-time-picker"]').exists()).toBe(true);
+      // Service Graph toolbar is not co-mounted
+      expect(wrapper.find('[data-test="service-graph-date-time-picker"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="service-graph-refresh-btn"]').exists()).toBe(false);
+    });
+
+    it("should emit service-graph-refresh when the graph refresh button is clicked", async () => {
+      searchObjInstance.meta.searchMode = "service-graph";
+      wrapper = mountSearchBar();
+      await flushPromises();
+
+      await wrapper.find('[data-test="service-graph-refresh-btn"]').trigger("click");
+
+      expect(wrapper.emitted("service-graph-refresh")).toBeTruthy();
     });
   });
 
@@ -506,9 +524,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const tracesBtn = wrapper.find(
-        '[data-test="traces-search-mode-traces-btn"]',
-      );
+      const tracesBtn = wrapper.find('[data-test="traces-search-mode-traces-btn"]');
       expect(tracesBtn.exists()).toBe(true);
       await tracesBtn.trigger("click");
 
@@ -520,9 +536,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const spansBtn = wrapper.find(
-        '[data-test="traces-search-mode-spans-btn"]',
-      );
+      const spansBtn = wrapper.find('[data-test="traces-search-mode-spans-btn"]');
       expect(spansBtn.exists()).toBe(true);
       await spansBtn.trigger("click");
 
@@ -535,12 +549,12 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="traces-search-mode-traces-btn"]').classes(),
-      ).toContain("selected");
-      expect(
-        wrapper.find('[data-test="traces-search-mode-spans-btn"]').classes(),
-      ).not.toContain("selected");
+      expect(wrapper.find('[data-test="traces-search-mode-traces-btn"]').classes()).toContain(
+        "selected",
+      );
+      expect(wrapper.find('[data-test="traces-search-mode-spans-btn"]').classes()).not.toContain(
+        "selected",
+      );
     });
 
     it("should apply 'selected' class to Spans button when searchMode is 'spans'", async () => {
@@ -548,12 +562,12 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="traces-search-mode-spans-btn"]').classes(),
-      ).toContain("selected");
-      expect(
-        wrapper.find('[data-test="traces-search-mode-traces-btn"]').classes(),
-      ).not.toContain("selected");
+      expect(wrapper.find('[data-test="traces-search-mode-spans-btn"]').classes()).toContain(
+        "selected",
+      );
+      expect(wrapper.find('[data-test="traces-search-mode-traces-btn"]').classes()).not.toContain(
+        "selected",
+      );
     });
 
     it("should apply 'selected' class to Services Catalog button when searchMode is 'services-catalog'", async () => {
@@ -562,13 +576,11 @@ describe("SearchBar", () => {
       await flushPromises();
 
       expect(
-        wrapper
-          .find('[data-test="traces-search-mode-services-catalog-btn"]')
-          .classes(),
+        wrapper.find('[data-test="traces-search-mode-services-catalog-btn"]').classes(),
       ).toContain("selected");
-      expect(
-        wrapper.find('[data-test="traces-search-mode-traces-btn"]').classes(),
-      ).not.toContain("selected");
+      expect(wrapper.find('[data-test="traces-search-mode-traces-btn"]').classes()).not.toContain(
+        "selected",
+      );
     });
   });
 
@@ -578,11 +590,9 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="traces-search-bar-show-metrics-toggle-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-bar-show-metrics-toggle-btn"]').exists()).toBe(
+        true,
+      );
     });
 
     it("should reflect showHistogram=false from searchObj", async () => {
@@ -606,15 +616,13 @@ describe("SearchBar", () => {
 
   // -------------------------------------------------------------------------
   describe("error-only toggle", () => {
-    it("should render the error-only toggle", async () => {
+    it("should not render the error-only toggle in SearchBar (moved to SearchResult)", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="traces-search-bar-error-only-toggle-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-bar-error-only-toggle-btn"]').exists()).toBe(
+        false,
+      );
     });
 
     it("should emit error-only-toggled with true when onErrorOnlyToggle(true) is called", async () => {
@@ -646,11 +654,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="traces-search-bar-reset-filters-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').exists()).toBe(true);
     });
 
     it("should clear editorValue and advanceFiltersQuery when clicked", async () => {
@@ -659,9 +663,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      await wrapper
-        .find('[data-test="traces-search-bar-reset-filters-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').trigger("click");
 
       expect(searchObjInstance.data.editorValue).toBe("");
       expect(searchObjInstance.data.advanceFiltersQuery).toBe("");
@@ -689,19 +691,11 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      await wrapper
-        .find('[data-test="traces-search-bar-reset-filters-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').trigger("click");
 
-      expect(
-        searchObjInstance.data.stream.fieldValues.service_name.selectedValues,
-      ).toEqual([]);
-      expect(
-        searchObjInstance.data.stream.fieldValues.service_name.searchKeyword,
-      ).toBe("");
-      expect(
-        searchObjInstance.data.stream.fieldValues.status_code.selectedValues,
-      ).toEqual([]);
+      expect(searchObjInstance.data.stream.fieldValues.service_name.selectedValues).toEqual([]);
+      expect(searchObjInstance.data.stream.fieldValues.service_name.searchKeyword).toBe("");
+      expect(searchObjInstance.data.stream.fieldValues.status_code.selectedValues).toEqual([]);
     });
 
     it("should clear metricsRangeFilters Map when clicked", async () => {
@@ -715,9 +709,7 @@ describe("SearchBar", () => {
 
       expect(searchObjInstance.meta.metricsRangeFilters.size).toBe(1);
 
-      await wrapper
-        .find('[data-test="traces-search-bar-reset-filters-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').trigger("click");
 
       expect(searchObjInstance.meta.metricsRangeFilters.size).toBe(0);
     });
@@ -726,9 +718,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      await wrapper
-        .find('[data-test="traces-search-bar-reset-filters-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]').trigger("click");
 
       expect(wrapper.emitted("filters-reset")).toBeTruthy();
       expect(wrapper.emitted("filters-reset")).toHaveLength(1);
@@ -741,9 +731,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(true);
     });
 
     it("should emit searchdata when clicked and searchObj.loading is false", async () => {
@@ -751,9 +739,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar({ isLoading: false });
       await flushPromises();
 
-      await wrapper
-        .find('[data-test="logs-search-bar-refresh-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="logs-search-bar-refresh-btn"]').trigger("click");
 
       expect(wrapper.emitted("searchdata")).toBeTruthy();
       expect(wrapper.emitted("searchdata")).toHaveLength(1);
@@ -763,12 +749,8 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar({ isLoading: true });
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="traces-search-bar-cancel-btn"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="traces-search-bar-cancel-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(false);
     });
 
     it("should not emit searchdata when searchObj.loading is true", async () => {
@@ -776,9 +758,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar({ isLoading: false });
       await flushPromises();
 
-      await wrapper
-        .find('[data-test="logs-search-bar-refresh-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="logs-search-bar-refresh-btn"]').trigger("click");
 
       // The searchData method guards on loading == false
       expect(wrapper.emitted("searchdata")).toBeFalsy();
@@ -802,7 +782,8 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(wrapper.find(".download-logs-btn").exists()).toBe(true);
+      // OButton: the download button uses title="Export Traces" (no .download-logs-btn class)
+      expect(wrapper.find('[title="traces.exportTraces"]').exists()).toBe(true);
     });
 
     it("should be disabled when queryResults.hits is empty", async () => {
@@ -810,9 +791,10 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(wrapper.find(".download-logs-btn").classes()).toContain(
-        "disabled",
-      );
+      // OButton uses native HTML disabled attribute (not a CSS "disabled" class)
+      const btn = wrapper.find('[title="traces.exportTraces"]');
+      expect(btn.exists()).toBe(true);
+      expect(btn.attributes("disabled")).toBeDefined();
     });
 
     it("should be enabled when queryResults.hits has entries", async () => {
@@ -827,9 +809,10 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(wrapper.find(".download-logs-btn").classes()).not.toContain(
-        "disabled",
-      );
+      // OButton: when enabled, native disabled attribute should be absent
+      const btn = wrapper.find('[title="traces.exportTraces"]');
+      expect(btn.exists()).toBe(true);
+      expect(btn.attributes("disabled")).toBeUndefined();
     });
   });
 
@@ -839,31 +822,21 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="logs-search-bar-date-time-dropdown"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-date-time-dropdown"]').exists()).toBe(true);
     });
 
     it("should render the syntax guide (SQL mode toggle)", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="logs-search-bar-sql-mode-toggle-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="traces-search-bar-syntax-guide-btn"]').exists()).toBe(true);
     });
 
     it("should render the share link button", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="logs-search-bar-share-link-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-share-link-btn"]').exists()).toBe(true);
     });
   });
 
@@ -874,9 +847,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="code-query-editor-stub"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="code-query-editor-stub"]').exists()).toBe(true);
     });
 
     it("should hide the query editor when showQuery is false", async () => {
@@ -884,9 +855,7 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="code-query-editor-stub"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="code-query-editor-stub"]').exists()).toBe(false);
     });
   });
 
@@ -944,6 +913,48 @@ describe("SearchBar", () => {
       });
 
       expect(searchObjInstance.data.datetime.startTime).toBe(originalStart);
+    });
+
+    it("should emit searchdata on a user-driven relative date change in live mode", async () => {
+      store.state.zoConfig = { auto_query_enabled: true };
+      searchObjInstance.meta.liveMode = true;
+
+      wrapper = mountSearchBar();
+      await flushPromises();
+
+      // Control `prev` so isDatetimeChanged() is true for the "1h" change.
+      searchObjInstance.data.datetime.relativeTimePeriod = "15m";
+
+      await (wrapper.vm as any).updateDateTime({
+        startTime: 0,
+        endTime: 0,
+        relativeTimePeriod: "1h",
+        valueType: "relative",
+        userChangedValue: true,
+      });
+
+      expect(wrapper.emitted("searchdata")).toBeTruthy();
+      expect(wrapper.emitted("searchdata")).toHaveLength(1);
+    });
+
+    it("should NOT emit searchdata for a programmatic date change (userChangedValue false) in live mode", async () => {
+      store.state.zoConfig = { auto_query_enabled: true };
+      searchObjInstance.meta.liveMode = true;
+
+      wrapper = mountSearchBar();
+      await flushPromises();
+
+      searchObjInstance.data.datetime.relativeTimePeriod = "15m";
+
+      await (wrapper.vm as any).updateDateTime({
+        startTime: 0,
+        endTime: 0,
+        relativeTimePeriod: "1h",
+        valueType: "relative",
+        userChangedValue: false,
+      });
+
+      expect(wrapper.emitted("searchdata")).toBeFalsy();
     });
   });
 
@@ -1113,9 +1124,7 @@ describe("SearchBar", () => {
       await wrapper.vm.$nextTick();
       await flushPromises();
 
-      expect(searchObjInstance.data.editorValue).toBe(
-        "service_name='svc-a' and some bare keyword",
-      );
+      expect(searchObjInstance.data.editorValue).toBe("service_name='svc-a' and some bare keyword");
     });
   });
 
@@ -1125,54 +1134,36 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const resetBtn = wrapper.find(
-        '[data-test="traces-search-bar-reset-filters-btn"]',
-      );
+      const resetBtn = wrapper.find('[data-test="traces-search-bar-reset-filters-btn"]');
       expect(resetBtn.exists()).toBe(true);
-      // QTooltip uses <Teleport> and renders outside the button — check via component tree
-      expect(wrapper.findComponent({ name: "QTooltip" }).exists()).toBe(true);
+      expect(wrapper.findComponent({ name: "OTooltip" }).exists()).toBe(true);
     });
 
     it("should have a tooltip inside the Traces mode toggle button", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const searchBtn = wrapper.find(
-        '[data-test="traces-search-mode-traces-btn"]',
-      );
+      const searchBtn = wrapper.find('[data-test="traces-search-mode-traces-btn"]');
       expect(searchBtn.exists()).toBe(true);
-      expect(wrapper.findComponent({ name: "QTooltip" }).exists()).toBe(true);
-    });
-
-    it("should have a tooltip inside the service-graph tab toggle button", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      const sgBtn = wrapper.find('[data-test="traces-service-graph-toggle"]');
-      expect(sgBtn.exists()).toBe(true);
-      expect(wrapper.findComponent({ name: "QTooltip" }).exists()).toBe(true);
+      expect(wrapper.findComponent({ name: "OTooltip" }).exists()).toBe(true);
     });
 
     it("should have a tooltip inside the Traces search mode button", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const tracesBtn = wrapper.find(
-        '[data-test="traces-search-mode-traces-btn"]',
-      );
+      const tracesBtn = wrapper.find('[data-test="traces-search-mode-traces-btn"]');
       expect(tracesBtn.exists()).toBe(true);
-      expect(wrapper.findComponent({ name: "QTooltip" }).exists()).toBe(true);
+      expect(wrapper.findComponent({ name: "OTooltip" }).exists()).toBe(true);
     });
 
     it("should have a tooltip inside the Spans search mode button", async () => {
       wrapper = mountSearchBar();
       await flushPromises();
 
-      const spansBtn = wrapper.find(
-        '[data-test="traces-search-mode-spans-btn"]',
-      );
+      const spansBtn = wrapper.find('[data-test="traces-search-mode-spans-btn"]');
       expect(spansBtn.exists()).toBe(true);
-      expect(wrapper.findComponent({ name: "QTooltip" }).exists()).toBe(true);
+      expect(wrapper.findComponent({ name: "OTooltip" }).exists()).toBe(true);
     });
   });
 
@@ -1202,190 +1193,9 @@ describe("SearchBar", () => {
   });
 
   // -------------------------------------------------------------------------
-  // [auto-generated] updateQuery
-  // -------------------------------------------------------------------------
-  describe("updateQuery", () => {
-    it("should call queryEditorRef.setValue with searchObj.data.query", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      const mockSetValue = vi.fn();
-      (wrapper.vm as any).queryEditorRef = { setValue: mockSetValue };
-      searchObjInstance.data.query = "SELECT trace_id FROM default";
-
-      (wrapper.vm as any).updateQuery();
-
-      expect(mockSetValue).toHaveBeenCalledWith("SELECT trace_id FROM default");
-    });
-
-    it("should not throw when queryEditorRef is null", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      (wrapper.vm as any).queryEditorRef = null;
-
-      expect(() => (wrapper.vm as any).updateQuery()).not.toThrow();
-    });
-  });
-
-  // -------------------------------------------------------------------------
   // [auto-generated] Props
   // -------------------------------------------------------------------------
-  describe("service-graph mode toolbar", () => {
-    beforeEach(() => {
-      searchObjInstance.meta.searchMode = "service-graph";
-    });
-
-    it("should render service-graph-date-time-picker when searchMode is service-graph", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper.find('[data-test="service-graph-date-time-picker"]').exists(),
-      ).toBe(true);
-    });
-
-    it("should render service-graph-refresh-btn when searchMode is service-graph", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper.find('[data-test="service-graph-refresh-btn"]').exists(),
-      ).toBe(true);
-    });
-
-    it("should render tree-view and graph-view toggle buttons when searchMode is service-graph", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper.find('[data-test="service-graph-tree-view-btn"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="service-graph-graph-view-btn"]').exists(),
-      ).toBe(true);
-    });
-
-    it("should emit service-graph-refresh when refresh btn is clicked", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      const refreshBtn = wrapper.find(
-        '[data-test="service-graph-refresh-btn"]',
-      );
-      expect(refreshBtn.exists()).toBe(true);
-      await refreshBtn.trigger("click");
-
-      expect(wrapper.emitted("service-graph-refresh")).toBeTruthy();
-      expect(wrapper.emitted("service-graph-refresh")).toHaveLength(1);
-    });
-
-    it("should call onServiceGraphVisualizationChange with 'tree' when tree-view btn is clicked", async () => {
-      searchObjInstance.meta.serviceGraphVisualizationType = "graph";
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      const treeBtn = wrapper.find('[data-test="service-graph-tree-view-btn"]');
-      expect(treeBtn.exists()).toBe(true);
-      await treeBtn.trigger("click");
-
-      expect(searchObjInstance.meta.serviceGraphVisualizationType).toBe("tree");
-      expect(searchObjInstance.meta.serviceGraphLayoutType).toBe("horizontal");
-    });
-
-    it("should call onServiceGraphVisualizationChange with 'graph' when graph-view btn is clicked", async () => {
-      searchObjInstance.meta.serviceGraphVisualizationType = "tree";
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      const graphBtn = wrapper.find(
-        '[data-test="service-graph-graph-view-btn"]',
-      );
-      expect(graphBtn.exists()).toBe(true);
-      await graphBtn.trigger("click");
-
-      expect(searchObjInstance.meta.serviceGraphVisualizationType).toBe(
-        "graph",
-      );
-      expect(searchObjInstance.meta.serviceGraphLayoutType).toBe("force");
-    });
-
-    it("should hide service-graph toolbar when searchMode is not service-graph", async () => {
-      searchObjInstance.meta.searchMode = "traces";
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper.find('[data-test="service-graph-date-time-picker"]').exists(),
-      ).toBe(false);
-      expect(
-        wrapper.find('[data-test="service-graph-refresh-btn"]').exists(),
-      ).toBe(false);
-      expect(
-        wrapper.find('[data-test="service-graph-tree-view-btn"]').exists(),
-      ).toBe(false);
-      expect(
-        wrapper.find('[data-test="service-graph-graph-view-btn"]').exists(),
-      ).toBe(false);
-    });
-  });
-
   // -------------------------------------------------------------------------
-  describe("services-catalog mode toolbar", () => {
-    beforeEach(() => {
-      searchObjInstance.meta.searchMode = "services-catalog";
-    });
-
-    it("should render services-catalog-date-time-picker when searchMode is services-catalog", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper
-          .find('[data-test="services-catalog-date-time-picker"]')
-          .exists(),
-      ).toBe(true);
-    });
-
-    it("should render services-catalog-refresh-btn when searchMode is services-catalog", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper.find('[data-test="services-catalog-refresh-btn"]').exists(),
-      ).toBe(true);
-    });
-
-    it("should emit services-catalog-refresh when refresh btn is clicked", async () => {
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      const refreshBtn = wrapper.find(
-        '[data-test="services-catalog-refresh-btn"]',
-      );
-      expect(refreshBtn.exists()).toBe(true);
-      await refreshBtn.trigger("click");
-
-      expect(wrapper.emitted("services-catalog-refresh")).toBeTruthy();
-      expect(wrapper.emitted("services-catalog-refresh")).toHaveLength(1);
-    });
-
-    it("should hide services-catalog toolbar when searchMode is not services-catalog", async () => {
-      searchObjInstance.meta.searchMode = "traces";
-      wrapper = mountSearchBar();
-      await flushPromises();
-
-      expect(
-        wrapper
-          .find('[data-test="services-catalog-date-time-picker"]')
-          .exists(),
-      ).toBe(false);
-      expect(
-        wrapper.find('[data-test="services-catalog-refresh-btn"]').exists(),
-      ).toBe(false);
-    });
-  });
-
   // -------------------------------------------------------------------------
   describe("props", () => {
     it("should accept updated fieldValues without errors", async () => {
@@ -1408,19 +1218,70 @@ describe("SearchBar", () => {
       wrapper = mountSearchBar({ isLoading: false });
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(true);
 
       await wrapper.setProps({ isLoading: true });
       await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="traces-search-bar-cancel-btn"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="traces-search-bar-cancel-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="logs-search-bar-refresh-btn"]').exists()).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("applyFilters function", () => {
+    beforeEach(async () => {
+      // Setup auto-search enabled + live mode
+      store.state.zoConfig = { auto_query_enabled: true };
+      searchObjInstance.meta.liveMode = true;
+
+      wrapper = mountSearchBar();
+      await flushPromises();
+    });
+
+    it("should emit searchdata when skipSearch=false and auto-search enabled", async () => {
+      const testTerms = ["service_name = 'test-service'"];
+
+      wrapper.vm.applyFilters(testTerms, false);
+
+      expect(wrapper.emitted("searchdata")).toHaveLength(1);
+      expect(searchObjInstance.data.editorValue).toContain("service_name = 'test-service'");
+    });
+
+    it("should not emit searchdata when skipSearch=true", async () => {
+      const testTerms = ["duration > 100ms"];
+
+      wrapper.vm.applyFilters(testTerms, true);
+
+      expect(wrapper.emitted("searchdata")).toBeUndefined();
+      expect(searchObjInstance.data.editorValue).toContain("duration > 100ms");
+    });
+
+    it("should preserve existing behavior when skipSearch parameter omitted", async () => {
+      const testTerms = ["span_status = 'ERROR'"];
+
+      wrapper.vm.applyFilters(testTerms);
+
+      expect(wrapper.emitted("searchdata")).toHaveLength(1);
+      expect(searchObjInstance.data.editorValue).toContain("span_status = 'ERROR'");
+    });
+
+    it("should not emit searchdata when auto-search disabled", async () => {
+      store.state.zoConfig.auto_query_enabled = false;
+      const testTerms = ["service_name = 'test'"];
+
+      wrapper.vm.applyFilters(testTerms, false);
+
+      expect(wrapper.emitted("searchdata")).toBeUndefined();
+    });
+
+    it("should not emit searchdata when live mode is OFF", async () => {
+      searchObjInstance.meta.liveMode = false;
+      const testTerms = ["http_method = 'POST'"];
+
+      wrapper.vm.applyFilters(testTerms, false);
+
+      expect(wrapper.emitted("searchdata")).toBeUndefined();
     });
   });
 });

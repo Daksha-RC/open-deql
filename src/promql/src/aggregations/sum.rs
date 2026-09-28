@@ -1,0 +1,298 @@
+// Copyright 2026 OpenObserve Inc.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use config::meta::promql::value::{Labels, RangeValue, Sample};
+
+use crate::{
+    aggregations::{Accumulate, AggFunc, group_series},
+    common::kahan_sum_increment,
+};
+
+#[derive(Clone, Copy)]
+pub struct Sum;
+
+impl AggFunc for Sum {
+    type Accumulator = SumAccumulate;
+
+    fn name(&self) -> &'static str {
+        "sum"
+    }
+
+    fn build(&self, slots: usize) -> Self::Accumulator {
+        SumAccumulate {
+            sums: vec![SumState::default(); slots],
+            present: vec![false; slots],
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+pub(crate) struct SumState {
+    sum: f64,
+    compensation: f64,
+}
+
+impl SumState {
+    pub(crate) fn push(&mut self, value: f64) {
+        (self.sum, self.compensation) = kahan_sum_increment(value, self.sum, self.compensation);
+    }
+
+    pub(crate) fn merge(&mut self, other: Self) {
+        // Fold the other partial's sum and compensation in as two
+        // separate compensated increments: a plain `c + other_c` add
+        // rounds residuals away before the main sums get to cancel.
+        self.push(other.sum);
+        self.push(other.compensation);
+    }
+
+    pub(crate) fn value(&self) -> f64 {
+        self.sum + self.compensation
+    }
+}
+
+pub struct SumAccumulate {
+    sums: Vec<SumState>,
+    present: Vec<bool>,
+}
+
+impl SumAccumulate {
+    fn push(&mut self, slot: usize, value: f64) {
+        self.sums[slot].push(value);
+        self.present[slot] = true;
+    }
+}
+
+impl Accumulate for SumAccumulate {
+    fn push_series(
+        &mut self,
+        values: impl Iterator<Item = (usize, f64)>,
+        _labels: impl FnOnce() -> Labels,
+    ) {
+        for (slot, value) in values {
+            self.push(slot, value);
+        }
+    }
+
+    fn merge(&mut self, other: Self) {
+        for (slot, other_present) in other.present.into_iter().enumerate() {
+            if !other_present {
+                continue;
+            }
+            self.sums[slot].merge(other.sums[slot]);
+            self.present[slot] = true;
+        }
+    }
+
+    fn evaluate(self, group_labels: Labels, timestamps: &[i64]) -> Vec<RangeValue> {
+        let samples = self
+            .sums
+            .into_iter()
+            .zip(self.present)
+            .enumerate()
+            .filter(|(_, (_, present))| *present)
+            .map(|(slot, (sum, _))| Sample::new(timestamps[slot], sum.value()))
+            .collect();
+        group_series(group_labels, samples)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use config::meta::promql::value::{EvalContext, Label, RangeValue, Sample, Value};
+    use promql_parser::parser::LabelModifier;
+
+    use super::*;
+    use crate::aggregations::eval_aggregate;
+
+    #[test]
+    fn test_sum_state_preserves_compensation_and_special_values() {
+        for (values, expected) in [
+            (vec![], 0.0_f64),
+            (vec![-0.0], 0.0),
+            (vec![1e16, 1.0, -1e16], 1.0),
+            (vec![f64::MAX, f64::MAX], f64::INFINITY),
+            (vec![f64::NEG_INFINITY, 1.0], f64::NEG_INFINITY),
+            (vec![f64::INFINITY, f64::NEG_INFINITY], f64::NAN),
+            (vec![f64::NAN, 1.0], f64::NAN),
+        ] {
+            for split in 0..=values.len() {
+                let mut sum = SumState::default();
+                for &value in &values[..split] {
+                    sum.push(value);
+                }
+                let mut partial = SumState::default();
+                for &value in &values[split..] {
+                    partial.push(value);
+                }
+                sum.merge(partial);
+                if expected.is_nan() {
+                    assert!(sum.value().is_nan());
+                } else {
+                    assert_eq!(sum.value().to_bits(), expected.to_bits());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_sum_value_none_input() {
+        let ts = 1640995200;
+        let eval_ctx = EvalContext::new(ts, ts + 1, 1, "test".to_string());
+        let result = eval_aggregate(&None, Value::None, Sum, &eval_ctx).unwrap();
+        assert!(matches!(result, Value::None));
+    }
+
+    #[test]
+    fn test_sum_invalid_input_returns_err() {
+        let ts = 1640995200;
+        let eval_ctx = EvalContext::new(ts, ts + 1, 1, "test".to_string());
+        let result = eval_aggregate(&None, Value::Float(1.0), Sum, &eval_ctx);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_sum_empty_matrix_returns_none() {
+        let ts = 1640995200;
+        let eval_ctx = EvalContext::new(ts, ts + 1, 1, "test".to_string());
+        let result = eval_aggregate(&None, Value::Matrix(vec![]), Sum, &eval_ctx).unwrap();
+        assert!(matches!(result, Value::None));
+    }
+
+    #[test]
+    fn test_sum_range_function() {
+        // Create test matrix data with multiple series and timestamps
+        let labels1 = vec![
+            Arc::new(Label::new("instance", "server1")),
+            Arc::new(Label::new("job", "node_exporter")),
+        ];
+
+        let labels2 = vec![
+            Arc::new(Label::new("instance", "server2")),
+            Arc::new(Label::new("job", "node_exporter")),
+        ];
+
+        let labels3 = vec![
+            Arc::new(Label::new("instance", "server1")),
+            Arc::new(Label::new("job", "prometheus")),
+        ];
+
+        // Create matrix with 3 series across 3 timestamps
+        let ts1 = 1000;
+        let ts2 = 2000;
+        let ts3 = 3000;
+
+        let matrix = vec![
+            RangeValue {
+                labels: labels1.clone(),
+                samples: vec![
+                    Sample::new(ts1, 10.0),
+                    Sample::new(ts2, 20.0),
+                    Sample::new(ts3, 30.0),
+                ],
+                exemplars: None,
+                time_window: None,
+            },
+            RangeValue {
+                labels: labels2.clone(),
+                samples: vec![
+                    Sample::new(ts1, 5.0),
+                    Sample::new(ts2, 15.0),
+                    Sample::new(ts3, 25.0),
+                ],
+                exemplars: None,
+                time_window: None,
+            },
+            RangeValue {
+                labels: labels3.clone(),
+                samples: vec![
+                    Sample::new(ts1, 2.0),
+                    Sample::new(ts2, 4.0),
+                    Sample::new(ts3, 6.0),
+                ],
+                exemplars: None,
+                time_window: None,
+            },
+        ];
+
+        // EvalContext with start=1000, end=3000, step=1000 will generate [1000, 2000, 3000]
+        // Formula: nr_steps = (end - start) / step + 1 = (3000 - 1000) / 1000 + 1 = 3
+        let eval_ctx = EvalContext::new(ts1, ts3 + 1, 1000, "test".to_string());
+
+        // Test 1: sum without label grouping (all series summed together)
+        let result = eval_aggregate(&None, Value::Matrix(matrix.clone()), Sum, &eval_ctx).unwrap();
+
+        match result {
+            Value::Matrix(result_matrix) => {
+                assert_eq!(result_matrix.len(), 1); // One aggregated series
+                let series = &result_matrix[0];
+                assert!(series.labels.is_empty()); // No labels when grouping all together
+                assert_eq!(series.samples.len(), 3); // 3 timestamps
+                assert_eq!(series.samples[0].timestamp, ts1);
+                assert_eq!(series.samples[0].value, 17.0); // 10 + 5 + 2
+                assert_eq!(series.samples[1].timestamp, ts2);
+                assert_eq!(series.samples[1].value, 39.0); // 20 + 15 + 4
+                assert_eq!(series.samples[2].timestamp, ts3);
+                assert_eq!(series.samples[2].value, 61.0); // 30 + 25 + 6
+            }
+            _ => panic!("Expected Matrix result"),
+        }
+
+        // Test 2: sum by job label (group by job)
+        let param = Some(LabelModifier::Include(promql_parser::label::Labels {
+            labels: vec!["job".to_string()],
+        }));
+        let result = eval_aggregate(&param, Value::Matrix(matrix.clone()), Sum, &eval_ctx).unwrap();
+
+        match result {
+            Value::Matrix(result_matrix) => {
+                assert_eq!(result_matrix.len(), 2); // Two groups: node_exporter and prometheus
+
+                // Find the groups
+                let node_exporter_series = result_matrix
+                    .iter()
+                    .find(|s| {
+                        s.labels
+                            .iter()
+                            .any(|l| l.name == "job" && l.value == "node_exporter")
+                    })
+                    .expect("Should have node_exporter group");
+
+                let prometheus_series = result_matrix
+                    .iter()
+                    .find(|s| {
+                        s.labels
+                            .iter()
+                            .any(|l| l.name == "job" && l.value == "prometheus")
+                    })
+                    .expect("Should have prometheus group");
+
+                // Verify node_exporter group (server1 + server2)
+                assert_eq!(node_exporter_series.samples.len(), 3);
+                assert_eq!(node_exporter_series.samples[0].value, 15.0); // 10 + 5
+                assert_eq!(node_exporter_series.samples[1].value, 35.0); // 20 + 15
+                assert_eq!(node_exporter_series.samples[2].value, 55.0); // 30 + 25
+
+                // Verify prometheus group (server1 only)
+                assert_eq!(prometheus_series.samples.len(), 3);
+                assert_eq!(prometheus_series.samples[0].value, 2.0);
+                assert_eq!(prometheus_series.samples[1].value, 4.0);
+                assert_eq!(prometheus_series.samples[2].value, 6.0);
+            }
+            _ => panic!("Expected Matrix result"),
+        }
+    }
+}

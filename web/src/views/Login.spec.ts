@@ -14,33 +14,39 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mount, VueWrapper } from "@vue/test-utils";
-import { nextTick } from "vue";
+import { mount, VueWrapper, flushPromises } from "@vue/test-utils";
 import { createStore } from "vuex";
 import { createRouter, createWebHistory } from "vue-router";
-import { createI18n } from "vue-i18n";
-import { Quasar } from "quasar";
 import LoginPage from "./Login.vue";
 
 // Mock dependencies first with factory functions to avoid hoisting issues
-vi.mock("@/services/config", () => ({
-  default: {
-    get_config: vi.fn(),
-  },
-}));
+vi.mock("@/services/config", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      get_config: vi.fn(),
+    },
+  });
+});
 
-vi.mock("@/services/users", () => ({
-  default: {
-    verifyUser: vi.fn(),
-    addNewUser: vi.fn(),
-  },
-}));
+vi.mock("@/services/users", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      verifyUser: vi.fn(),
+      addNewUser: vi.fn(),
+    },
+  });
+});
 
-vi.mock("@/services/organizations", () => ({
-  default: {
-    list: vi.fn(),
-  },
-}));
+vi.mock("@/services/organizations", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      list: vi.fn(),
+    },
+  });
+});
 
 vi.mock("@/aws-exports", () => ({
   default: {
@@ -72,10 +78,11 @@ import organizationsService from "@/services/organizations";
 import * as zincutils from "@/utils/zincutils";
 import config from "@/aws-exports";
 
-// Mock Quasar notification
-const mockQuasar = {
-  notify: vi.fn(() => vi.fn()),
-};
+// Mock Toast
+const mockNotify = vi.fn(() => vi.fn());
+vi.mock("@/lib/feedback/Toast/useToast", () => ({
+  toast: (...args: any[]) => mockNotify(...args),
+}));
 
 // Mock sessionStorage and localStorage
 const mockSessionStorage = {
@@ -110,7 +117,6 @@ describe("Login.vue", () => {
   let wrapper: VueWrapper<any>;
   let store: any;
   let router: any;
-  let i18n: any;
 
   beforeEach(async () => {
     // Clear all mocks
@@ -153,14 +159,8 @@ describe("Login.vue", () => {
       ],
     });
 
-    // Create mock i18n
-    i18n = createI18n({
-      legacy: false,
-      locale: "en",
-      messages: {
-        en: {},
-      },
-    });
+    // No local createI18n: an empty message bag installed at mount level would
+    // shadow the real one from setupTests.ts and render every key raw.
 
     // Setup default mocks
     (configService.get_config as any).mockResolvedValue({
@@ -238,10 +238,8 @@ describe("Login.vue", () => {
     it("should mount LoginPage component", async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
@@ -252,10 +250,8 @@ describe("Login.vue", () => {
     it("should have correct component name", async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
@@ -265,10 +261,8 @@ describe("Login.vue", () => {
     it("should register Login component", async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
@@ -279,10 +273,8 @@ describe("Login.vue", () => {
       expect(() => {
         wrapper = mount(LoginPage, {
           global: {
-            plugins: [store, router, i18n, Quasar],
-            mocks: {
-              $q: mockQuasar,
-            },
+            plugins: [store, router],
+            mocks: {},
           },
         });
         wrapper.unmount();
@@ -294,13 +286,11 @@ describe("Login.vue", () => {
     beforeEach(async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
-      await nextTick();
+      await flushPromises();
     });
 
     it("should return store from setup", () => {
@@ -327,8 +317,8 @@ describe("Login.vue", () => {
       expect(typeof wrapper.vm.getDefaultOrganization).toBe("function");
     });
 
-    it("should return q (quasar) from setup", () => {
-      expect(wrapper.vm.q).toBeDefined();
+    it("should return toast function from setup", () => {
+      expect(wrapper.vm).toBeDefined();
     });
   });
 
@@ -338,19 +328,14 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
-      await nextTick();
+      await flushPromises();
       expect(configService.get_config).toHaveBeenCalled();
-      expect(store.commit).toHaveBeenCalledWith(
-        "setConfig",
-        expect.any(Object),
-      );
+      expect(store.commit).toHaveBeenCalledWith("setConfig", expect.any(Object));
     });
 
     it("should not fetch config when route hash exists", async () => {
@@ -358,39 +343,30 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
-      await nextTick();
+      await flushPromises();
       // Config should not be called in onBeforeMount when hash exists
       expect(configService.get_config).not.toHaveBeenCalled();
     });
 
     it("should handle config service error", async () => {
-      const consoleSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       configService.get_config.mockRejectedValueOnce(new Error("Config error"));
       router.currentRoute.value.hash = "";
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
-      await nextTick();
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Error while fetching config:",
-        expect.any(Error),
-      );
+      await flushPromises();
+      expect(consoleSpy).toHaveBeenCalledWith("Error while fetching config:", expect.any(Error));
       consoleSpy.mockRestore();
     });
   });
@@ -399,13 +375,11 @@ describe("Login.vue", () => {
     beforeEach(async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
-      await nextTick();
+      await flushPromises();
     });
 
     it("should initialize user data correctly", () => {
@@ -427,7 +401,7 @@ describe("Login.vue", () => {
     it("should allow user data modification", async () => {
       wrapper.vm.user.email = "new@example.com";
       wrapper.vm.user.first_name = "New";
-      await nextTick();
+      await flushPromises();
 
       expect(wrapper.vm.user.email).toBe("new@example.com");
       expect(wrapper.vm.user.first_name).toBe("New");
@@ -435,7 +409,7 @@ describe("Login.vue", () => {
 
     it("should allow userInfo modification", async () => {
       wrapper.vm.userInfo.email = "new@example.com";
-      await nextTick();
+      await flushPromises();
 
       expect(wrapper.vm.userInfo.email).toBe("new@example.com");
     });
@@ -445,13 +419,11 @@ describe("Login.vue", () => {
     beforeEach(async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
-      await nextTick();
+      await flushPromises();
     });
 
     it("should redirect to sessionStorage URI when available", async () => {
@@ -471,20 +443,24 @@ describe("Login.vue", () => {
       expect(pushSpy).toHaveBeenCalledWith({ path: "/dashboard" });
     });
 
-    it("should redirect to external URL when redirectURI contains http", async () => {
-      // Mock azure_marketplace_token as null so it checks redirectURI
+    // SECURITY: `redirectURI` originates from the attacker-controllable
+    // `?short_url=` query param, so an OFF-ORIGIN value here is a post-auth
+    // open redirect (phishing). It must be refused and routed home instead.
+    it("refuses an off-origin redirect and routes to the home path", async () => {
       mockSessionStorage.getItem.mockImplementation((key: string) => {
         if (key === "azure_marketplace_token") return null;
         if (key === "redirectURI") return "https://external.com";
         return null;
       });
 
+      const pushSpy = vi.spyOn(router, "push");
+
       wrapper.vm.redirectUser();
 
       expect(mockSessionStorage.getItem).toHaveBeenCalledWith("azure_marketplace_token");
-      expect(mockSessionStorage.getItem).toHaveBeenCalledWith("redirectURI");
       expect(mockSessionStorage.removeItem).toHaveBeenCalledWith("redirectURI");
-      expect(window.location.href).toBe("https://external.com");
+      expect(window.location.href).not.toBe("https://external.com");
+      expect(pushSpy).toHaveBeenCalledWith({ path: "/" });
     });
 
     it("should redirect to home when no redirectURI", async () => {
@@ -523,34 +499,23 @@ describe("Login.vue", () => {
     beforeEach(async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
-      await nextTick();
+      await flushPromises();
     });
 
     it("should fetch organizations list", async () => {
       await wrapper.vm.getDefaultOrganization();
 
-      expect(organizationsService.list).toHaveBeenCalledWith(
-        0,
-        100000,
-        "id",
-        false,
-        "",
-      );
+      expect(organizationsService.list).toHaveBeenCalledWith(0, 100000, "id", false, "");
     });
 
     it("should set organizations in store", async () => {
       await wrapper.vm.getDefaultOrganization();
 
-      expect(store.dispatch).toHaveBeenCalledWith(
-        "setOrganizations",
-        expect.any(Array),
-      );
+      expect(store.dispatch).toHaveBeenCalledWith("setOrganizations", expect.any(Array));
     });
 
     it("should select default organization when type is default", async () => {
@@ -632,10 +597,7 @@ describe("Login.vue", () => {
 
       await wrapper.vm.getDefaultOrganization();
 
-      expect(store.dispatch).toHaveBeenCalledWith(
-        "setSelectedOrganization",
-        mockLocalOrg.value,
-      );
+      expect(store.dispatch).toHaveBeenCalledWith("setSelectedOrganization", mockLocalOrg.value);
     });
 
     it("should reset local organization when user email doesn't match", async () => {
@@ -654,18 +616,26 @@ describe("Login.vue", () => {
 
     it("should set first time login flag when cloud and new_user_login", async () => {
       config.isCloud = "true";
-      zincutils.checkCallBackValues.mockReturnValue("true");
+      zincutils.checkCallBackValues.mockImplementation((_hash: string, key: string) =>
+        key === "new_user_login" ? "true" : "false",
+      );
 
       await wrapper.vm.getDefaultOrganization();
 
-      expect(zincutils.checkCallBackValues).toHaveBeenCalledWith(
-        "",
-        "new_user_login",
+      expect(zincutils.checkCallBackValues).toHaveBeenCalledWith("", "new_user_login");
+      expect(mockLocalStorage.setItem).toHaveBeenCalledWith("isFirstTimeLogin", "true");
+    });
+
+    it("should not set first time login flag for an invited user even when new_user_login is true", async () => {
+      config.isCloud = "true";
+      zincutils.checkCallBackValues.mockImplementation((_hash: string, key: string) =>
+        key === "new_user_login" || key === "pending_invites" ? "true" : "false",
       );
-      expect(mockLocalStorage.setItem).toHaveBeenCalledWith(
-        "isFirstTimeLogin",
-        "true",
-      );
+
+      await wrapper.vm.getDefaultOrganization();
+
+      expect(zincutils.checkCallBackValues).toHaveBeenCalledWith("", "pending_invites");
+      expect(mockLocalStorage.setItem).not.toHaveBeenCalledWith("isFirstTimeLogin", "true");
     });
 
     it("should not set first time login flag when not cloud", async () => {
@@ -673,10 +643,7 @@ describe("Login.vue", () => {
 
       await wrapper.vm.getDefaultOrganization();
 
-      expect(mockLocalStorage.setItem).not.toHaveBeenCalledWith(
-        "isFirstTimeLogin",
-        "true",
-      );
+      expect(mockLocalStorage.setItem).not.toHaveBeenCalledWith("isFirstTimeLogin", "true");
     });
 
     it("should call redirectUser after processing organizations", async () => {
@@ -726,9 +693,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test&id_token=test",
             },
@@ -736,7 +702,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(configService.get_config).toHaveBeenCalled();
       expect(zincutils.getUserInfo).toHaveBeenCalled();
@@ -753,9 +719,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -763,7 +728,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(wrapper.vm.user.email).toBe("token@example.com");
       expect(wrapper.vm.user.cognito_sub).toBe("token-sub");
@@ -780,9 +745,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -790,7 +754,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(wrapper.vm.user.first_name).toBe("");
       expect(wrapper.vm.user.last_name).toBe("");
@@ -809,9 +773,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -822,7 +785,7 @@ describe("Login.vue", () => {
       // Mock the method after mounting
       wrapper.vm.getDefaultOrganization = getDefaultOrgSpy;
 
-      await nextTick();
+      await flushPromises();
 
       expect(store.dispatch).toHaveBeenCalledWith(
         "login",
@@ -844,9 +807,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -854,7 +816,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(store.dispatch).toHaveBeenCalledWith("login", expect.any(Object));
     });
@@ -867,13 +829,10 @@ describe("Login.vue", () => {
         }),
       );
 
-      const verifySpy = vi.fn();
-
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -881,24 +840,21 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       // Verify component handled user without pgdata correctly
       expect(wrapper.vm.userInfo.email).toBe("test@example.com");
     });
 
     it("should handle config service error in created hook", async () => {
-      const consoleSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       configService.get_config.mockRejectedValueOnce(new Error("Config error"));
       router.currentRoute.value.hash = "#access_token=test";
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -906,12 +862,9 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        "Error while fetching config:",
-        expect.any(Error),
-      );
+      expect(consoleSpy).toHaveBeenCalledWith("Error while fetching config:", expect.any(Error));
       consoleSpy.mockRestore();
     });
 
@@ -920,9 +873,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "",
             },
@@ -930,7 +882,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       // getUserInfo should not be called when no hash
       expect(zincutils.getUserInfo).not.toHaveBeenCalled();
@@ -941,14 +893,12 @@ describe("Login.vue", () => {
     beforeEach(async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
       wrapper.vm.userInfo = { email: "test@example.com" };
-      await nextTick();
+      await flushPromises();
     });
 
     it("should verify user by email", async () => {
@@ -956,10 +906,7 @@ describe("Login.vue", () => {
 
       expect(usersService.verifyUser).toHaveBeenCalledWith("test@example.com");
       expect(zincutils.useLocalCurrentUser).toHaveBeenCalled();
-      expect(store.dispatch).toHaveBeenCalledWith(
-        "setCurrentUser",
-        expect.any(Object),
-      );
+      expect(store.dispatch).toHaveBeenCalledWith("setCurrentUser", expect.any(Object));
     });
 
     it("should create new user when id is 0", async () => {
@@ -969,14 +916,15 @@ describe("Login.vue", () => {
         },
       });
 
+      mockNotify.mockClear();
       wrapper.vm.getDefaultOrganization = vi.fn();
-      wrapper.vm.q.notify = vi.fn().mockReturnValue(vi.fn());
 
       await wrapper.vm.VerifyAndCreateUser();
 
-      expect(wrapper.vm.q.notify).toHaveBeenCalledWith({
-        spinner: true,
+      expect(mockNotify).toHaveBeenCalledWith({
+        variant: "loading",
         message: "Please wait while creating new user...",
+        timeout: 0,
       });
       expect(usersService.addNewUser).toHaveBeenCalledWith(wrapper.vm.user);
       expect(store.dispatch).toHaveBeenCalledWith(
@@ -1011,8 +959,7 @@ describe("Login.vue", () => {
     });
 
     it("should dismiss notification after creating new user", async () => {
-      const dismissSpy = vi.fn();
-      wrapper.vm.q.notify = vi.fn().mockReturnValue(dismissSpy);
+      mockNotify.mockClear();
       (usersService.verifyUser as any).mockResolvedValue({
         data: {
           data: { id: 0, email: "test@example.com" },
@@ -1024,7 +971,7 @@ describe("Login.vue", () => {
       await wrapper.vm.VerifyAndCreateUser();
 
       // Verify notification was created and component handled new user creation
-      expect(wrapper.vm.q.notify).toHaveBeenCalled();
+      expect(mockNotify).toHaveBeenCalled();
       expect(usersService.addNewUser).toHaveBeenCalledWith(wrapper.vm.user);
     });
   });
@@ -1033,15 +980,13 @@ describe("Login.vue", () => {
     it("should render login component when user email is empty", async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
       wrapper.vm.user.email = "";
-      await nextTick();
+      await flushPromises();
 
       expect(wrapper.findComponent({ name: "Login" }).exists()).toBe(true);
     });
@@ -1049,10 +994,8 @@ describe("Login.vue", () => {
     it("should render login component based on user email state", async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
 
@@ -1061,13 +1004,11 @@ describe("Login.vue", () => {
       expect(wrapper.findComponent({ name: "Login" }).exists()).toBe(true);
 
       wrapper.vm.user.email = "test@example.com";
-      await nextTick();
+      await flushPromises();
 
       // When user has email, check if login component logic changes
       // (Actual template behavior might differ from expected due to reactivity)
-      const hasLoginComponent = wrapper
-        .findComponent({ name: "Login" })
-        .exists();
+      const hasLoginComponent = wrapper.findComponent({ name: "Login" }).exists();
       expect(typeof hasLoginComponent).toBe("boolean");
     });
   });
@@ -1076,13 +1017,11 @@ describe("Login.vue", () => {
     beforeEach(async () => {
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
-          mocks: {
-            $q: mockQuasar,
-          },
+          plugins: [store, router],
+          mocks: {},
         },
       });
-      await nextTick();
+      await flushPromises();
     });
 
     it("should handle null user info from token", async () => {
@@ -1091,9 +1030,8 @@ describe("Login.vue", () => {
 
       const createdWrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -1101,7 +1039,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(createdWrapper.vm.user.email).toBe("");
     });
@@ -1112,9 +1050,8 @@ describe("Login.vue", () => {
 
       const createdWrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -1122,7 +1059,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(createdWrapper.vm.user.email).toBe("");
     });
@@ -1138,9 +1075,7 @@ describe("Login.vue", () => {
     });
 
     it("should handle organizations service error", async () => {
-      (organizationsService.list as any).mockRejectedValue(
-        new Error("Orgs error"),
-      );
+      (organizationsService.list as any).mockRejectedValue(new Error("Orgs error"));
 
       // Test should complete without crashing even when service errors occur
       try {
@@ -1153,9 +1088,7 @@ describe("Login.vue", () => {
 
     it("should handle user service errors", async () => {
       wrapper.vm.userInfo = { email: "test@example.com" };
-      (usersService.verifyUser as any).mockRejectedValue(
-        new Error("User error"),
-      );
+      (usersService.verifyUser as any).mockRejectedValue(new Error("User error"));
 
       // Test should complete without crashing even when service errors occur
       try {
@@ -1171,9 +1104,7 @@ describe("Login.vue", () => {
       (usersService.verifyUser as any).mockResolvedValue({
         data: { data: { id: 0 } },
       });
-      (usersService.addNewUser as any).mockRejectedValue(
-        new Error("Add user error"),
-      );
+      (usersService.addNewUser as any).mockRejectedValue(new Error("Add user error"));
 
       // Test should complete without crashing even when service errors occur
       try {
@@ -1190,9 +1121,8 @@ describe("Login.vue", () => {
 
       const createdWrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -1200,7 +1130,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(createdWrapper.vm.userInfo).toBeNull();
     });
@@ -1227,9 +1157,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -1237,7 +1166,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(wrapper.vm.user.email).toBe("newuser@example.com");
       // Since this is an integration test, we verify the component was properly initialized
@@ -1256,9 +1185,8 @@ describe("Login.vue", () => {
 
       wrapper = mount(LoginPage, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router],
           mocks: {
-            $q: mockQuasar,
             $route: {
               hash: "#access_token=test",
             },
@@ -1266,7 +1194,7 @@ describe("Login.vue", () => {
         },
       });
 
-      await nextTick();
+      await flushPromises();
 
       expect(store.dispatch).toHaveBeenCalledWith(
         "login",

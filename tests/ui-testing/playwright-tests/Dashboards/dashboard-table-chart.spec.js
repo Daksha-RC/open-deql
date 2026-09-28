@@ -15,8 +15,6 @@ import {
 import { waitForStreamComplete } from "../utils/streaming-helpers.js";
 import testLogger from "../utils/test-logger.js";
 import {
-  TABLE_SELECTOR,
-  TABLE_HEADER_SELECTOR,
   getTableHeaders,
   getTableCellText,
 } from "../../pages/dashboardPages/dashboard-table-helpers.js";
@@ -128,10 +126,10 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await setupTablePanel(page, pm, dashboardName);
       await pm.chartTypeSelector.waitForTableDataLoad();
 
-      const table = page.locator(TABLE_SELECTOR);
+      const table = pm.dashboardPanelActions.dashboardTable;
 
       // Click on the first column header to trigger sort
-      const firstHeader = page.locator(TABLE_HEADER_SELECTOR).first();
+      const firstHeader = pm.dashboardPanelActions.tableHeaderCells.first();
       await firstHeader.click();
 
       // Table should still render after sort
@@ -167,6 +165,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStreamType("logs");
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "y");
 
@@ -201,7 +200,6 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "x");
-      await pm.chartTypeSelector.searchAndAddField("_timestamp", "y");
       await pm.chartTypeSelector.configureYAxisFunction("y_axis_1", "count");
 
       const streamPromise = waitForStreamComplete(page);
@@ -257,7 +255,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.dashboardPanelConfigs.selectTranspose();
       await pm.dashboardPanelActions.applyDashboardBtn();
 
-      const table = page.locator(TABLE_SELECTOR);
+      const table = pm.dashboardPanelActions.dashboardTable;
       await expect(table).toBeVisible();
 
       testLogger.info("Table with wrap cells + transpose rendered");
@@ -267,10 +265,10 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await reopenPanelConfig(page, pm);
 
       await expect(
-        page.locator('[data-test="dashboard-config-wrap-table-cells"]')
+        pm.dashboardPanelConfigs.wrapCellBtn
       ).toHaveAttribute("aria-checked", "true");
       await expect(
-        page.locator('[data-test="dashboard-config-table_transpose"]')
+        pm.dashboardPanelConfigs.transposeBtn
       ).toHaveAttribute("aria-checked", "true");
 
       await pm.dashboardPanelActions.savePanel();
@@ -293,13 +291,14 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStreamType("logs");
       await pm.chartTypeSelector.selectStream("e2e_automate");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_pod_name", "y");
 
       // Enable VRL function toggle and add a VRL function that creates a new field
-      const vrlToggle = page.locator('[data-test="logs-search-bar-show-query-toggle-btn"]');
+      const vrlToggle = pm.chartTypeSelector.vrlToggleBtn;
       await vrlToggle.click();
 
-      const vrlEditor = page.locator('[data-test="dashboard-vrl-function-editor"]');
+      const vrlEditor = pm.chartTypeSelector.vrlFunctionEditor;
       await vrlEditor.waitFor({ state: "visible", timeout: 10000 });
       const monacoInput = vrlEditor.getByRole("code");
       await monacoInput.click();
@@ -326,13 +325,24 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await streamPromise2;
       await pm.chartTypeSelector.waitForTableDataLoad();
 
-      // Verify the VRL-created field appears as a column in the table
+      // Verify the VRL-created field appears as a column in the table.
+      // Poll until the header appears (the table re-renders asynchronously after
+      // dynamic columns are enabled and the stream completes).
+      await expect
+        .poll(
+          async () => {
+            const headers = await getTableHeaders(page);
+            return headers.map((h) => h.toLowerCase()).some((h) => h.includes("vrl_test_field"));
+          },
+          { timeout: 15000, intervals: [500, 1000, 2000] }
+        )
+        .toBe(true);
+
       const headers = await getTableHeaders(page);
-      const headerTexts = headers.map((h) => h.toLowerCase());
-      const hasVrlField = headerTexts.some((h) => h.includes("vrl_test_field"));
+      const hasVrlField = headers.map((h) => h.toLowerCase()).some((h) => h.includes("vrl_test_field"));
       expect(hasVrlField).toBe(true);
 
-      testLogger.info("VRL field visible as dynamic column", { headers: headerTexts });
+      testLogger.info("VRL field visible as dynamic column", { headers });
 
       await pm.dashboardPanelActions.savePanel();
       await cleanupTestDashboard(page, pm, dashboardName);
@@ -357,12 +367,28 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("_timestamp", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
       await pm.chartTypeSelector.configureYAxisFunction("y_axis_1", "count");
 
-      const streamPromise = waitForStreamComplete(page);
+      // Register the response waiter BEFORE clicking Apply so the request isn't missed.
+      // Uses waitForResponse instead of waitForStreamComplete so the HTTP status
+      // is asserted directly — waitForStreamComplete silently times out on non-200s.
+      // Matches both _search_stream (raw logs) and _histogram_stream (aggregated).
+      const apiResponsePromise = page.waitForResponse(
+        (r) =>
+          r.url().includes("_search_stream") ||
+          r.url().includes("_histogram_stream"),
+        { timeout: 15000 }
+      );
+
       await pm.dashboardPanelActions.applyDashboardBtn();
-      await streamPromise;
+
+      // Assert the backend returned 200 — catches auth/query errors early.
+      const apiResponse = await apiResponsePromise;
+      expect(apiResponse.status()).toBe(200);
+
+      // Wait for table DOM to reflect the streamed data.
       await pm.chartTypeSelector.waitForTableDataLoad();
 
       // Verify headers — should have at least 2 columns (Timestamp + Code)
@@ -399,6 +425,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("_timestamp", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
       await pm.chartTypeSelector.configureYAxisFunction("y_axis_1", "count");
 
@@ -437,6 +464,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("_timestamp", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
       await pm.chartTypeSelector.configureYAxisFunction("y_axis_1", "count");
 
@@ -481,6 +509,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("_timestamp", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
       await pm.chartTypeSelector.configureYAxisFunction("y_axis_1", "count");
 
@@ -490,7 +519,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.waitForTableDataLoad();
 
       // Screenshot shows "1-7 of 7" at bottom right of table
-      const table = page.locator(TABLE_SELECTOR);
+      const table = pm.dashboardPanelActions.dashboardTable;
       const tableText = await table.textContent();
       const hasRowCountInfo = /\d+-\d+\s+of\s+\d+/.test(tableText);
       expect(hasRowCountInfo).toBe(true);
@@ -519,11 +548,12 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStreamType("logs");
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
       await pm.dashboardPanelActions.applyDashboardBtn();
 
       // Screenshot shows: "Pivot Field ⓘ:  Add 0 or 1 field here"
-      const pivotPlaceholder = page.getByText("Add 0 or 1 field here");
+      const pivotPlaceholder = pm.chartTypeSelector.getFieldSectionLabel("Add 0 or 1 field here");
       await expect(pivotPlaceholder).toBeVisible();
 
       testLogger.info("Pivot field placeholder visible with no pivot field");
@@ -562,6 +592,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "filter");
 
@@ -599,15 +630,13 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       expect(filteredRowCount).toBeLessThanOrEqual(unfilteredRowCount);
 
       // Verify the filter is reflected in the query via query inspector
-      await page
-        .locator('[data-test="dashboard-panel-data-view-query-inspector-btn"]')
-        .click();
+      await pm.dashboardPanelEdit.dataViewQueryInspectorBtn.click();
       await expect(
-        page.locator(".inspector-query-editor").filter({
+        pm.dashboardPanelEdit.inspectorQueryEditor.filter({
           hasText: "kubernetes_container_name = 'ziox'",
         }).last()
       ).toBeVisible();
-      await page.locator('[data-test="query-inspector-close-btn"]').click();
+      await pm.dashboardPanelEdit.queryInspectorCloseBtn.click();
 
       testLogger.info("Table filtered by variable", { unfilteredRowCount, filteredRowCount });
 
@@ -635,13 +664,14 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
 
       await pm.dashboardPanelActions.applyDashboardBtn();
       await pm.chartTypeSelector.waitForTableDataLoad();
 
       // --- BEFORE filter: capture row count and table content ---
-      const table = page.locator(TABLE_SELECTOR);
+      const table = pm.dashboardPanelActions.dashboardTable;
       await table.waitFor({ state: "visible", timeout: 15000 });
       const beforeRowCount = await pm.dashboardPanelActions.getTableRowCount();
       const beforeHeaders = await getTableHeaders(page);
@@ -656,17 +686,23 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       expect(beforeRowCount).toBeGreaterThan(1);
 
       // --- Apply dynamic filter: kubernetes_container_name = ziox ---
-      const adhocAddBtn = page.locator('[data-test="dashboard-variable-adhoc-add-selector"]');
+      const adhocAddBtn = pm.dashboardVariables.adhocAddSelector;
       await adhocAddBtn.waitFor({ state: "visible", timeout: 15000 });
       await adhocAddBtn.click();
 
-      const nameSelector = page.locator('[data-test="dashboard-variable-adhoc-name-selector"]');
+      const nameSelector = pm.dashboardVariables.adhocNameSelectorField;
       await nameSelector.click();
       await nameSelector.fill("kubernetes_container_name");
+      await nameSelector.press("Tab"); // flush OInput debounce immediately
 
-      const valueSelector = page.locator('[data-test="dashboard-variable-adhoc-value-selector"]');
+      const valueSelector = pm.dashboardVariables.adhocValueSelectorField;
       await valueSelector.click();
       await valueSelector.fill("ziox");
+      await valueSelector.press("Tab"); // flush OInput debounce immediately
+
+      // Yield one animation frame so Vue's reactive update chain (emitValue →
+      // onVariablesValueUpdated → manager.updateVariableValue) completes before Apply
+      await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
 
       // Apply to re-query with the dynamic filter
       await pm.dashboardPanelActions.applyDashboardBtn();
@@ -724,6 +760,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("_timestamp", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
       await pm.chartTypeSelector.configureYAxisFunction("y_axis_1", "count");
 
@@ -737,12 +774,12 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       testLogger.info("Builder mode table rows", { builderRowCount });
 
       // Switch to Custom query mode
-      const customBtn = page.locator('[data-test="dashboard-custom-query-type"]');
+      const customBtn = pm.chartTypeSelector.customQueryTypeBtn;
       await customBtn.waitFor({ state: "visible", timeout: 10000 });
       await customBtn.click();
 
       // The auto-generated SQL should be visible in the editor
-      const queryEditor = page.locator('[data-test="dashboard-panel-query-editor"]');
+      const queryEditor = pm.chartTypeSelector.queryEditor;
       await queryEditor.waitFor({ state: "visible", timeout: 10000 });
 
       // Apply in custom mode — table should still render
@@ -780,16 +817,17 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       // Add X field — shows in "First Column" area
       await pm.chartTypeSelector.searchAndAddField("_timestamp", "x");
       // Add Y field — shows in "Other Columns" area
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
 
       // Verify layout labels
-      await expect(page.getByText("First Column").first()).toBeVisible();
-      await expect(page.getByText("Other Columns").first()).toBeVisible();
+      await expect(pm.chartTypeSelector.getFieldSectionLabel("First Column").first()).toBeVisible();
+      await expect(pm.chartTypeSelector.getFieldSectionLabel("Other Columns").first()).toBeVisible();
 
       // Verify field chips in correct layout areas
-      const xLayout = page.locator('[data-test="dashboard-x-layout"]');
+      const xLayout = pm.chartTypeSelector.xLayout;
       await expect(xLayout).toBeVisible();
-      const yLayout = page.locator('[data-test="dashboard-y-layout"]');
+      const yLayout = pm.chartTypeSelector.yLayout;
       await expect(yLayout).toBeVisible();
 
       testLogger.info("First Column and Other Columns labels visible");
@@ -820,6 +858,7 @@ test.describe("Dashboard Table Chart - Core Features", () => {
       await pm.chartTypeSelector.selectStream("e2e_automate");
 
       await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "x");
+      await pm.chartTypeSelector.removeField("y_axis_1", "y");
       await pm.chartTypeSelector.searchAndAddField("code", "y");
 
       // Test with "sum" aggregation

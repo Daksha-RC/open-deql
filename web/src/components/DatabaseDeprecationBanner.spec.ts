@@ -16,10 +16,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mount } from "@vue/test-utils";
 import DatabaseDeprecationBanner from "./DatabaseDeprecationBanner.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import { createStore } from "vuex";
-
-installQuasar();
 
 describe("DatabaseDeprecationBanner", () => {
   let store: any;
@@ -52,7 +49,7 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.find(".deprecation-message").exists()).toBe(true);
+    expect(wrapper.find('[data-test="database-deprecation-banner-message"]').exists()).toBe(true);
   });
 
   it("should not render when MySQL deprecation warning is disabled", () => {
@@ -71,7 +68,7 @@ describe("DatabaseDeprecationBanner", () => {
       },
     });
 
-    expect(wrapper.find(".deprecation-message").exists()).toBe(false);
+    expect(wrapper.find('[data-test="database-deprecation-banner-message"]').exists()).toBe(false);
   });
 
   it("should display deprecation message text", async () => {
@@ -92,7 +89,7 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    const message = wrapper.find(".deprecation-message");
+    const message = wrapper.find('[data-test="database-deprecation-banner-message"]');
     expect(message.text()).toContain("MySQL support is DEPRECATED");
   });
 
@@ -114,7 +111,7 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    const subtitle = wrapper.find(".deprecation-subtitle");
+    const subtitle = wrapper.find('[data-test="database-deprecation-banner-subtitle"]');
     expect(subtitle.text()).toContain("Please migrate to PostgreSQL");
   });
 
@@ -136,9 +133,8 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    const closeButton = wrapper.findComponent({ name: "QBtn" });
+    const closeButton = wrapper.findComponent({ name: "OButton" });
     expect(closeButton.exists()).toBe(true);
-    expect(closeButton.props("icon")).toBe("close");
   });
 
   it("should hide banner when close button is clicked", async () => {
@@ -159,9 +155,9 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.find(".deprecation-message").exists()).toBe(true);
+    expect(wrapper.find('[data-test="database-deprecation-banner-message"]').exists()).toBe(true);
 
-    const closeButton = wrapper.findComponent({ name: "QBtn" });
+    const closeButton = wrapper.findComponent({ name: "OButton" });
     await closeButton.trigger("click");
 
     expect(wrapper.vm.showDeprecationWarning).toBe(false);
@@ -185,7 +181,7 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    const closeButton = wrapper.findComponent({ name: "QBtn" });
+    const closeButton = wrapper.findComponent({ name: "OButton" });
     await closeButton.trigger("click");
 
     const dismissData = localStorage.getItem(DISMISS_KEY);
@@ -199,10 +195,7 @@ describe("DatabaseDeprecationBanner", () => {
     const recentDate = new Date();
     recentDate.setDate(recentDate.getDate() - 3); // 3 days ago
 
-    localStorage.setItem(
-      DISMISS_KEY,
-      JSON.stringify({ timestamp: recentDate.toISOString() })
-    );
+    localStorage.setItem(DISMISS_KEY, JSON.stringify({ timestamp: recentDate.toISOString() }));
 
     store = createStore({
       state: {
@@ -228,10 +221,7 @@ describe("DatabaseDeprecationBanner", () => {
     const oldDate = new Date();
     oldDate.setDate(oldDate.getDate() - 10); // 10 days ago
 
-    localStorage.setItem(
-      DISMISS_KEY,
-      JSON.stringify({ timestamp: oldDate.toISOString() })
-    );
+    localStorage.setItem(DISMISS_KEY, JSON.stringify({ timestamp: oldDate.toISOString() }));
 
     store = createStore({
       state: {
@@ -271,7 +261,9 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.find(".light-stream-container").exists()).toBe(true);
+    // Theming is now global (`.dark` on <html>), not a per-element class, so
+    // the banner renders the same regardless of theme.
+    expect(wrapper.find(".feature-card").exists()).toBe(true);
   });
 
   it("should apply dark theme class", async () => {
@@ -292,7 +284,9 @@ describe("DatabaseDeprecationBanner", () => {
 
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.find(".dark-stream-container").exists()).toBe(true);
+    // Theming is now global (`.dark` on <html>), not a per-element class, so
+    // the banner renders the same regardless of theme.
+    expect(wrapper.find(".feature-card").exists()).toBe(true);
   });
 
   it("should handle invalid localStorage data gracefully", async () => {
@@ -355,6 +349,6 @@ describe("DatabaseDeprecationBanner", () => {
       },
     });
 
-    expect(wrapper.find(".deprecation-message").exists()).toBe(false);
+    expect(wrapper.find('[data-test="database-deprecation-banner-message"]').exists()).toBe(false);
   });
 });

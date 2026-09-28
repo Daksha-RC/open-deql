@@ -20,10 +20,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use hashbrown::HashSet;
+use hashbrown::{HashMap, HashSet};
 use tantivy::{
     HasLen,
-    directory::{Directory, RamDirectory, WatchCallback, WatchHandle, error::OpenReadError},
+    directory::{Directory, MmapDirectory, WatchCallback, WatchHandle, error::OpenReadError},
 };
 
 use super::{FOOTER_CACHE, footer_cache::build_footer_cache};
@@ -35,9 +35,11 @@ use crate::{
 /// Each tantivy file is stored as a blob in the puffin file, along with their file name.
 #[derive(Debug)]
 pub struct PuffinDirWriter {
-    ram_directory: Arc<RamDirectory>,
+    mmap_directory: Arc<MmapDirectory>,
     /// record all the files paths in the puffin file
     file_paths: Arc<RwLock<HashSet<PathBuf>>>,
+    /// file-level puffin properties (written to PuffinMeta.properties)
+    properties: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl Default for PuffinDirWriter {
@@ -49,8 +51,9 @@ impl Default for PuffinDirWriter {
 impl Clone for PuffinDirWriter {
     fn clone(&self) -> Self {
         PuffinDirWriter {
-            ram_directory: self.ram_directory.clone(),
+            mmap_directory: self.mmap_directory.clone(),
             file_paths: self.file_paths.clone(),
+            properties: self.properties.clone(),
         }
     }
 }
@@ -58,8 +61,12 @@ impl Clone for PuffinDirWriter {
 impl PuffinDirWriter {
     pub fn new() -> Self {
         PuffinDirWriter {
-            ram_directory: Arc::new(RamDirectory::create()),
+            mmap_directory: Arc::new(
+                MmapDirectory::create_from_tempdir()
+                    .expect("failed to create temporary mmap directory"),
+            ),
             file_paths: Arc::new(RwLock::new(HashSet::default())),
+            properties: Arc::new(RwLock::new(HashMap::default())),
         }
     }
 
@@ -72,10 +79,20 @@ impl PuffinDirWriter {
             .collect()
     }
 
+    pub fn set_property(&self, key: impl Into<String>, value: impl Into<String>) {
+        self.properties
+            .write()
+            .expect("poisoned lock")
+            .insert(key.into(), value.into());
+    }
+
     // This function will serialize the directory into a single puffin file
     pub fn to_puffin_bytes(&self) -> Result<Vec<u8>> {
         let mut puffin_buf: Vec<u8> = Vec::new();
         let mut puffin_writer = PuffinBytesWriter::new(&mut puffin_buf);
+        for (k, v) in self.properties.read().expect("poisoned lock").iter() {
+            puffin_writer.set_property(k.clone(), v.clone());
+        }
         let mut segment_id = String::new();
 
         let file_paths = self.file_paths.read().expect("poisoned lock");
@@ -98,7 +115,7 @@ impl PuffinDirWriter {
                 segment_id = path.file_stem().unwrap().to_str().unwrap().to_owned();
             }
 
-            let file_data = self.ram_directory.open_read(path)?;
+            let file_data = self.mmap_directory.open_read(path)?;
             log::debug!(
                 "Serializing file to puffin: len: {}, path: {}",
                 file_data.len(),
@@ -114,7 +131,7 @@ impl PuffinDirWriter {
         }
 
         // write footer cache
-        let meta_bytes = build_footer_cache(self.ram_directory.clone())?;
+        let meta_bytes = build_footer_cache(self.mmap_directory.clone())?;
         puffin_writer
             .add_blob(
                 &meta_bytes,
@@ -134,46 +151,46 @@ impl Directory for PuffinDirWriter {
         &self,
         path: &Path,
     ) -> Result<std::sync::Arc<dyn tantivy::directory::FileHandle>, OpenReadError> {
-        self.ram_directory.get_file_handle(path)
+        self.mmap_directory.get_file_handle(path)
     }
 
     fn delete(&self, path: &Path) -> Result<(), tantivy::directory::error::DeleteError> {
-        self.ram_directory.delete(path)
+        self.mmap_directory.delete(path)
     }
 
     fn exists(&self, path: &Path) -> Result<bool, OpenReadError> {
-        self.ram_directory.exists(path)
+        self.mmap_directory.exists(path)
     }
 
     fn open_write(
         &self,
         path: &Path,
     ) -> Result<tantivy::directory::WritePtr, tantivy::directory::error::OpenWriteError> {
-        // capture the files being written to ram directory
+        // capture the files being written to the mmap directory
         self.file_paths.write().unwrap().insert(path.to_path_buf());
-        self.ram_directory.open_write(path)
+        self.mmap_directory.open_write(path)
     }
 
     // this should read from the puffin source
     fn atomic_read(&self, path: &Path) -> Result<Vec<u8>, OpenReadError> {
-        self.ram_directory.atomic_read(path)
+        self.mmap_directory.atomic_read(path)
     }
 
     fn atomic_write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
-        // capture the files being written to ram directory
+        // capture the files being written to the mmap directory
         self.file_paths
             .write()
             .expect("poisoned lock")
             .insert(path.to_path_buf());
-        self.ram_directory.atomic_write(path, data)
+        self.mmap_directory.atomic_write(path, data)
     }
 
     fn sync_directory(&self) -> io::Result<()> {
-        self.ram_directory.sync_directory()
+        self.mmap_directory.sync_directory()
     }
 
     fn watch(&self, watch_callback: WatchCallback) -> tantivy::Result<WatchHandle> {
-        self.ram_directory.watch(watch_callback)
+        self.mmap_directory.watch(watch_callback)
     }
 }
 

@@ -115,6 +115,17 @@ pub struct QueryAggregation {
     pub group_by: Option<Vec<String>>,
     pub function: AggFunction,
     pub having: QueryCondition,
+    /// Warning threshold for multi-level aggregation alerts (alerts_2.md §4.4).
+    /// `#[serde(default)]` so aggregations stored before this field existed
+    /// still deserialize — absent = single-level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning_value: Option<f64>,
+    /// Per-group evaluation opt-in (alerts_2.md M-9). `#[serde(default)]` for
+    /// the same reason as `warning_value`: rows written before this field
+    /// existed must read back as `false`, which is what keeps every
+    /// pre-existing grouped alert on its legacy evaluation path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi_alert: bool,
 }
 
 impl From<MetaAggregation> for QueryAggregation {
@@ -123,6 +134,8 @@ impl From<MetaAggregation> for QueryAggregation {
             group_by: value.group_by,
             function: value.function.into(),
             having: value.having.into(),
+            warning_value: value.warning_value,
+            multi_alert: value.multi_alert,
         }
     }
 }
@@ -133,6 +146,8 @@ impl From<QueryAggregation> for MetaAggregation {
             group_by: value.group_by,
             function: value.function.into(),
             having: value.having.into(),
+            warning_value: value.warning_value,
+            multi_alert: value.multi_alert,
         }
     }
 }
@@ -205,12 +220,16 @@ pub enum QueryType {
     Custom,
     Sql,
     Promql,
+    Slo,
 }
 
 impl QueryType {
     const CUSTOM: i16 = 0;
     const SQL: i16 = 1;
     const PROMQL: i16 = 2;
+    /// APPEND ONLY. This is the stored value in `alerts.query_type`; reusing
+    /// or reordering one would reinterpret every existing row.
+    const SLO: i16 = 3;
 }
 
 impl From<QueryType> for i16 {
@@ -219,6 +238,7 @@ impl From<QueryType> for i16 {
             QueryType::Custom => QueryType::CUSTOM,
             QueryType::Sql => QueryType::SQL,
             QueryType::Promql => QueryType::PROMQL,
+            QueryType::Slo => QueryType::SLO,
         }
     }
 }
@@ -231,6 +251,7 @@ impl TryFrom<i16> for QueryType {
             Self::CUSTOM => Ok(QueryType::Custom),
             Self::SQL => Ok(QueryType::Sql),
             Self::PROMQL => Ok(QueryType::Promql),
+            Self::SLO => Ok(QueryType::Slo),
             _ => Err(FromI16Error {
                 value,
                 ty: "QueryType".to_string(),
@@ -245,6 +266,7 @@ impl From<MetaQueryType> for QueryType {
             MetaQueryType::Custom => QueryType::Custom,
             MetaQueryType::SQL => QueryType::Sql,
             MetaQueryType::PromQL => QueryType::Promql,
+            MetaQueryType::Slo => QueryType::Slo,
         }
     }
 }
@@ -255,6 +277,7 @@ impl From<QueryType> for MetaQueryType {
             QueryType::Custom => MetaQueryType::Custom,
             QueryType::Sql => MetaQueryType::SQL,
             QueryType::Promql => MetaQueryType::PromQL,
+            QueryType::Slo => MetaQueryType::Slo,
         }
     }
 }
@@ -311,6 +334,14 @@ pub enum ConditionOperator {
     Contains,
     #[serde(rename = "not_contains")]
     NotContains,
+    #[serde(rename = "is_null")]
+    IsNull,
+    #[serde(rename = "is_not_null")]
+    IsNotNull,
+    #[serde(rename = "is_empty")]
+    IsEmpty,
+    #[serde(rename = "is_not_empty")]
+    IsNotEmpty,
 }
 
 impl From<MetaOperator> for ConditionOperator {
@@ -324,6 +355,10 @@ impl From<MetaOperator> for ConditionOperator {
             MetaOperator::LessThanEquals => Self::LessThanEquals,
             MetaOperator::Contains => Self::Contains,
             MetaOperator::NotContains => Self::NotContains,
+            MetaOperator::IsNull => Self::IsNull,
+            MetaOperator::IsNotNull => Self::IsNotNull,
+            MetaOperator::IsEmpty => Self::IsEmpty,
+            MetaOperator::IsNotEmpty => Self::IsNotEmpty,
         }
     }
 }
@@ -339,6 +374,10 @@ impl From<ConditionOperator> for MetaOperator {
             ConditionOperator::LessThanEquals => Self::LessThanEquals,
             ConditionOperator::Contains => Self::Contains,
             ConditionOperator::NotContains => Self::NotContains,
+            ConditionOperator::IsNull => Self::IsNull,
+            ConditionOperator::IsNotNull => Self::IsNotNull,
+            ConditionOperator::IsEmpty => Self::IsEmpty,
+            ConditionOperator::IsNotEmpty => Self::IsNotEmpty,
         }
     }
 }
@@ -545,6 +584,7 @@ pub enum StreamType {
     Logs,
     Metrics,
     Traces,
+    Profiles,
     EnrichmentTables,
     FileList,
     Metadata,
@@ -555,6 +595,7 @@ impl StreamType {
     const LOGS: &'static str = "logs";
     const METRICS: &'static str = "metrics";
     const TRACES: &'static str = "traces";
+    const PROFILES: &'static str = "profiles";
     const ENRICHMENT_TABLES: &'static str = "enrichment_tables";
     const FILE_LIST: &'static str = "file_list";
     const METADATA: &'static str = "metadata";
@@ -567,6 +608,7 @@ impl Display for StreamType {
             StreamType::Logs => StreamType::LOGS,
             StreamType::Metrics => StreamType::METRICS,
             StreamType::Traces => StreamType::TRACES,
+            StreamType::Profiles => StreamType::PROFILES,
             StreamType::EnrichmentTables => StreamType::ENRICHMENT_TABLES,
             StreamType::FileList => StreamType::FILE_LIST,
             StreamType::Metadata => StreamType::METADATA,
@@ -584,6 +626,7 @@ impl FromStr for StreamType {
             Self::LOGS => Ok(StreamType::Logs),
             Self::METRICS => Ok(StreamType::Metrics),
             Self::TRACES => Ok(StreamType::Traces),
+            Self::PROFILES => Ok(StreamType::Profiles),
             Self::ENRICHMENT_TABLES => Ok(StreamType::EnrichmentTables),
             Self::FILE_LIST => Ok(StreamType::FileList),
             Self::METADATA => Ok(StreamType::Metadata),
@@ -602,6 +645,7 @@ impl From<MetaStreamType> for StreamType {
             MetaStreamType::Logs => Self::Logs,
             MetaStreamType::Metrics => Self::Metrics,
             MetaStreamType::Traces => Self::Traces,
+            MetaStreamType::Profiles => Self::Profiles,
             MetaStreamType::ServiceGraph => Self::Metadata, // Map to Metadata for alerts
             MetaStreamType::EnrichmentTables => Self::EnrichmentTables,
             MetaStreamType::Filelist => Self::FileList,
@@ -617,6 +661,7 @@ impl From<StreamType> for MetaStreamType {
             StreamType::Logs => Self::Logs,
             StreamType::Metrics => Self::Metrics,
             StreamType::Traces => Self::Traces,
+            StreamType::Profiles => Self::Profiles,
             StreamType::EnrichmentTables => Self::EnrichmentTables,
             StreamType::FileList => Self::Filelist,
             StreamType::Metadata => Self::Metadata,
@@ -904,6 +949,7 @@ mod tests {
         assert_eq!(i16::from(QueryType::Custom), 0i16);
         assert_eq!(i16::from(QueryType::Sql), 1i16);
         assert_eq!(i16::from(QueryType::Promql), 2i16);
+        assert_eq!(i16::from(QueryType::Slo), 3i16);
     }
 
     #[test]
@@ -911,6 +957,7 @@ mod tests {
         assert!(matches!(QueryType::try_from(0i16), Ok(QueryType::Custom)));
         assert!(matches!(QueryType::try_from(1i16), Ok(QueryType::Sql)));
         assert!(matches!(QueryType::try_from(2i16), Ok(QueryType::Promql)));
+        assert!(matches!(QueryType::try_from(3i16), Ok(QueryType::Slo)));
         assert!(QueryType::try_from(99i16).is_err());
     }
 
@@ -928,6 +975,10 @@ mod tests {
             QueryType::from(MetaQueryType::PromQL),
             QueryType::Promql
         ));
+        assert!(matches!(
+            QueryType::from(MetaQueryType::Slo),
+            QueryType::Slo
+        ));
     }
 
     #[test]
@@ -943,6 +994,10 @@ mod tests {
         assert!(matches!(
             MetaQueryType::from(QueryType::Promql),
             MetaQueryType::PromQL
+        ));
+        assert!(matches!(
+            MetaQueryType::from(QueryType::Slo),
+            MetaQueryType::Slo
         ));
     }
 
@@ -1424,6 +1479,8 @@ mod tests {
     #[test]
     fn test_query_aggregation_from_meta() {
         let meta = MetaAggregation {
+            warning_value: None,
+            multi_alert: false,
             group_by: Some(vec!["service".to_string()]),
             function: MetaAggFunction::Count,
             having: MetaCondition {
@@ -1446,6 +1503,8 @@ mod tests {
     #[test]
     fn test_meta_aggregation_from_query_aggregation() {
         let qa = QueryAggregation {
+            warning_value: None,
+            multi_alert: false,
             group_by: None,
             function: AggFunction::Avg,
             having: QueryCondition {

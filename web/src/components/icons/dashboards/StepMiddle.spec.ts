@@ -1,115 +1,126 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
-import { mount, VueWrapper } from '@vue/test-utils';
-import StepMiddle from '@/components/icons/dashboards/StepMiddle.vue';
-import { Quasar } from 'quasar';
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { mount, VueWrapper } from "@vue/test-utils";
+import StepMiddle from "@/components/icons/dashboards/StepMiddle.vue";
 
-describe('StepMiddle.vue', () => {
+describe("StepMiddle.vue", () => {
   let wrapper: VueWrapper;
 
   afterEach(() => {
     if (wrapper) wrapper.unmount();
   });
 
-  const createWrapper = () => mount(StepMiddle, { global: { plugins: [Quasar] } });
+  const createWrapper = () => mount(StepMiddle, { global: { plugins: [] } });
 
-  describe('Component Rendering', () => {
-    it('renders the component correctly', () => {
+  describe("Component Rendering", () => {
+    it("renders the component correctly", () => {
       wrapper = createWrapper();
       expect(wrapper.exists()).toBe(true);
     });
 
-    it('has correct component name', () => {
+    it("has correct component name", () => {
       wrapper = createWrapper();
-      expect(wrapper.vm.$options.name).toBe('StepMiddle');
+      expect(wrapper.vm.$options.name).toBe("StepMiddle");
     });
 
-    it('renders an SVG element', () => {
+    it("renders an SVG element", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('svg').exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-icon-step-middle-svg"]').exists()).toBe(true);
     });
 
-    it('has correct SVG dimensions', () => {
+    it("has correct SVG dimensions", () => {
       wrapper = createWrapper();
-      const svg = wrapper.find('svg');
-      expect(svg.attributes('width')).toBe('82');
-      expect(svg.attributes('height')).toBe('83');
+      const svg = wrapper.find('[data-test="dashboard-icon-step-middle-svg"]');
+      expect(svg.attributes("width")).toBe("82");
+      expect(svg.attributes("height")).toBe("83");
     });
 
-    it('has correct viewBox', () => {
+    it("has correct viewBox", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('svg').attributes('viewBox')).toBe('0 0 82 83');
+      expect(
+        wrapper.find('[data-test="dashboard-icon-step-middle-svg"]').attributes("viewBox"),
+      ).toBe("0 0 82 83");
     });
 
-    it('contains a path element for the step line', () => {
+    it("contains a path element for the step line", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('path').exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-icon-step-middle-path"]').exists()).toBe(true);
     });
 
-    it('path uses currentColor stroke', () => {
+    it("path uses currentColor stroke", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('path').attributes('stroke')).toBe('currentColor');
+      expect(
+        wrapper.find('[data-test="dashboard-icon-step-middle-path"]').attributes("stroke"),
+      ).toBe("currentColor");
     });
 
-    it('path has vertical (V) steps', () => {
+    it("path has vertical (V) steps", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('path').attributes('d')).toContain('V');
+      expect(
+        wrapper.find('[data-test="dashboard-icon-step-middle-path"]').attributes("d"),
+      ).toContain("V");
     });
 
-    it('has 2 circle elements for data points', () => {
+    it("has 2 circle elements for data points", () => {
       wrapper = createWrapper();
-      expect(wrapper.findAll('circle').length).toBe(2);
+      expect(wrapper.findAll('[data-test="dashboard-icon-step-middle-circle"]').length).toBe(2);
     });
 
-    it('circles use currentColor fill', () => {
+    it("circles use currentColor fill", () => {
       wrapper = createWrapper();
-      wrapper.findAll('circle').forEach((c) => {
-        expect(c.attributes('fill')).toBe('currentColor');
+      wrapper.findAll('[data-test="dashboard-icon-step-middle-circle"]').forEach((c) => {
+        expect(c.attributes("fill")).toBe("currentColor");
       });
     });
   });
 
-  describe('Vue 3 Integration', () => {
-    it('uses defineComponent correctly', () => {
+  describe("Vue 3 Integration", () => {
+    it("uses defineComponent correctly", () => {
       wrapper = createWrapper();
       expect(wrapper.vm).toBeTruthy();
     });
 
-    it('has no reactive state', () => {
+    it("has no reactive state", () => {
       wrapper = createWrapper();
       expect(wrapper.vm.$data).toEqual({});
     });
 
-    it('mounts without errors', () => {
-      expect(() => { wrapper = createWrapper(); }).not.toThrow();
+    it("mounts without errors", () => {
+      expect(() => {
+        wrapper = createWrapper();
+      }).not.toThrow();
     });
 
-    it('unmounts cleanly', () => {
+    it("unmounts cleanly", () => {
       wrapper = createWrapper();
-      expect(() => { wrapper.unmount(); }).not.toThrow();
+      expect(() => {
+        wrapper.unmount();
+      }).not.toThrow();
     });
 
-    it('has no side effects on mount', () => {
-      const spy = vi.spyOn(console, 'warn');
+    it("has no side effects on mount", () => {
+      const spy = vi.spyOn(console, "warn");
       wrapper = createWrapper();
       expect(spy).not.toHaveBeenCalled();
       spy.mockRestore();
     });
   });
 
-  describe('Icon Specifics', () => {
-    it('renders at the SVG root level', () => {
+  describe("Icon Specifics", () => {
+    it("renders at the SVG root level", () => {
       wrapper = createWrapper();
-      expect(wrapper.element.tagName).toBe('svg');
+      expect(wrapper.element.tagName).toBe("svg");
     });
 
-    it('has fewer data points than StepAfter/StepBefore (2 vs 3)', () => {
+    it("has fewer data points than StepAfter/StepBefore (2 vs 3)", () => {
       wrapper = createWrapper();
-      expect(wrapper.findAll('circle').length).toBe(2);
+      expect(wrapper.findAll('[data-test="dashboard-icon-step-middle-circle"]').length).toBe(2);
     });
 
-    it('path ends at the left boundary (H0)', () => {
+    it("path ends at the left boundary (H0)", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('path').attributes('d')).toContain('H0');
+      expect(
+        wrapper.find('[data-test="dashboard-icon-step-middle-path"]').attributes("d"),
+      ).toContain("H0");
     });
   });
 });

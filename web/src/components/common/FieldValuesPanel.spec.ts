@@ -17,16 +17,12 @@ import { mount, VueWrapper } from "@vue/test-utils";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { nextTick } from "vue";
 import FieldValuesPanel from "@/components/common/FieldValuesPanel.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
-
-installQuasar({ plugins: [Dialog, Notify] });
 
 vi.mock("@vueuse/core", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@vueuse/core")>();
   return {
     ...actual,
-    watchDebounced: vi.fn((source: any, callback: any) => {
+    watchDebounced: vi.fn(() => {
       // Execute synchronously in tests so we can assert on emit calls
     }),
   };
@@ -42,11 +38,6 @@ vi.mock("@/components/icons/EqualIcon.vue", () => ({
 
 vi.mock("@/components/icons/NotEqualIcon.vue", () => ({
   default: { template: "<span class='not-equal-icon' />" },
-}));
-
-vi.mock("@quasar/extras/material-icons-outlined", () => ({
-  outlinedArrowBackIos: "arrow_back_ios",
-  outlinedArrowForwardIos: "arrow_forward_ios",
 }));
 
 // ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -92,7 +83,7 @@ describe("FieldValuesPanel.vue", () => {
 
     it("renders the filter-values-container", () => {
       wrapper = createWrapper();
-      expect(wrapper.find(".filter-values-container").exists()).toBe(true);
+      expect(wrapper.find('[data-test="field-values-panel-container"]').exists()).toBe(true);
     });
   });
 
@@ -122,16 +113,33 @@ describe("FieldValuesPanel.vue", () => {
       wrapper = createWrapper({
         fieldValues: { isLoading: true, values: [], errMsg: "" },
       });
-      // q-inner-loading has showing=true
-      const loading = wrapper.findComponent({ name: "QInnerLoading" });
+      const loading = wrapper.find('[data-test="field-values-panel-loading-indicator"]');
       expect(loading.exists()).toBe(true);
+    });
+
+    it("confines the loading overlay to its own box via a positioned wrapper", () => {
+      // Regression: OInnerLoading is `absolute inset-0`, so its wrapper must be a
+      // positioning context. Without `relative` the overlay escaped to the
+      // nearest positioned ancestor (`.o-field-list__row`) and covered the field
+      // row, blocking the click that collapses/cancels the request.
+      wrapper = createWrapper({
+        fieldValues: { isLoading: true, values: [], errMsg: "" },
+      });
+      const loading = wrapper.find('[data-test="field-values-panel-loading-indicator"]');
+      expect(loading.exists()).toBe(true);
+      const wrapperEl = loading.element.parentElement as HTMLElement;
+      expect(wrapperEl.classList.contains("relative")).toBe(true);
     });
 
     it("hides values list while loading with no interim cache", () => {
       wrapper = createWrapper({
         fieldValues: { isLoading: true, values: [], errMsg: "" },
       });
-      expect(wrapper.findAll("q-list").length).toBe(0);
+      // The values list is a <ul> that's always rendered, but its <li>
+      // children come from v-for over displayValues.
+      // With no cached values during loading, no row items should be present.
+      const valueRows = wrapper.findAll('[data-test^="logs-search-subfield-add-"]');
+      expect(valueRows.length).toBe(0);
     });
   });
 
@@ -142,7 +150,8 @@ describe("FieldValuesPanel.vue", () => {
       wrapper = createWrapper({
         fieldValues: { isLoading: false, values: [], errMsg: "" },
       });
-      expect(wrapper.text()).toContain("No values found");
+      expect(wrapper.text()).toContain("No values found.");
+      expect(wrapper.text()).toContain("Try a broader time range to see values.");
     });
 
     it("shows custom errMsg when provided and values list is empty", () => {
@@ -173,10 +182,10 @@ describe("FieldValuesPanel.vue", () => {
   describe("Values list rendering", () => {
     it("renders one list item per value", () => {
       wrapper = createWrapper({ fieldValues: buildFieldValues(3) });
-      const items = wrapper.findAll(".filter-values-container [data-test]");
+      const items = wrapper.findAll('[data-test="field-values-panel-container"] [data-test]');
       // 3 items — each has a data-test attribute for log-search-subfield-add
       const subfields = items.filter((el) =>
-        el.attributes("data-test")?.startsWith("logs-search-subfield-add-")
+        el.attributes("data-test")?.startsWith("logs-search-subfield-add-"),
       );
       expect(subfields.length).toBe(3);
     });
@@ -201,6 +210,20 @@ describe("FieldValuesPanel.vue", () => {
       });
       expect(wrapper.text()).toContain("Custom Label");
     });
+
+    it("renders multiline value with whitespace-pre-wrap and break-words classes to preserve newlines", () => {
+      wrapper = createWrapper({
+        fieldValues: {
+          isLoading: false,
+          values: [{ key: "k1\nwith\nnewlines", count: 5 }],
+        },
+      });
+      const el = wrapper.find(".text-field-list-label-text");
+      expect(el.exists()).toBe(true);
+      expect(el.classes()).toContain("whitespace-pre-wrap");
+      expect(el.classes()).toContain("break-words");
+      expect(el.text()).toContain("k1\nwith\nnewlines");
+    });
   });
 
   // ─── Multi-select controls ───────────────────────────────────────────────────
@@ -208,18 +231,18 @@ describe("FieldValuesPanel.vue", () => {
   describe("Multi-select controls", () => {
     it("renders checkboxes when showMultiSelect is true", () => {
       wrapper = createWrapper({ showMultiSelect: true, fieldValues: buildFieldValues(2) });
-      expect(wrapper.findAllComponents({ name: "QCheckbox" }).length).toBeGreaterThan(0);
+      expect(wrapper.findAllComponents({ name: "OCheckbox" }).length).toBeGreaterThan(0);
     });
 
     it("does not render checkboxes when showMultiSelect is false", () => {
       wrapper = createWrapper({ showMultiSelect: false, fieldValues: buildFieldValues(2) });
-      expect(wrapper.findAllComponents({ name: "QCheckbox" }).length).toBe(0);
+      expect(wrapper.findAllComponents({ name: "OCheckbox" }).length).toBe(0);
     });
 
     it("does not render include/exclude buttons when showMultiSelect is false", () => {
       wrapper = createWrapper({ showMultiSelect: false, fieldValues: buildFieldValues(2) });
       expect(
-        wrapper.find('[data-test="log-search-subfield-list-equal-status-field-btn"]').exists()
+        wrapper.find('[data-test="log-search-subfield-list-equal-status-field-btn"]').exists(),
       ).toBe(false);
     });
   });
@@ -304,9 +327,7 @@ describe("FieldValuesPanel.vue", () => {
       wrapper = createWrapper({ showMultiSelect: true, fieldValues: buildFieldValues(3) });
       (wrapper.vm as any).selectedValues = ["value-1"];
       await nextTick();
-      const clearBtn = wrapper.find(
-        '[data-test="field-values-panel-clear-selection-btn"]'
-      );
+      const clearBtn = wrapper.find('[data-test="field-values-panel-clear-selection-btn"]');
       await clearBtn.trigger("click");
       expect((wrapper.vm as any).selectedValues).toEqual([]);
     });
@@ -328,9 +349,7 @@ describe("FieldValuesPanel.vue", () => {
         await nextTick();
         (wrapper.vm as any).selectedValues = ["value-1", "value-2"];
         await nextTick();
-        const includeBtn = wrapper.find(
-          '[data-test="field-values-panel-include-mode-btn"]'
-        );
+        const includeBtn = wrapper.find('[data-test="field-values-panel-include-mode-btn"]');
         await includeBtn.trigger("click");
         vi.runAllTimers();
         const emitted = wrapper.emitted("add-multiple-search-terms");
@@ -343,9 +362,7 @@ describe("FieldValuesPanel.vue", () => {
         // filterMode defaults to 'include'; set selectedValues then click exclude
         (wrapper.vm as any).selectedValues = ["value-1"];
         await nextTick();
-        const excludeBtn = wrapper.find(
-          '[data-test="field-values-panel-exclude-mode-btn"]'
-        );
+        const excludeBtn = wrapper.find('[data-test="field-values-panel-exclude-mode-btn"]');
         await excludeBtn.trigger("click");
         vi.runAllTimers();
         const emitted = wrapper.emitted("add-multiple-search-terms");
@@ -365,9 +382,7 @@ describe("FieldValuesPanel.vue", () => {
       await nextTick();
       (wrapper.vm as any).selectedValues = ["value-1"];
       await nextTick();
-      const includeBtn = wrapper.find(
-        '[data-test="field-values-panel-include-mode-btn"]'
-      );
+      const includeBtn = wrapper.find('[data-test="field-values-panel-include-mode-btn"]');
       await includeBtn.trigger("click");
       expect((wrapper.vm as any).selectedValues).toEqual(["value-1"]);
     });
@@ -401,9 +416,7 @@ describe("FieldValuesPanel.vue", () => {
       await nextTick();
       expect((wrapper.vm as any).selectedValues).toEqual(["value-1"]);
 
-      const includeBtn = wrapper.find(
-        '[data-test="field-values-panel-include-mode-btn"]'
-      );
+      const includeBtn = wrapper.find('[data-test="field-values-panel-include-mode-btn"]');
       await includeBtn.trigger("click");
       // filterMode was already 'include', no reactive change, no emit
       expect((wrapper.vm as any).selectedValues).toEqual(["value-1"]);
@@ -545,7 +558,7 @@ describe("FieldValuesPanel.vue", () => {
       await nextTick();
       // cachedValues should contain the new value
       expect((wrapper.vm as any).cachedValues).toEqual(
-        expect.arrayContaining([expect.objectContaining({ key: "new-val" })])
+        expect.arrayContaining([expect.objectContaining({ key: "new-val" })]),
       );
     });
   });

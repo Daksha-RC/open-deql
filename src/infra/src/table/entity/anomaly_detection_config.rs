@@ -3,7 +3,8 @@
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Eq, Serialize, Deserialize)]
+// No `Eq`: `alert_budget_per_day` is f64, which has no total equality.
+#[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "anomaly_detection_config")]
 pub struct Model {
     #[sea_orm(primary_key, auto_increment = false)]
@@ -25,6 +26,11 @@ pub struct Model {
     pub training_window_days: i32,
     pub retrain_interval_days: i32,
     pub threshold: i32,
+    /// Alert budget (delivered alerts/day). NULL = percentile mode, exactly the pre-budget
+    /// behaviour.
+    pub alert_budget_per_day: Option<f64>,
+    /// Seconds; NULL means the shipped one-day default, which is what pre-column rows mean.
+    pub level_half_width_seconds: Option<i64>,
     pub seasonality: String,
     pub is_trained: bool,
     pub training_started_at: Option<i64>,
@@ -40,9 +46,20 @@ pub struct Model {
     /// Folder PK (folders.id KSUID). Stores the same FK as the alerts table.
     pub folder_id: String,
     pub owner: Option<String>,
+    /// Feature 2 (PT-1): priority storage ids 1..=5, P1 = 1. NULL = unset.
+    /// Same ids as `alerts.priority` so one enum serves both tables.
+    pub priority: Option<i32>,
+    /// Feature 2 (PT-6): JSON array of normalized tags. NULL = none.
+    pub tags: Option<Json>,
     /// 0=waiting, 1=ready, 2=training, 3=failed, 4=disabled
     pub status: i32,
     pub retries: i32,
+    /// When the last training attempt FAILED, in microseconds — the retry backoff's anchor.
+    pub last_failed_at: Option<i64>,
+    pub last_alert_fired_at: Option<i64>,
+    /// Data-time of the delivered alert still owed a recovery message, in microseconds.
+    /// NULL means none is owed — this is pending state, not a log of the last recovery sent.
+    pub last_recovery_notified_at: Option<i64>,
     pub last_updated: i64,
     pub created_at: i64,
     pub updated_at: i64,
@@ -86,6 +103,8 @@ mod tests {
             training_window_days: 7,
             retrain_interval_days: 1,
             threshold: 95,
+            alert_budget_per_day: None,
+            level_half_width_seconds: None,
             seasonality: "none".to_string(),
             is_trained: false,
             training_started_at: None,
@@ -100,8 +119,13 @@ mod tests {
             alert_destinations: None,
             folder_id: "folder1".to_string(),
             owner: None,
+            priority: None,
+            tags: None,
             status: 0,
             retries: 0,
+            last_failed_at: None,
+            last_alert_fired_at: None,
+            last_recovery_notified_at: None,
             last_updated: 0,
             created_at: 1000,
             updated_at: 1000,

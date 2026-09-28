@@ -14,11 +14,12 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
+import { mount, flushPromises, config } from "@vue/test-utils";
+import i18n from "@/locales";
 import ChunkedContent from "./ChunkedContent.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 
-installQuasar();
+// Component uses useI18n(); provide the app i18n plugin for all mounts.
+config.global.plugins = [...(config.global.plugins ?? []), i18n];
 
 const {
   mockInitializeChunk,
@@ -90,7 +91,7 @@ describe("ChunkedContent", () => {
       });
 
       await flushPromises();
-      expect(wrapper.find(".chunked-content").exists()).toBe(true);
+      expect(wrapper.find('[data-test="logs-chunked-content-container"]').exists()).toBe(true);
     });
 
     it("should render LogsHighLighting stub", async () => {
@@ -433,7 +434,7 @@ describe("ChunkedContent", () => {
       // Access the computed to trigger getChunkInfo call
       // (chunkInfo is lazy – it only runs when accessed)
       const vm = wrapper.vm as any;
-      const _info = vm.chunkInfo;
+      vm.chunkInfo;
       expect(mockGetChunkInfo).toHaveBeenCalledWith("special-field-key");
     });
   });

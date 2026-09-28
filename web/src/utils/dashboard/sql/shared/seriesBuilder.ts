@@ -14,9 +14,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { getDataValue } from "../../aliasUtils";
-import { getSeriesColor } from "../../colorPalette";
+import { getSeriesColor, getAreaStyleOverride } from "../../colorPalette";
 import { getAnnotationsData } from "@/utils/dashboard/getAnnotationsData";
 import { type SeriesObject } from "@/ts/interfaces/dashboard";
+import { chartColor, CHART_SELECTION_FILL } from "@/utils/chartTheme";
 
 export interface SeriesDeps {
   options: any;
@@ -59,7 +60,7 @@ export function buildDataLookupMap(
     const xValue = getDataValue(item, xAxisKey);
     const key = `${breakdownValue}||${xValue}`;
 
-    // Only set if NOT already present (keeps FIRST occurrence, matching original .find() behavior)
+    // Only set if NOT already present (keeps FIRST occurrence)
     if (!dataMap.has(key)) {
       dataMap.set(key, item);
     }
@@ -70,8 +71,7 @@ export function buildDataLookupMap(
 
 /**
  * Creates all series-building helper functions.
- * All functions close over `deps` so they behave identically to the original
- * closures defined inside `convertSQLData`.
+ * All functions close over `deps`.
  */
 export function createSeriesBuilders(deps: SeriesDeps) {
   const {
@@ -90,10 +90,7 @@ export function createSeriesBuilders(deps: SeriesDeps) {
     getAxisDataFromKey,
   } = deps;
 
-  const { markLines, markAreas } = getAnnotationsData(
-    annotations,
-    store.state.timezone,
-  );
+  const { markLines, markAreas } = getAnnotationsData(annotations, store.state.timezone);
 
   const getSeriesLabel = () => {
     return {
@@ -112,9 +109,7 @@ export function createSeriesBuilders(deps: SeriesDeps) {
         color: "#8B5A2B",
         type: [8, 4],
         width: 2,
-        shadowColor: store.state.theme === "light"
-          ? "rgba(255, 255, 255, 0.7)"
-          : "rgba(0, 0, 0, 0.7)",
+        shadowColor: chartColor("--color-chart-markline-shadow"),
         shadowBlur: 2,
       },
     };
@@ -131,13 +126,12 @@ export function createSeriesBuilders(deps: SeriesDeps) {
       z: 10,
       zlevel: 1,
     };
-    
   };
 
   const getSeriesMarkArea = () => {
     return {
       itemStyle: {
-        color: "rgba(0, 191, 255, 0.15)",
+        color: CHART_SELECTION_FILL,
       },
       data: markAreas,
     };
@@ -154,23 +148,14 @@ export function createSeriesBuilders(deps: SeriesDeps) {
     // Extract unique values for the second x-axis key
     // NOTE: while filter, we can't compare type as well because set will have string values
     const uniqueValues = [
-      ...Array.from(
-        new Set(
-          missingValueData.map((obj: any) => getDataValue(obj, breakDownKey)),
-        ),
-      ),
+      ...Array.from(new Set(missingValueData.map((obj: any) => getDataValue(obj, breakDownKey)))),
     ].filter((value: any) => value != null || value != undefined);
 
     return uniqueValues;
   }
 
-  const getSeriesData = (
-    breakdownKey: string,
-    yAxisKey: string,
-    xAxisKey: string,
-  ) => {
-    if (!(breakdownKey !== null && yAxisKey !== null && xAxisKey !== null))
-      return [];
+  const getSeriesData = (breakdownKey: string, yAxisKey: string, xAxisKey: string) => {
+    if (!(breakdownKey !== null && yAxisKey !== null && xAxisKey !== null)) return [];
 
     // Use the pre-built lookup map for O(1) access instead of O(n) filter + find
     // xAxisKey parameter is the breakdown value passed from getSeries()
@@ -189,10 +174,32 @@ export function createSeriesBuilders(deps: SeriesDeps) {
     seriesConfig: Record<string, any>,
     seriesName: string,
   ): SeriesObject => {
+    const seriesColor =
+      getSeriesColor(
+        panelSchema.config.color,
+        yAxisName,
+        seriesData,
+        chartMin,
+        chartMax,
+        store.state.theme,
+        panelSchema?.config?.color?.colorBySeries,
+      ) ?? null;
+
+    // For area charts, fade the fill into a bottom-to-top transparent
+    // gradient instead of a flat solid color (shared with the PromQL builder).
+    const areaStyle = getAreaStyleOverride(
+      panelSchema.type,
+      defaultSeriesProps?.areaStyle,
+      seriesColor,
+      yAxisName,
+      store.state.theme,
+    );
+
     return {
       //only append if yaxiskeys length is more than 1
       name: yAxisName?.toString(),
       ...defaultSeriesProps,
+      ...areaStyle,
       label: getSeriesLabel(),
       originalSeriesName: seriesName,
       // markLine if exist
@@ -201,25 +208,14 @@ export function createSeriesBuilders(deps: SeriesDeps) {
       // config to connect null values
       connectNulls: panelSchema.config?.connect_nulls ?? false,
       large: true,
-      color:
-        getSeriesColor(
-          panelSchema.config.color,
-          yAxisName,
-          seriesData,
-          chartMin,
-          chartMax,
-          store.state.theme,
-          panelSchema?.config?.color?.colorBySeries,
-        ) ?? null,
+      color: seriesColor,
       data: seriesData,
       ...seriesConfig,
     };
   };
 
   const getYAxisLabel = (yAxisKey: string, xAXisKey: string = "") => {
-    const label = panelSchema?.queries[0]?.fields?.y.find(
-      (it: any) => it.alias == yAxisKey,
-    )?.label;
+    const label = panelSchema?.queries[0]?.fields?.y.find((it: any) => it.alias == yAxisKey)?.label;
 
     if (
       panelSchema.type == "area-stacked" ||
@@ -235,9 +231,7 @@ export function createSeriesBuilders(deps: SeriesDeps) {
       // Display "(empty)" for empty breakdown values instead of falling
       // through to the y-axis label, which produces misleading legends
       const displayKey = xAXisKey === "" ? "(empty)" : xAXisKey;
-      return yAxisKeys.length === 1
-        ? displayKey
-        : `${displayKey} (${label})`;
+      return yAxisKeys.length === 1 ? displayKey : `${displayKey} (${label})`;
     }
 
     return label;
@@ -275,12 +269,7 @@ export function createSeriesBuilders(deps: SeriesDeps) {
                 yAxisGroup: index,
               };
               // Can create different method to get series
-              return getSeriesObj(
-                yAxisName,
-                seriesData,
-                updatedSeriesConfig,
-                key,
-              );
+              return getSeriesObj(yAxisName, seriesData, updatedSeriesConfig, key);
             });
           } else {
             const seriesData = getAxisDataFromKey(yAxis);

@@ -15,11 +15,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="column justify-center" data-test="trace-row-timestamp">
-    <span
-      class="text-caption text-weight-medium tw:text-[var(--o2-text-1)]!"
-      data-test="trace-row-timestamp-day"
-    >
+  <div class="flex flex-col justify-center" data-test="trace-row-timestamp">
+    <span class="text-text-body font-mono text-xs" data-test="trace-row-timestamp-day">
       {{ value }}
     </span>
   </div>

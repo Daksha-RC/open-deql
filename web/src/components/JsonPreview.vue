@@ -1,50 +1,50 @@
 <template>
-  <div class="tw:relative">
-    <q-btn
+  <div class="relative">
+    <OButton
       v-if="showCopyButton"
-      dense
-      size="sm"
-      no-caps
-      class="tw:absolute! tw:top-0! tw:right-0 tw:z-10 q-px-sm tw:py-[0.35rem]! tw:bg-[var(--o2-tag-grey-2)]!"
+      variant="secondary"
+      size="icon-sm"
+      class="absolute! top-0! right-0 z-10"
       :class="copyButtonClass"
-      icon="content_copy"
       @click="copyToClipboard"
     >
-      <q-tooltip>{{ t("common.copyToClipboard") }}</q-tooltip>
-    </q-btn>
-    <div class="q-pb-xs flex justify-start items-center q-px-md copy-log-btn">
+      <OIcon name="content-copy" size="sm" />
+      <OTooltip :content="t('common.copyToClipboard')" />
+    </OButton>
+    <div class="copy-log-btn flex items-center justify-start px-3 pb-1">
       <!-- Toolbar slot: consumers add context-specific buttons (View Trace, View Related, etc.) -->
       <slot name="toolbar" />
     </div>
     {
     <div
-      class="log_json_content"
+      class="flex font-mono text-xs whitespace-pre-wrap"
       v-for="(key, index) in Object.keys(value)"
       :key="key"
     >
       <!-- Field dropdown slot: render the button only when the slot is provided -->
-      <q-btn-dropdown
+      <ODropdown
         v-if="hasFieldDropdownSlot"
-        data-test="json-preview-field-dropdown-btn"
-        size="0.5rem"
-        flat
-        outlined
-        filled
-        dense
-        class="q-ml-sm pointer tw:px-0!"
-        :name="'img:' + getImageURL('images/common/add_icon.svg')"
-        aria-label="Add icon"
+        v-model:open="dropdownOpenMap[key]"
+        side="bottom"
+        align="start"
       >
-        <q-list class="logs-table-list">
+        <template #trigger>
+          <OButton
+            data-test="json-preview-field-dropdown-btn"
+            size="xs"
+            variant="ghost"
+            class="ms-2 h-5! min-h-5! w-5! min-w-5! p-0! align-middle"
+            :aria-label="t('common.addIcon')"
+          >
+            <OIcon :name="dropdownOpenMap[key] ? 'arrow-drop-up' : 'arrow-drop-down'" size="sm" />
+          </OButton>
+        </template>
+        <div class="logs-table-list min-w-45">
           <slot name="field-dropdown" :field="key" :value="value[key]" />
-        </q-list>
-      </q-btn-dropdown>
+        </div>
+      </ODropdown>
 
-      <span
-        class="tw:pl-[0.625rem]"
-        :data-test="`json-preview-key-${key}`"
-        :class="store.state.theme === 'dark' ? 'dark' : ''"
-      >
+      <span class="ps-2.5" :data-test="`json-preview-key-${key}`">
         <span class="log-key">{{ key }}</span
         ><span class="log-separator">: </span
         ><span
@@ -66,19 +66,26 @@
 </template>
 
 <script lang="ts">
-import { computed, useSlots } from "vue";
+import { computed, reactive, useSlots } from "vue";
 import { useStore } from "vuex";
-import { useI18n } from "vue-i18n";
-import { copyToClipboard as quasarCopyToClipboard, useQuasar } from "quasar";
+import { useI18nTyped } from "@/types/i18n";
+import { copyToClipboard as copyTextToClipboard } from "@/utils/clipboard";
 import { getImageURL } from "@/utils/zincutils";
 import LogsHighLighting from "@/components/logs/LogsHighLighting.vue";
 import ChunkedContent from "@/components/logs/ChunkedContent.vue";
-
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
 export default {
   name: "JsonPreview",
   components: {
     LogsHighLighting,
     ChunkedContent,
+    OButton,
+    ODropdown,
+    OTooltip,
+    OIcon,
   },
   props: {
     value: {
@@ -101,18 +108,15 @@ export default {
   },
   emits: ["copy"],
   setup(props: any, { emit }: any) {
-    const { t } = useI18n();
+    const { t } = useI18nTyped();
     const store = useStore();
-    const $q = useQuasar();
     const slots = useSlots();
 
     const hasFieldDropdownSlot = computed(() => !!slots["field-dropdown"]);
+    const dropdownOpenMap = reactive<Record<string, boolean>>({});
 
     const copyToClipboard = () => {
-      quasarCopyToClipboard(JSON.stringify(props.value, null, 2));
-      $q.notify({
-        type: "positive",
-        message: t("common.copyToClipboard") + "!",
+      copyTextToClipboard(JSON.stringify(props.value, null, 2), t, {
         timeout: 1500,
       });
       emit("copy", props.value);
@@ -138,11 +142,8 @@ export default {
       copyToClipboard,
       getContentSize,
       getImageURL,
+      dropdownOpenMap,
     };
   },
 };
 </script>
-
-<style lang="scss" scoped>
-@import "@/styles/logs/json-preview.scss";
-</style>

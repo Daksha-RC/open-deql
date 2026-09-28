@@ -13,6 +13,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// LLM UI visibility is controlled at build time via the
+// `VITE_OPENOBSERVE_LLM_UI` env var. Visible by default; set the env
+// var to "false" to hide the LLM Observability UI.
+function readLLMUIFlag(): "true" | "false" {
+  return String(import.meta.env.VITE_OPENOBSERVE_LLM_UI) === "false" ? "false" : "true";
+}
+
 const config = {
   aws_mobile_analytics_app_id: "ab7e9321f83c45a8967ff3b9bd90e83a",
   aws_mobile_analytics_app_region: "us-west-2",
@@ -29,16 +36,23 @@ const config = {
   freePlan: "free",
   paidPlan: "pay-as-you-go",
   enterprisePlan: "enterprise",
-  ooApplicationID: import.meta.env.VITE_OO_APP_ID,
-  ooClientToken: import.meta.env.VITE_OO_CLIENT_TOKEN,
-  ooSite: import.meta.env.VITE_OO_SITE,
-  ooService: import.meta.env.VITE_OO_SERVICE,
-  ooOrgIdentifier: import.meta.env.VITE_OO_ORG_IDENTIFIER,
+  o2ApplicationID: import.meta.env.VITE_O2_APP_ID,
+  o2ClientToken: import.meta.env.VITE_O2_CLIENT_TOKEN,
+  o2Site: import.meta.env.VITE_O2_SITE,
+  o2Service: import.meta.env.VITE_O2_SERVICE,
+  o2OrgIdentifier: import.meta.env.VITE_O2_ORG_IDENTIFIER,
   environment: import.meta.env.VITE_ENVIRONMENT,
   ddAPPID: import.meta.env.VITE_DD_APP_ID,
   ddClientToken: import.meta.env.VITE_DD_CLIENT_TOKEN,
   ddSite: import.meta.env.VITE_DD_SITE,
   REO_CLIENT_KEY: import.meta.env.VITE_REODOTDEV_CLIENT_KEY || "",
+  // Master switch for the LLM Observability UI (LLM Insights + Sessions
+  // tabs on the traces page, Thread tab inside trace details).
+  //
+  // Controlled at build time by `VITE_OPENOBSERVE_LLM_UI`. Visible by
+  // default; set the env var to "false" to hide. Consumers use the
+  // existing string check `config.showLLMUI !== 'false'`.
+  showLLMUI: readLLMUIFlag(),
 };
 
 export default config;

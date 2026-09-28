@@ -156,8 +156,13 @@ impl ObjectStore for Remote {
                 e
             })?;
 
-        // metrics
-        let data_len = result.meta.size;
+        // metrics — use the actual returned range size, not the full file
+        // size. For range / suffix GETs `result.meta.size` is the total file
+        // length, which would over-count bytes by ~the file size each call.
+        let mut data_len = result.range.end - result.range.start;
+        if data_len == 0 {
+            data_len = result.meta.size;
+        }
         let columns = file.split('/').collect::<Vec<&str>>();
         if columns[0] == "files" {
             metrics::STORAGE_READ_BYTES
@@ -201,11 +206,10 @@ impl ObjectStore for Remote {
         self.client.list(Some(&prefix.into()))
     }
 
-    async fn list_with_delimiter(&self, _prefix: Option<&Path>) -> Result<ListResult> {
-        Err(Error::NotImplemented {
-            operation: "list_with_delimiter".to_string(),
-            implementer: Self::name().to_string(),
-        })
+    async fn list_with_delimiter(&self, prefix: Option<&Path>) -> Result<ListResult> {
+        let key = prefix.map(|p| p.as_ref());
+        let prefix = self.format_key(key.unwrap_or(""));
+        self.client.list_with_delimiter(Some(&prefix.into())).await
     }
 
     async fn copy_opts(&self, _from: &Path, _to: &Path, _options: CopyOptions) -> Result<()> {
@@ -245,7 +249,8 @@ fn init_aws_config(config: StorageConfig) -> object_store::Result<object_store::
         .with_client_options(opts)
         .with_bucket_name(&config.bucket_name)
         .with_retry(retry_config)
-        .with_virtual_hosted_style_request(force_hosted_style);
+        .with_virtual_hosted_style_request(force_hosted_style)
+        .with_disable_bulk_delete(!cfg.s3.feature_bulk_delete);
     if !config.server_url.is_empty() {
         builder = builder.with_endpoint(&config.server_url);
     }
@@ -301,6 +306,22 @@ fn init_gcp_config(
         builder = builder.with_service_account_path(&config.access_key);
     }
     builder.build()
+}
+
+pub fn build_signer(
+    config: StorageConfig,
+) -> object_store::Result<Box<dyn object_store::signer::Signer + Send + Sync>> {
+    let provider = config.provider.to_lowercase();
+    match provider.as_str() {
+        "aws" | "s3" | "" => init_aws_config(config)
+            .map(|s| Box::new(s) as Box<dyn object_store::signer::Signer + Send + Sync>),
+        "gcs" | "gcp" => init_gcp_config(config)
+            .map(|s| Box::new(s) as Box<dyn object_store::signer::Signer + Send + Sync>),
+        "azure" => init_azure_config(config)
+            .map(|s| Box::new(s) as Box<dyn object_store::signer::Signer + Send + Sync>),
+        _ => init_aws_config(config)
+            .map(|s| Box::new(s) as Box<dyn object_store::signer::Signer + Send + Sync>),
+    }
 }
 
 fn init_client(config: StorageConfig) -> Box<dyn object_store::ObjectStore> {

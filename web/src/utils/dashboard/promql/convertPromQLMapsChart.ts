@@ -13,6 +13,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { gt } from "@/types/i18n";
+
 import {
   PromQLChartConverter,
   ProcessedPromQLData,
@@ -21,6 +23,7 @@ import {
 } from "./shared/types";
 import { applyAggregation } from "./shared/dataProcessor";
 import { getCountryName } from "../countryMappings";
+import { escapeHtml } from "@/utils/html";
 
 /**
  * Converter for maps charts (location-based visualization)
@@ -30,24 +33,17 @@ import { getCountryName } from "../countryMappings";
 export class MapsConverter implements PromQLChartConverter {
   supportedTypes = ["maps"];
 
-  convert(
-    processedData: ProcessedPromQLData[],
-    panelSchema: any,
-    store: any,
-    extras: any,
-    chartPanelRef?: any,
-  ) {
+  convert(processedData: ProcessedPromQLData[], panelSchema: any, store: any, extras: any) {
     const config: MapsConfig & Record<string, any> = panelSchema.config || {};
     const aggregation = config.aggregation || "last";
 
     // Get label names for location name
-    const nameLabel =
-      config.name_label || "name" || "location" || "country" || "region";
+    const nameLabel = config.name_label || "name";
 
     const locationValueMap = new Map<string, number[]>();
     const errors: string[] = [];
-    processedData.forEach((queryData, qIndex) => {
-      queryData.series.forEach((seriesData, sIndex) => {
+    processedData.forEach((queryData) => {
+      queryData.series.forEach((seriesData) => {
         const rawLocationName = seriesData.metric[nameLabel] || seriesData.name;
 
         if (!rawLocationName) {
@@ -92,7 +88,7 @@ export class MapsConverter implements PromQLChartConverter {
     if (mapData.length === 0) {
       return {
         error: true,
-        message: `No valid map data found. Ensure metrics have a "${nameLabel}" label with location names.`,
+        message: gt("dashboard.utils.promqlNoMapData", { nameLabel }),
         series: [],
       };
     }
@@ -100,13 +96,9 @@ export class MapsConverter implements PromQLChartConverter {
     // Calculate min/max values from data (matching SQL implementation)
     const numericValues = mapData
       .map((item: any) => item.value)
-      .filter(
-        (value: any): value is number =>
-          typeof value === "number" && !Number.isNaN(value),
-      );
+      .filter((value: any): value is number => typeof value === "number" && !Number.isNaN(value));
 
-    const minValue =
-      numericValues.length === 1 ? 0 : Math.min(...numericValues);
+    const minValue = numericValues.length === 1 ? 0 : Math.min(...numericValues);
     const maxValue = Math.max(...numericValues);
 
     // Return map chart configuration
@@ -136,7 +128,7 @@ export class MapsConverter implements PromQLChartConverter {
           if (formattedValue === "-" || Number.isNaN(formattedValue)) {
             formattedValue = "-";
           }
-          return `${params.name}: ${formattedValue}`;
+          return `${escapeHtml(params.name)}: ${escapeHtml(formattedValue)}`;
         },
       },
       toolbox: {
@@ -165,7 +157,7 @@ export class MapsConverter implements PromQLChartConverter {
             "#a50026",
           ],
         },
-        text: ["High", "Low"],
+        text: [gt("dashboard.utils.visualMapHigh"), gt("dashboard.utils.visualMapLow")],
         calculable: true,
       },
     };

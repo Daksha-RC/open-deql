@@ -1,4 +1,4 @@
-<!-- Copyright 2026 OpenObserve Inc.
+﻿<!-- Copyright 2026 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,590 +15,559 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <transition name="slide">
+  <ODrawer
+    bleed
+    :open="visible"
+    :width="60"
+    :seamless="true"
+    :portal-target="containerEl"
+    :title="selectedNode?.name || selectedNode?.label || selectedNode?.id"
+    data-test="service-graph-side-panel"
+    @update:open="
+      (v) => {
+        if (!v) handleClose();
+      }
+    "
+  >
+    <template #header-right>
+      <div class="flex items-center gap-2">
+        <!-- Agent nodes: show which env/version variant this node represents. -->
+        <OAgentBadges
+          v-if="selectedNode?.service_type === 'agent'"
+          :env="agentEnvVersion.env"
+          :version="agentEnvVersion.version"
+          data-test="service-graph-node-agent-badges"
+        />
+        <OTag type="serviceStatus" :value="serviceHealth.status" data-test="service-health-badge">{{
+          serviceHealth.text
+        }}</OTag>
+        <ODropdown side="bottom" align="start">
+          <template #trigger>
+            <OButton
+              variant="outline"
+              size="sm"
+              data-test="service-graph-node-panel-view-related-btn"
+            >
+              {{ t("traces.serviceGraphNodeSidePanel.viewRelated") }}
+              <OIcon name="arrow-drop-down" size="sm" />
+            </OButton>
+          </template>
+          <ODropdownItem
+            @select="viewRelatedLogs"
+            data-test="service-graph-node-panel-view-related-logs-btn"
+            >{{ t("traces.serviceGraphNodeSidePanel.logs") }}</ODropdownItem
+          >
+          <ODropdownItem
+            @select="viewRelatedTraces"
+            data-test="service-graph-node-panel-view-related-traces-btn"
+            >{{ t("traces.serviceGraphNodeSidePanel.traces") }}</ODropdownItem
+          >
+          <!-- FR-7's missing direction: service → the databases it queries.
+               Database Monitoring already accepts a `service` scope; this is
+               the entry point that sets it. Hidden when the feature is off. -->
+          <ODropdownItem
+            v-if="dbmEnabled"
+            @select="viewRelatedDatabases"
+            data-test="service-graph-node-panel-view-related-databases-btn"
+            >{{ t("traces.serviceGraphNodeSidePanel.databases") }}</ODropdownItem
+          >
+        </ODropdown>
+      </div>
+    </template>
+
+    <!-- Content Scrollable Area -->
+    <!-- No horizontal padding here: sections that need an inset (charts, chip row, tab labels)
+           add px-page-edge themselves, so dividers and tables can bleed to the edges naturally. -->
     <div
-      v-if="visible"
-      class="service-graph-side-panel"
-      data-test="service-graph-side-panel"
+      class="panel-content bg-surface-base dark:bg-graph-panel-scrim flex-1 overflow-x-hidden overflow-y-auto py-2.5"
     >
-      <!-- Header Section (compact with inline health badge) -->
+      <!-- RED Charts Section -->
       <div
-        class="panel-header tw:py-[0.375rem] tw:px-[0.625rem]"
-        data-test="service-graph-side-panel-header"
+        v-if="streamFilter !== 'all' && dashboardData"
+        class="panel-section red-charts-section mb-0! flex flex-col p-0"
+        data-test="service-graph-side-panel-red-charts"
       >
-        <div class="panel-title">
-          <h2
-            class="service-name"
-            data-test="service-graph-side-panel-service-name"
+        <!-- DataZoom filter chips + View in Traces button -->
+        <div
+          v-if="filterChips.length"
+          class="px-page-edge flex flex-wrap items-center gap-2 py-[0.3rem]"
+          data-test="service-graph-side-panel-filter-chips"
+        >
+          <!-- Filter chip pills -->
+          <div
+            v-for="chip in filterChips"
+            :key="chip.key"
+            class="rounded-default border-border-default text-2xs text-text-body inline-flex items-center gap-1 border px-2 py-[0.325rem] leading-none"
+            :data-test="`service-graph-filter-chip-${chip.key}`"
+            :class="chip.type === 'duration' ? 'text-latency-p95' : 'text-status-error-text'"
           >
-            {{ selectedNode?.name || selectedNode?.label || selectedNode?.id }}
-            <span class="health-badge" :class="serviceHealth.status">
-              {{ serviceHealth.text }}
-            </span>
-          </h2>
+            <!-- Duration chip icon -->
+            <OIcon
+              v-if="chip.type === 'duration'"
+              name="schedule"
+              size="xs"
+              class="text-latency-p95"
+            />
+            <!-- Error chip icon -->
+            <OIcon
+              v-else-if="chip.type === 'error'"
+              name="warning"
+              size="xs"
+              class="text-status-error-text"
+            />
+            <span
+              :class="chip.type === 'duration' ? 'text-latency-p95' : 'text-status-error-text'"
+              >{{ chip.label }}</span
+            >
+            <OButton
+              variant="ghost"
+              size="icon-chip"
+              class="ms-0.5"
+              :data-test="`service-graph-filter-chip-remove-${chip.key}`"
+              @click="removeLocalRangeFilter(chip.key)"
+            >
+              <OIcon name="close" size="xs" />
+            </OButton>
+          </div>
+
+          <!-- Spacer -->
+          <div class="flex-1" />
+
+          <!-- View in Traces button -->
+          <OButton
+            variant="ghost-primary"
+            size="sm"
+            data-test="service-graph-side-panel-view-in-traces-btn"
+            @click="viewInTraces"
+          >
+            <template #icon-left>
+              <OIcon name="search" size="xs" />
+            </template>
+            {{ t("traces.serviceGraphNodeSidePanel.viewTraces") }}
+          </OButton>
         </div>
-        <div class="panel-header-actions tw:flex tw:items-center tw:gap-2">
-          <q-btn-dropdown
-            flat
-            dense
-            no-caps
-            size="sm"
-            class="tw:pl-[0.675rem]! tw:border! tw:border-[var(--o2-primary-btn-bg)]! tw:rounded! tw:text-[0.7rem]! tw:tracking-[0.03rem]! tw:text-[var(--o2-primary-btn-bg)]!"
-            label="View Related"
-            data-test="service-graph-node-panel-view-related-btn"
-          >
-            <q-list dense class="tw:min-w-[120px]">
-              <q-item
-                clickable
-                v-close-popup
-                @click="viewRelatedLogs"
-                data-test="service-graph-node-panel-view-related-logs-btn"
-              >
-                <q-item-section class="tw:text-[var(--o2-text-2)]!"
-                  >Logs</q-item-section
-                >
-              </q-item>
-              <q-item
-                clickable
-                v-close-popup
-                @click="viewRelatedTraces"
-                data-test="service-graph-node-panel-view-related-traces-btn"
-              >
-                <q-item-section class="tw:text-[var(--o2-text-2)]!"
-                  >Traces</q-item-section
-                >
-              </q-item>
-            </q-list>
-          </q-btn-dropdown>
-          <q-btn
-            flat
-            dense
-            round
-            icon="cancel"
-            size="sm"
-            @click="handleClose"
-            data-test="service-graph-side-panel-close-btn"
-            class="close-btn"
-          />
+        <div class="charts-wrapper min-h-[10.875rem] w-full py-0!">
+          <div class="charts-container w-full">
+            <RenderDashboardCharts
+              ref="dashboardChartsRef"
+              :viewOnly="true"
+              :frame="false"
+              :dashboardData="dashboardData || {}"
+              :currentTimeObj="currentTimeObj"
+              :allowAlertCreation="false"
+              searchType="dashboards"
+              @updated:dataZoom="onDataZoom"
+            />
+          </div>
         </div>
       </div>
 
-      <!-- Content Scrollable Area -->
-      <div class="panel-content">
-        <!-- RED Charts Section -->
+      <!-- Full-bleed divider: panel has no horizontal padding, so w-full reaches both edges -->
+      <OSeparator v-if="streamFilter !== 'all' && dashboardData" class="my-1.5!" />
+      <!-- Tabs: Operations / Nodes / Pods -->
+      <template v-if="streamFilter !== 'all'">
+        <!-- Row spans full width so the bottom border bleeds; px-page-edge keeps the tab labels inset -->
         <div
-          v-if="streamFilter !== 'all' && dashboardData"
-          class="panel-section red-charts-section tw:flex tw:flex-col tw:mb-0!"
-          data-test="service-graph-side-panel-red-charts"
+          class="border-b-card-glass-border px-page-edge mb-0 flex items-end border-b"
+          data-test="service-graph-node-panel-tabs-row"
         >
-          <!-- DataZoom filter chips + View in Traces button -->
-          <div
-            v-if="filterChips.length"
-            class="tw:flex tw:items-center tw:gap-2 tw:px-2 tw:py-[0.3rem] tw:flex-wrap"
-            data-test="service-graph-side-panel-filter-chips"
+          <OTabs
+            v-model="activeTab"
+            dense
+            align="left"
+            class="w-[calc(100%-2rem)]! flex-1 font-bold"
+            data-test="service-graph-node-panel-tabs"
           >
-            <!-- Filter chip pills -->
-            <div
-              v-for="chip in filterChips"
-              :key="chip.key"
-              class="tw:inline-flex tw:items-center tw:gap-1 tw:rounded tw:border tw:border-[var(--o2-border)] tw:px-2 tw:py-[0.325rem] tw:text-[0.7rem] tw:leading-none tw:text-[var(--o2-text-primary)]"
-              :data-test="`service-graph-filter-chip-${chip.key}`"
-              :class="
-                chip.type === 'duration'
-                  ? 'tw:text-[var(--o2-latency-p95)]'
-                  : 'tw:text-[var(--o2-status-error-text)]'
-              "
-            >
-              <!-- Duration chip icon -->
-              <q-icon
-                v-if="chip.type === 'duration'"
-                name="schedule"
-                size="0.8rem"
-                class="tw:text-[var(--o2-latency-p95)]"
-              />
-              <!-- Error chip icon -->
-              <q-icon
-                v-else-if="chip.type === 'error'"
-                name="warning"
-                size="0.8rem"
-                class="tw:text-[var(--o2-status-error-text)]"
-              />
-              <span
-                :class="
-                  chip.type === 'duration'
-                    ? 'tw:text-[var(--o2-latency-p95)]'
-                    : 'tw:text-[var(--o2-status-error-text)]'
-                "
-                >{{ chip.label }}</span
-              >
-              <button
-                class="tw:ml-0.5 tw:flex tw:items-center tw:justify-center tw:rounded-full tw:text-[var(--o2-text-secondary)] tw:hover:text-[var(--o2-text-primary)] tw:cursor-pointer tw:border-none tw:bg-transparent tw:p-0"
-                :data-test="`service-graph-filter-chip-remove-${chip.key}`"
-                @click="removeLocalRangeFilter(chip.key)"
-              >
-                <q-icon name="close" size="0.65rem" />
-              </button>
-            </div>
-
-            <!-- Spacer -->
-            <div class="tw:flex-1" />
-
-            <!-- View in Traces button -->
-            <q-btn
-              class="view-logs-btn o2-primary-button tw:py-[0.25rem]! tw:px-[0.25rem]!"
-              dense
-              unelevated
-              no-caps
-              size="sm"
-              data-test="service-graph-side-panel-view-in-traces-btn"
-              @click="viewInTraces"
-            >
-              <q-icon name="search" size="0.8rem" class="tw:pr-[0.12rem]" />
-              View Traces
-            </q-btn>
-          </div>
-          <div class="charts-wrapper tw:py-0! tw:min-h-[10.875rem] tw:w-full">
-            <div class="charts-container tw:w-full">
-              <RenderDashboardCharts
-                ref="dashboardChartsRef"
-                :viewOnly="true"
-                :dashboardData="dashboardData || {}"
-                :currentTimeObj="currentTimeObj"
-                :allowAlertCreation="false"
-                searchType="dashboards"
-                @updated:dataZoom="onDataZoom"
-              />
-            </div>
-          </div>
-        </div>
-
-        <q-separator class="tw:my-[1rem]!" />
-        <!-- Tabs: Operations / Nodes / Pods -->
-        <template v-if="streamFilter !== 'all'">
-          <div
-            class="tw:flex tw:items-end tw:border-b tw:border-b-[var(--o2-border-color)] tw:mx-[0.5rem] tw:mb-[0.375rem]"
-            data-test="service-graph-node-panel-tabs-row"
-          >
-            <q-tabs
-              v-model="activeTab"
-              dense
-              inline-label
-              outside-arrows
-              align="left"
-              class="text-bold tw:flex-1 tw:w-[calc(100%-2rem)]!"
-              data-test="service-graph-node-panel-tabs"
-            >
-              <q-tab
-                name="operations"
-                label="Operations"
-                style="text-transform: capitalize"
-                data-test="service-graph-node-panel-tab-operations"
-              />
-              <q-tab
-                v-for="cfg in activeResourceTabConfigs"
-                :key="cfg.id"
-                :name="cfg.id"
-                :label="cfg.label"
-                style="text-transform: capitalize"
-                :data-test="`service-graph-node-panel-tab-${cfg.id}`"
-              />
-              <q-tab
-                name="metrics"
-                label="Metrics"
-                style="text-transform: capitalize"
-                data-test="service-graph-node-panel-tab-metrics"
-              />
-            </q-tabs>
-
-            <!-- Resource tabs dropdown — shows/hides individual OTEL resource tabs -->
-            <q-btn
-              v-if="availableResourceTabConfigs.length > 0"
-              flat
-              dense
-              icon="tune"
-              size="1.1rem"
-              data-test="service-graph-node-panel-workload-fields-btn"
-            >
-              <q-tooltip>{{ t("common.resources") }}</q-tooltip>
-              <q-menu anchor="bottom right" self="top right" :offset="[0, 4]">
-                <q-list
-                  dense
-                  class="tw:min-w-[12rem]!"
-                  data-test="service-graph-node-panel-workload-fields-menu"
-                >
-                  <template v-for="env in detectedEnvironments" :key="env.key">
-                    <q-item-label
-                      header
-                      class="tw:text-xs tw:pb-0 tw:py-[0.375rem]! tw:uppercase tw:tracking-wide"
-                    >
-                      {{ env.label }}
-                    </q-item-label>
-                    <q-item
-                      v-for="cfg in availableResourceTabConfigs.filter(
-                        (c) => c.environment === env.key,
-                      )"
-                      :key="cfg.id"
-                      tag="label"
-                      clickable
-                      :data-test="`service-graph-node-panel-workload-field-${cfg.id}`"
-                      class="tw:px-[0.325rem]! tw:h-[30px]! tw:min-h-[30px]!"
-                    >
-                      <q-item-section side class="tw:pr-[0rem]!">
-                        <q-checkbox
-                          v-model="selectedWorkloadFields"
-                          :val="cfg.id"
-                          size="xs"
-                        />
-                      </q-item-section>
-                      <q-item-section>
-                        <q-item-label class="tw:text-xs">
-                          {{ cfg.label }}
-                          <q-tooltip>
-                            {{ cfg.groupField }}
-                          </q-tooltip>
-                        </q-item-label>
-                      </q-item-section>
-                    </q-item>
-                  </template>
-                </q-list>
-              </q-menu>
-            </q-btn>
-          </div>
-          <q-tab-panels v-model="activeTab" animated>
-            <!-- Operations Tab -->
-            <q-tab-panel
+            <OTab
               name="operations"
-              class="tw:p-0! panel-section tw:mb-0!"
-              data-test="service-graph-side-panel-recent-operations"
-            >
-              <!-- Loading State -->
-              <div
-                v-if="loadingOperations"
-                class="tw:flex tw:items-center tw:gap-2 tw:py-3 tw:text-sm"
-                style="color: var(--o2-text-secondary)"
-              >
-                <q-spinner color="primary" size="sm" />
-                <span>Loading operations...</span>
-              </div>
-
-              <template v-else>
-                <div
-                  v-if="recentOperations.length === 0"
-                  class="tw:text-xs tw:italic tw:py-2 tw:text-center"
-                  style="color: var(--o2-text-secondary)"
-                >
-                  No operations found
-                </div>
-                <div
-                  v-else
-                  class="tw:overflow-hidden tw:rounded"
-                  data-test="service-graph-side-panel-operations-table"
-                >
-                  <TenstackTable
-                    :columns="operationsTableColumns"
-                    :rows="operationsTableRows"
-                    :loading="false"
-                    :default-columns="false"
-                    :enable-column-reorder="false"
-                    :enable-row-expand="false"
-                    :enable-text-highlight="false"
-                    :enable-status-bar="false"
-                    :enable-ai-context-button="false"
-                    :row-height="28"
-                    @click:data-row="
-                      (row: any) =>
-                        navigateToTraces({ operationName: row._name })
-                    "
-                  >
-                    <template #cell-errors="{ item }">
-                      <span
-                        :class="
-                          item.errors > 0
-                            ? 'tw:text-[var(--q-negative)] tw:font-semibold'
-                            : ''
-                        "
-                        >{{ item.errors }}</span
-                      >
-                    </template>
-                    <template #cell-p99="{ item }">
-                      <span
-                        :class="
-                          item.p99 !== 'N/A'
-                            ? 'tw:text-[var(--o2-latency-p99)]'
-                            : ''
-                        "
-                        >{{ item.p99 }}</span
-                      >
-                    </template>
-                    <template #cell-p95="{ item }">
-                      <span
-                        :class="
-                          item.p95 !== 'N/A'
-                            ? 'tw:text-[var(--o2-latency-p95)]'
-                            : ''
-                        "
-                        >{{ item.p95 }}</span
-                      >
-                    </template>
-                    <template #cell-p75="{ item }">
-                      <span
-                        :class="
-                          item.p75 !== 'N/A'
-                            ? 'tw:text-[var(--o2-latency-p75)]'
-                            : ''
-                        "
-                        >{{ item.p75 }}</span
-                      >
-                    </template>
-                    <template #cell-actions="{ row, column, active }">
-                      <q-btn
-                        v-if="active"
-                        flat
-                        dense
-                        icon="search"
-                        size="xs"
-                        class="tw:ml-1 tw:p-[0.12rem]! tw:rounded! tw:absolute! tw:right-2! tw:text-[var(--o2-text-1)]! tw:bg-[var(--o2-card-bg-solid)]!"
-                        data-test="service-graph-side-panel-view-traces-btn"
-                        @click.stop="
-                          navigateToTraces({
-                            operationName: row._name,
-                            errorsOnly: column.id === 'errors',
-                            minDurationMicros:
-                              column.id === 'p99'
-                                ? row._p99
-                                : column.id === 'p95'
-                                  ? row._p95
-                                  : column.id === 'p75'
-                                    ? row._p75
-                                    : undefined,
-                          })
-                        "
-                      >
-                        <q-tooltip>View in Traces</q-tooltip>
-                      </q-btn>
-                    </template>
-                    <template #empty>
-                      <div
-                        class="tw:text-xs tw:italic tw:py-2 tw:text-center"
-                        style="color: var(--o2-text-secondary)"
-                      >
-                        No operations found
-                      </div>
-                    </template>
-                  </TenstackTable>
-                </div>
-              </template>
-            </q-tab-panel>
-
-            <!-- Nodes Tab -->
-            <!-- Dynamic OTEL resource tabs (Pods, Nodes, Hosts, Containers, Functions, ECS Tasks…) -->
-            <q-tab-panel
+              :label="t('traces.serviceGraphNodeSidePanel.operations')"
+              class="capitalize"
+              data-test="service-graph-node-panel-tab-operations"
+            />
+            <!-- Agent behavior (loops/failures) — only for agent nodes on
+                   enterprise builds. See Agent Signals design §4b. -->
+            <OTab
+              v-if="showBehaviorTab"
+              name="behavior"
+              :label="t('aiObservability.behavior.node.tabLabel')"
+              class="capitalize"
+              data-test="service-graph-node-panel-tab-behavior"
+            />
+            <OTab
               v-for="cfg in activeResourceTabConfigs"
               :key="cfg.id"
               :name="cfg.id"
-              class="tw:p-0! panel-section"
-              :data-test="`service-graph-side-panel-${cfg.id}`"
-            >
-              <div
-                v-if="resourceTabLoading[cfg.id]"
-                class="tw:flex tw:items-center tw:gap-2 tw:py-3 tw:text-sm"
-                style="color: var(--o2-text-secondary)"
+              :label="cfg.label"
+              class="capitalize"
+              :data-test="`service-graph-node-panel-tab-${cfg.id}`"
+            />
+            <OTab
+              v-if="!isInferred"
+              name="metrics"
+              :label="t('traces.serviceGraphNodeSidePanel.metrics')"
+              class="capitalize"
+              data-test="service-graph-node-panel-tab-metrics"
+            />
+          </OTabs>
+
+          <!-- Resource tabs dropdown — shows/hides individual OTEL resource tabs -->
+          <!-- Hidden for inferred services (they have fixed tabs from the registry) -->
+          <ODropdown
+            v-if="!isInferred && availableResourceTabConfigs.length > 0"
+            side="bottom"
+            align="end"
+          >
+            <template #trigger>
+              <OButton
+                variant="ghost"
+                size="icon-sm"
+                data-test="service-graph-node-panel-workload-fields-btn"
               >
-                <q-spinner color="primary" size="sm" />
-                <span>Loading {{ cfg.label.toLowerCase() }}...</span>
-              </div>
-              <template v-else>
+                <OIcon name="tune" size="sm" />
+                <OTooltip :content="t('common.resources')" />
+              </OButton>
+            </template>
+            <div class="min-w-48!" data-test="service-graph-node-panel-workload-fields-menu">
+              <template v-for="env in detectedEnvironments" :key="env.key">
                 <div
-                  v-if="!resourceTabData[cfg.id]?.length"
-                  class="tw:text-xs tw:italic tw:py-2 tw:text-center"
-                  style="color: var(--o2-text-secondary)"
+                  class="text-muted-foreground px-3 py-1.5! pb-0 text-xs tracking-wide uppercase"
                 >
-                  No {{ cfg.label.toLowerCase() }} data found
+                  {{ env.label }}
                 </div>
-                <div
-                  v-else
-                  class="tw:overflow-hidden tw:rounded"
-                  :data-test="`service-graph-side-panel-${cfg.id}-table`"
+                <ODropdownItem
+                  v-for="cfg in availableResourceTabConfigs.filter(
+                    (c) => c.environment === env.key,
+                  )"
+                  :key="cfg.id"
+                  :data-test="`service-graph-node-panel-workload-field-${cfg.id}`"
+                  class="h-7.5! min-h-7.5! px-[0.325rem]!"
+                  @select="
+                    (e) => {
+                      e.preventDefault();
+                      toggleWorkloadField(cfg.id);
+                    }
+                  "
                 >
-                  <TenstackTable
-                    :columns="buildEntityTableColumns(cfg.colId, cfg.colLabel)"
-                    :rows="buildResourceTableRows(cfg)"
-                    :loading="false"
-                    :default-columns="false"
-                    :enable-column-reorder="false"
-                    :enable-row-expand="false"
-                    :enable-text-highlight="false"
-                    :enable-status-bar="false"
-                    :enable-ai-context-button="false"
-                    :row-height="28"
-                    @click:data-row="
-                      (row: any) =>
-                        navigateToTraces({
-                          resourceFilter: {
-                            field: cfg.groupField,
-                            value: row._name,
-                          },
-                        })
+                  <template #icon-left>
+                    <span @click.stop>
+                      <OCheckbox v-model="selectedWorkloadFields" :value="cfg.id" size="xs" />
+                    </span>
+                  </template>
+                  <span class="text-xs">
+                    {{ cfg.label }}
+                    <OTooltip :content="raw(cfg.groupField)" />
+                  </span>
+                </ODropdownItem>
+              </template>
+            </div>
+          </ODropdown>
+        </div>
+        <OTabPanels v-model="activeTab" animated>
+          <!-- Operations Tab -->
+          <OTabPanel
+            name="operations"
+            class="panel-section mb-0! p-0!"
+            data-test="service-graph-side-panel-recent-operations"
+          >
+            <div
+              v-if="recentOperations.length === 0 && !loadingOperations"
+              class="text-text-secondary flex flex-col items-center justify-center py-16 text-center text-sm"
+            >
+              {{ t("traces.serviceGraphNodeSidePanel.noOperationsFound") }}
+            </div>
+            <div
+              v-else-if="recentOperations.length > 0 || loadingOperations"
+              class="svc-panel-table overflow-hidden"
+              data-test="service-graph-side-panel-operations-table"
+            >
+              <OTable
+                :columns="operationsTableColumns"
+                :data="sortedOperationsTableRows"
+                sorting="server"
+                :sort-by="sortBy"
+                :sort-order="sortOrderProp"
+                :loading="loadingOperations"
+                :default-columns="false"
+                :row-height="38"
+                :show-global-filter="false"
+                :fill-height="false"
+                pagination="none"
+                @sort-change="(p: any) => handleSortChange(p.column)"
+                @row-click="
+                  (row: any) =>
+                    navigateToTraces({
+                      operationName: row.operation,
+                      callerService: isInferred ? row.caller : undefined,
+                    })
+                "
+              >
+                <template #cell-errors="{ row }">
+                  <span :class="row.errors > 0 ? 'text-status-negative font-semibold' : ''">{{
+                    row.errors
+                  }}</span>
+                </template>
+                <template #cell-p99="{ row }">
+                  <ServiceCatalogBarCell
+                    :value="row.p99"
+                    :max="rowMaxes(sortedOperationsTableRows, ['p99']).p99"
+                    :label="raw(formatOperationLatency(row.p99))"
+                    variant="warning"
+                    align="right"
+                    inline
+                  />
+                </template>
+                <template #cell-p95="{ row }">
+                  <ServiceCatalogBarCell
+                    :value="row.p95"
+                    :max="rowMaxes(sortedOperationsTableRows, ['p95']).p95"
+                    :label="raw(formatOperationLatency(row.p95))"
+                    align="right"
+                    inline
+                  />
+                </template>
+                <template #cell-p75="{ row }">
+                  <ServiceCatalogBarCell
+                    :value="row.p75"
+                    :max="rowMaxes(sortedOperationsTableRows, ['p75']).p75"
+                    :label="raw(formatOperationLatency(row.p75))"
+                    align="right"
+                    inline
+                  />
+                </template>
+                <template #cell-hover-actions="{ row, column, active }">
+                  <OButton
+                    v-if="active"
+                    variant="ghost"
+                    size="icon"
+                    data-test="service-graph-side-panel-view-traces-btn"
+                    @click.stop="
+                      navigateToTraces({
+                        operationName: row.operation,
+                        callerService: isInferred ? row.caller : undefined,
+                        errorsOnly: column.id === 'errors',
+                        minDurationMicros: isDurationColumn(column.id)
+                          ? (row as Record<string, any>)[column.id]
+                          : undefined,
+                      })
                     "
                   >
-                    <template #cell-actions="{ row, column, active }">
-                      <q-btn
-                        v-if="active"
-                        flat
-                        dense
-                        icon="search"
-                        size="xs"
-                        class="tw:ml-1 tw:p-[0.12rem]! tw:rounded! tw:absolute! tw:right-2! tw:text-[var(--o2-text-1)]! tw:bg-[var(--o2-card-bg-solid)]!"
-                        :data-test="`service-graph-side-panel-${cfg.id}-view-traces-btn`"
-                        @click.stop="
-                          navigateToTraces({
-                            resourceFilter: {
-                              field: cfg.groupField,
-                              value: row._name,
-                            },
-                            errorsOnly: column.id === 'errors',
-                            minDurationMicros:
-                              column.id === 'p99'
-                                ? row._p99
-                                : column.id === 'p95'
-                                  ? row._p95
-                                  : column.id === 'p75'
-                                    ? row._p75
-                                    : undefined,
-                          })
-                        "
-                      >
-                        <q-tooltip>View in Traces</q-tooltip>
-                      </q-btn>
-                    </template>
-                    <template #cell-errors="{ item }">
-                      <span
-                        :class="
-                          item.errors > 0
-                            ? 'tw:text-[var(--q-negative)] tw:font-semibold'
-                            : ''
-                        "
-                        >{{ item.errors }}</span
-                      >
-                    </template>
-                    <template #cell-p99="{ item }">
-                      <span
-                        :class="
-                          item.p99 !== 'N/A'
-                            ? 'tw:text-[var(--o2-latency-p99)]'
-                            : ''
-                        "
-                        >{{ item.p99 }}</span
-                      >
-                    </template>
-                    <template #cell-p95="{ item }">
-                      <span
-                        :class="
-                          item.p95 !== 'N/A'
-                            ? 'tw:text-[var(--o2-latency-p95)]'
-                            : ''
-                        "
-                        >{{ item.p95 }}</span
-                      >
-                    </template>
-                    <template #cell-p75="{ item }">
-                      <span
-                        :class="
-                          item.p75 !== 'N/A'
-                            ? 'tw:text-[var(--o2-latency-p75)]'
-                            : ''
-                        "
-                        >{{ item.p75 }}</span
-                      >
-                    </template>
-                    <template #empty>
-                      <div
-                        class="tw:text-xs tw:italic tw:py-2 tw:text-center"
-                        style="color: var(--o2-text-secondary)"
-                      >
-                        No {{ cfg.label.toLowerCase() }} data found
-                      </div>
-                    </template>
-                  </TenstackTable>
-                </div>
-              </template>
-            </q-tab-panel>
+                    <OIcon name="search" size="xs" />
+                    <OTooltip :content="t('traces.serviceGraphNodeSidePanel.viewInTraces')" />
+                  </OButton>
+                </template>
+                <template #empty>
+                  <div
+                    class="text-text-secondary flex flex-col items-center justify-center py-16 text-center text-sm"
+                  >
+                    {{ t("traces.serviceGraphNodeSidePanel.noOperationsFound") }}
+                  </div>
+                </template>
+              </OTable>
+            </div>
+          </OTabPanel>
 
-            <!-- Metrics Tab -->
-            <q-tab-panel
-              name="metrics"
-              class="tw:p-0! panel-section tw:mb-0! tw:h-full!"
-              data-test="service-graph-side-panel-metrics"
+          <!-- Behavior Tab (agent nodes, enterprise) -->
+          <OTabPanel
+            v-if="showBehaviorTab"
+            name="behavior"
+            class="panel-section mb-0! p-0!"
+            data-test="service-graph-side-panel-behavior"
+          >
+            <AgentNodeBehaviorTab
+              :agent-name="behaviorAgentName"
+              :source-stream="streamFilter"
+              :start-time="timeRange.startTime"
+              :end-time="timeRange.endTime"
+            />
+          </OTabPanel>
+
+          <!-- Nodes Tab -->
+          <!-- Dynamic OTEL resource tabs (Pods, Nodes, Hosts, Containers, Functions, ECS Tasks…) -->
+          <OTabPanel
+            v-for="cfg in activeResourceTabConfigs"
+            :key="cfg.id"
+            :name="cfg.id"
+            class="panel-section mb-3 p-0!"
+            :data-test="`service-graph-side-panel-${cfg.id}`"
+          >
+            <div
+              v-if="!resourceTabData[cfg.id]?.length && !resourceTabLoading[cfg.id]"
+              class="text-text-secondary flex flex-col items-center justify-center py-16 text-center text-sm"
             >
-              <!-- Loading state -->
-              <div
-                v-if="metricsCorrelationLoading"
-                class="tw:flex tw:items-center tw:gap-2 tw:py-3 tw:text-sm"
-                style="color: var(--o2-text-secondary)"
-                data-test="service-graph-side-panel-metrics-loading"
-              >
-                <q-spinner color="primary" size="sm" />
-                <span>Loading metrics...</span>
-              </div>
-
-              <!-- Error state -->
-              <div
-                v-else-if="metricsCorrelationError"
-                class="tw:flex tw:flex-col tw:items-center tw:gap-3 tw:py-6 tw:text-center tw:text-sm"
-                style="color: var(--o2-text-secondary)"
-                data-test="service-graph-side-panel-metrics-error"
-              >
-                <span>{{ metricsCorrelationError }}</span>
-                <q-btn
-                  flat
-                  dense
-                  no-caps
-                  size="sm"
-                  label="Retry"
-                  color="primary"
-                  data-test="service-graph-side-panel-metrics-retry-btn"
-                  @click="fetchMetricsCorrelation(true)"
-                />
-              </div>
-
-              <!-- Metrics dashboard -->
-              <TelemetryCorrelationDashboard
-                v-else-if="metricsCorrelationData"
-                mode="embedded-tabs"
-                external-active-tab="metrics"
-                :service-name="metricsCorrelationData.serviceName"
-                :matched-dimensions="metricsCorrelationData.matchedDimensions"
-                :additional-dimensions="
-                  metricsCorrelationData.additionalDimensions
+              {{
+                t("traces.serviceGraphNodeSidePanel.noResourceDataFound", {
+                  resource: cfg.label.toLowerCase(),
+                })
+              }}
+            </div>
+            <div
+              v-else-if="resourceTabData[cfg.id]?.length > 0 || resourceTabLoading[cfg.id]"
+              class="svc-panel-table overflow-hidden"
+              :data-test="`service-graph-side-panel-${cfg.id}-table`"
+            >
+              <OTable
+                :columns="buildEntityTableColumns(cfg.colId, cfg.colLabel)"
+                :data="sortResourceRows(buildResourceTableRows(cfg))"
+                sorting="server"
+                :sort-by="sortBy"
+                :sort-order="sortOrderProp"
+                :loading="resourceTabLoading[cfg.id]"
+                :default-columns="false"
+                :row-height="38"
+                :show-global-filter="false"
+                :fill-height="false"
+                pagination="none"
+                @sort-change="(p: any) => handleSortChange(p.column)"
+                @row-click="
+                  (row: any) =>
+                    navigateToTraces({
+                      resourceFilter: cfg.fields
+                        ? { fields: cfg.fields, value: row[cfg.colId] }
+                        : { field: cfg.groupField, value: row[cfg.colId] },
+                    })
                 "
-                :metric-streams="metricsCorrelationData.metricStreams"
-                :log-streams="metricsCorrelationData.logStreams"
-                :trace-streams="metricsCorrelationData.traceStreams"
-                :source-stream="streamFilter"
-                source-type="traces"
-                :time-range="telemetryTimeRange"
-                :hide-dimension-filters="true"
-                :metric-group-definitions="metricGroupResources"
-                :panelHeight="12"
-                :panelWidth="96"
-                data-test="service-graph-side-panel-metrics-dashboard"
-              />
-
-              <!-- Empty state -->
-              <div
-                v-else-if="metricsCorrelationLoaded"
-                class="tw:text-xs tw:italic tw:py-2 tw:text-center"
-                style="color: var(--o2-text-secondary)"
-                data-test="service-graph-side-panel-metrics-empty"
               >
-                No metrics available for this service.
-              </div>
-            </q-tab-panel>
-          </q-tab-panels>
-        </template>
-      </div>
+                <template #cell-hover-actions="{ row, column, active }">
+                  <OButton
+                    v-if="active"
+                    variant="ghost"
+                    size="icon"
+                    :data-test="`service-graph-side-panel-${cfg.id}-view-traces-btn`"
+                    @click.stop="
+                      navigateToTraces({
+                        resourceFilter: cfg.fields
+                          ? { fields: cfg.fields, value: row[cfg.colId] }
+                          : { field: cfg.groupField, value: row[cfg.colId] },
+                        errorsOnly: column.id === 'errors',
+                        minDurationMicros: isDurationColumn(column.id) ? row[column.id] : undefined,
+                      })
+                    "
+                  >
+                    <OIcon name="search" size="xs" />
+                    <OTooltip :content="t('traces.serviceGraphNodeSidePanel.viewInTraces')" />
+                  </OButton>
+                </template>
+                <template #cell-errors="{ row }">
+                  <span :class="row.errors > 0 ? 'text-status-negative font-semibold' : ''">{{
+                    row.errors
+                  }}</span>
+                </template>
+                <template #cell-p99="{ row }">
+                  <ServiceCatalogBarCell
+                    :value="row.p99"
+                    :max="rowMaxes(sortResourceRows(buildResourceTableRows(cfg)), ['p99']).p99"
+                    :label="raw(formatOperationLatency(row.p99))"
+                    variant="warning"
+                    align="right"
+                    inline
+                  />
+                </template>
+                <template #cell-p95="{ row }">
+                  <ServiceCatalogBarCell
+                    :value="row.p95"
+                    :max="rowMaxes(sortResourceRows(buildResourceTableRows(cfg)), ['p95']).p95"
+                    :label="raw(formatOperationLatency(row.p95))"
+                    align="right"
+                    inline
+                  />
+                </template>
+                <template #cell-p75="{ row }">
+                  <ServiceCatalogBarCell
+                    :value="row.p75"
+                    :max="rowMaxes(sortResourceRows(buildResourceTableRows(cfg)), ['p75']).p75"
+                    :label="raw(formatOperationLatency(row.p75))"
+                    align="right"
+                    inline
+                  />
+                </template>
+                <template #empty>
+                  <div
+                    class="text-text-secondary flex flex-col items-center justify-center py-16 text-center text-sm"
+                  >
+                    {{
+                      t("traces.serviceGraphNodeSidePanel.noResourceDataFound", {
+                        resource: cfg.label.toLowerCase(),
+                      })
+                    }}
+                  </div>
+                </template>
+              </OTable>
+            </div>
+          </OTabPanel>
+
+          <!-- Metrics Tab -->
+          <OTabPanel
+            v-if="!isInferred"
+            name="metrics"
+            class="panel-section mb-0! h-full! p-0!"
+            data-test="service-graph-side-panel-metrics"
+          >
+            <!-- Loading state — shimmer skeletons standing in for the metric charts -->
+            <div
+              v-if="metricsCorrelationLoading"
+              class="px-page-edge flex flex-col gap-3 py-4"
+              data-test="service-graph-side-panel-metrics-loading"
+            >
+              <OSkeleton type="text" class="h-4 w-40!" />
+              <OSkeleton type="rect" class="h-40 w-full!" />
+              <OSkeleton type="rect" class="h-40 w-full!" />
+            </div>
+
+            <!-- Error state -->
+            <div
+              v-else-if="metricsCorrelationError"
+              class="text-text-secondary flex flex-col items-center gap-3 py-6 text-center text-sm"
+              data-test="service-graph-side-panel-metrics-error"
+            >
+              <span>{{ metricsCorrelationError }}</span>
+              <OButton
+                variant="ghost-primary"
+                size="sm"
+                data-test="service-graph-side-panel-metrics-retry-btn"
+                @click="fetchMetricsCorrelation(true)"
+                >{{ t("traces.serviceGraphNodeSidePanel.retry") }}</OButton
+              >
+            </div>
+
+            <!-- Metrics dashboard -->
+            <TelemetryCorrelationDashboard
+              v-else-if="metricsCorrelationData"
+              mode="embedded-tabs"
+              external-active-tab="metrics"
+              :service-name="metricsCorrelationData.serviceName"
+              :matched-dimensions="metricsCorrelationData.matchedDimensions"
+              :additional-dimensions="metricsCorrelationData.additionalDimensions"
+              :matched-set-id="metricsCorrelationData.matchedSetId"
+              :chip-dimensions="metricsCorrelationData.chipDimensions"
+              :source-event="metricsCorrelationData.sourceEvent"
+              :metric-streams="metricsCorrelationData.metricStreams"
+              :log-streams="metricsCorrelationData.logStreams"
+              :trace-streams="metricsCorrelationData.traceStreams"
+              :source-stream="streamFilter"
+              source-type="traces"
+              :time-range="telemetryTimeRange"
+              :hide-dimension-filters="true"
+              :metric-group-definitions="metricGroupResources"
+              :panelHeight="12"
+              :panelWidth="96"
+              data-test="service-graph-side-panel-metrics-dashboard"
+            />
+
+            <!-- Empty state — standard OEmptyState -->
+            <OEmptyState
+              v-else-if="metricsCorrelationLoaded"
+              size="inline"
+              icon="insights"
+              :title="t('traces.serviceGraphNodeSidePanel.noMetricsAvailable')"
+              hide-action
+              class="py-16"
+              data-test="service-graph-side-panel-metrics-empty"
+            />
+          </OTabPanel>
+        </OTabPanels>
+      </template>
     </div>
-  </transition>
+  </ODrawer>
 
   <!-- Telemetry Correlation Dialog (reuses the same component as "show related" on logs page) -->
   <TelemetryCorrelationDashboard
@@ -607,6 +576,8 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     :service-name="correlationData.serviceName"
     :matched-dimensions="correlationData.matchedDimensions"
     :additional-dimensions="correlationData.additionalDimensions"
+    :matched-set-id="correlationData.matchedSetId"
+    :chip-dimensions="correlationData.chipDimensions"
     :log-streams="correlationData.logStreams"
     :metric-streams="correlationData.metricStreams"
     :trace-streams="correlationData.traceStreams"
@@ -617,25 +588,28 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts">
-import {
-  defineComponent,
-  computed,
-  ref,
-  watch,
-  defineAsyncComponent,
-  type PropType,
-} from "vue";
+import OTabs from "@/lib/navigation/Tabs/OTabs.vue";
+import OTab from "@/lib/navigation/Tabs/OTab.vue";
+import OTabPanels from "@/lib/navigation/Tabs/OTabPanels.vue";
+import OTabPanel from "@/lib/navigation/Tabs/OTabPanel.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownItem from "@/lib/overlay/Dropdown/ODropdownItem.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
+import { defineComponent, computed, ref, watch, defineAsyncComponent, type PropType } from "vue";
 import { useStore } from "vuex";
-import { useQuasar } from "quasar";
 import { useRouter } from "vue-router";
 import searchService from "@/services/search";
-import streamService from "@/services/stream";
+import useStreams from "@/composables/useStreams";
 import {
   correlate as correlateStreams,
   getSemanticGroups,
   getDimensionAnalytics,
   type FieldAlias,
   type FoundGroup,
+  buildChipDimensionsFromFilters,
 } from "@/services/service_streams";
 import { ENV_SEGMENTS, groupEnvKey } from "@/utils/serviceStreamEnvs";
 import {
@@ -650,8 +624,21 @@ import {
   type MetricGroupDefinition,
   K8S_METRIC_GROUP_DEFINITIONS,
 } from "@/utils/metrics/metricGrouping";
+import { buildWorkloadChipDimensions } from "@/composables/useMetricSubjectButtons";
+import { genAiAgentsQuery } from "@/services/gen-ai-agent-mapping.queries";
+import { queryClient } from "@/composables/query/queryClient";
+import OAgentBadges from "@/components/shared/OAgentBadges.vue";
+import { normalizeSeverity } from "@/utils/sourceEventSeverity";
 import DeployedCode from "@/components/icons/DeployedCode.vue";
-import { useI18n } from "vue-i18n";
+import { gt, useI18nTyped, raw, type I18nText, type I18nKey } from "@/types/i18n";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OCheckbox from "@/lib/forms/Checkbox/OCheckbox.vue";
+import OSeparator from "@/lib/core/Separator/OSeparator.vue";
+import OSkeleton from "@/lib/feedback/Skeleton/OSkeleton.vue";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import ServiceCatalogBarCell from "./components/ServiceCatalogBarCell.vue";
+import config from "@/aws-exports";
 
 const TelemetryCorrelationDashboard = defineAsyncComponent(
   () => import("@/plugins/correlation/TelemetryCorrelationDashboard.vue"),
@@ -661,8 +648,12 @@ const RenderDashboardCharts = defineAsyncComponent(
   () => import("@/views/Dashboards/RenderDashboardCharts.vue"),
 );
 
-const TenstackTable = defineAsyncComponent(
-  () => import("@/components/TenstackTable.vue"),
+const OTable = defineAsyncComponent(() => import("@/lib/core/Table/OTable.vue"));
+
+// Agent-scoped behavior signals shown on agent nodes (enterprise). Async so the
+// enterprise chunk only loads when an agent node's Behavior tab is opened.
+const AgentNodeBehaviorTab = defineAsyncComponent(
+  () => import("@/enterprise/views/AIObservability/AgentNodeBehaviorTab.vue"),
 );
 
 // ---------------------------------------------------------------------------
@@ -680,13 +671,156 @@ const TenstackTable = defineAsyncComponent(
 
 export interface ResourceTabConfig {
   id: string; // unique tab name (= FoundGroup.group_id)
-  label: string; // display label
+  label: I18nText; // display label
   groupField: string; // SQL GROUP BY field (= FoundGroup.aliases["traces"])
-  colLabel: string; // header of the first column (entity name)
+  colLabel: I18nText; // header of the first column (entity name)
   colId: string; // row property key for the entity name column
   environment: string; // env key derived from group_id first segment
   isDefault: boolean; // pre-selected when the environment is first detected
+  /** Fallback field chain for inferred service tabs. When set, the GROUP BY
+   *  expression is COALESCE(NULLIF(fields[0], ''), NULLIF(fields[1], ''), …).
+   *  When absent, groupField is used directly (existing OTEL resource tabs). */
+  fields?: string[];
 }
+
+// ---------------------------------------------------------------------------
+// Inferred Service Tabs — one entry per dependency type, with field fallback
+// chains that generate COALESCE expressions for both SELECT/GROUP BY and
+// the downstream filter clause.
+// ---------------------------------------------------------------------------
+/**
+ * Describes a resource tab rendered for an inferred service in the node detail panel.
+ *
+ * Each tab exposes a group of related span attributes (e.g. host info, database names)
+ * organised as a table. Because OTel semantic conventions have evolved across
+ * generations, a single conceptual attribute may map to several field names
+ * (e.g. host → `server_address`, `net_peer_name`, `net_peer_ip`, `network_peer_address`).
+ *
+ * The `fields` array defines a **fallback chain** — the first field found in the
+ * stream schema is used as both the GROUP BY column and the link target for View
+ * Traces drill-down. If multiple fields exist, they are assembled into a
+ * `COALESCE(NULLIF(f1, ''), NULLIF(f2, ''), ...)` expression so that rows with
+ * different generations of the same attribute still aggregate together.
+ */
+export interface InferredServiceTab {
+  /** Unique tab identifier, e.g. "hosts", "databases", "queries" */
+  id: string;
+  /** Pre-resolved label — only for names that read the same in every language. */
+  label?: I18nText;
+  /** Preferred over `label`. This registry is module-scope so it cannot call
+   *  t(); the mapper in setup() resolves the key. */
+  labelKey?: I18nKey;
+  /** Key for the column header shown in the resource table, e.g. "Host",
+   *  "Database", "DB Operation". A key, not text: this registry is module-scope
+   *  so it cannot call t() — the mapper in setup() resolves it, like `labelKey`. */
+  colLabelKey: I18nKey;
+  /**
+   * Fallback-ordered field names for the attribute column, evaluated against the
+   * stream schema at runtime. The first field present in the schema wins as the
+   * primary GROUP BY column; additional matching fields contribute to a COALESCE
+   * expression for unified aggregation.
+   */
+  fields: string[];
+}
+
+/**
+ * Registry of inferred-service resource tabs, keyed by `service_type`.
+ *
+ * Each entry defines the resource breakdowns available for that service type.
+ * At runtime, tabs are filtered against the target stream's schema so that
+ * only tabs whose `fields` intersect the schema are shown to the user.
+ *
+ * OTel semantic convention coverage:
+ * | Service Type | Tabs          | Attribute Generations                                     |
+ * |-------------|---------------|-----------------------------------------------------------|
+ * | database    | Hosts         | server_address, net_peer_*, network_peer_address          |
+ * |             | Databases     | db_namespace, db_name (stabilised OTel DB)                |
+ * |             | Queries       | db_operations (OTel DB operations)                        |
+ * | queue       | Hosts         | server_address, net_peer_*, network_peer_address          |
+ * |             | Destinations  | messaging_destination_name, messaging_destination         |
+ * | rpc         | Hosts         | server_address, net_peer_*, network_peer_address          |
+ * |             | RPC Services  | rpc_service, rpc_method                                   |
+ * | http        | Hosts         | server_address, net_peer_*, network_peer_address          |
+ *
+ * When adding a new dependency type, add its entry here — the panel will
+ * automatically render the appropriate resource tabs.
+ */
+const INFERRED_SERVICE_TABS: Record<string, InferredServiceTab[]> = {
+  database: [
+    {
+      id: "hosts",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabHosts",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colHost",
+      fields: ["server_address", "net_peer_name", "net_peer_ip", "network_peer_address"],
+    },
+    {
+      id: "databases",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabDatabases",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colDatabase",
+      fields: ["db_namespace", "db_name"],
+    },
+    {
+      id: "queries",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabQueries",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colDbOperation",
+      fields: ["db_operations"],
+    },
+  ],
+  queue: [
+    {
+      id: "hosts",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabHosts",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colHost",
+      fields: ["server_address", "net_peer_name", "net_peer_ip", "network_peer_address"],
+    },
+    {
+      id: "destinations",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabDestinations",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colDestination",
+      fields: ["messaging_destination_name", "messaging_destination"],
+    },
+  ],
+  rpc: [
+    {
+      id: "hosts",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabHosts",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colHost",
+      fields: ["server_address", "net_peer_name", "net_peer_ip", "network_peer_address"],
+    },
+    {
+      id: "rpc_services",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabRpcServices",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colRpcService",
+      fields: ["rpc_service"],
+    },
+  ],
+  external: [
+    {
+      id: "hosts",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabHosts",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colHost",
+      fields: ["server_address", "net_peer_name", "net_peer_ip", "network_peer_address"],
+    },
+    {
+      id: "urls",
+      labelKey: "traces.serviceGraphNodeSidePanel.tabUrls",
+      colLabelKey: "traces.serviceGraphNodeSidePanel.colUrl",
+      fields: ["http_url", "url_full"],
+    },
+  ],
+};
+
+/** Build a COALESCE expression from a fallback field chain.
+ *  e.g. ["server_address", "net_peer_name"]
+ *    → "COALESCE(NULLIF(server_address, ''), NULLIF(net_peer_name, ''))" */
+const buildCoalesceExpr = (fields: string[]): string =>
+  fields.map((f) => `NULLIF(${f}, '')`).join(", ");
+
+/** Build a WHERE clause fragment to exclude rows where all fallback fields are null.
+ *  e.g. ["server_address", "net_peer_name"]
+ *    → "(server_address IS NOT NULL OR net_peer_name IS NOT NULL)" */
+const buildNullCheck = (fields: string[]): string =>
+  fields.map((f) => `${f} IS NOT NULL`).join(" OR ");
 
 export interface ResourceRow {
   name: string;
@@ -728,11 +862,21 @@ const DEFAULT_GROUP_FIELDS = new Set([
 // Generic environment display labels for non-primary-platform segments.
 // Primary platform labels (k8s/aws/azure/gcp) come from the shared ENV_SEGMENTS.
 const GENERIC_ENV_LABELS: Record<string, string> = {
-  host: "Host",
-  container: "Container",
-  faas: "Serverless",
-  process: "Runtime",
-  cloud: "Cloud",
+  get host() {
+    return gt("traces.serviceGraphNodeSidePanel.envHost");
+  },
+  get container() {
+    return gt("traces.serviceGraphNodeSidePanel.envContainer");
+  },
+  get faas() {
+    return gt("traces.serviceGraphNodeSidePanel.envServerless");
+  },
+  get process() {
+    return gt("traces.serviceGraphNodeSidePanel.envRuntime");
+  },
+  get cloud() {
+    return gt("traces.serviceGraphNodeSidePanel.envCloud");
+  },
 };
 
 /** Gets a display label for any environment key, platform or generic. */
@@ -744,9 +888,27 @@ const envLabel = (envKey: string): string =>
 export default defineComponent({
   name: "ServiceGraphNodeSidePanel",
   components: {
+    OTag,
+    OSeparator,
+    OSkeleton,
+    OEmptyState,
+    OTabs,
+    OTab,
+    OTabPanels,
+    OTabPanel,
+    OButton,
+    ODropdown,
+    ODropdownItem,
+    ODrawer,
     TelemetryCorrelationDashboard,
-    TenstackTable,
+    OTable,
     RenderDashboardCharts,
+    OTooltip,
+    OCheckbox,
+    OIcon,
+    ServiceCatalogBarCell,
+    AgentNodeBehaviorTab,
+    OAgentBadges,
   },
   props: {
     selectedNode: {
@@ -769,13 +931,17 @@ export default defineComponent({
       type: String,
       required: true,
     },
+    containerEl: {
+      type: Object as PropType<HTMLElement | null>,
+      default: null,
+    },
   },
   emits: ["close", "view-traces"],
   setup(props, { emit }) {
     const store = useStore();
-    const $q = useQuasar();
-    const { t } = useI18n();
+    const { t } = useI18nTyped();
     const router = useRouter();
+    const { getStream } = useStreams(t);
 
     // RED Charts State
     const dashboardData = ref<any>({});
@@ -810,11 +976,110 @@ export default defineComponent({
     // Returns the escaped service name value for use in SQL WHERE clauses
     const buildServiceName = (): string => {
       if (!props.selectedNode) return "";
-      const name =
-        props.selectedNode.name ||
-        props.selectedNode.label ||
-        props.selectedNode.id;
+      const name = props.selectedNode.name || props.selectedNode.label || props.selectedNode.id;
       return escapeSingleQuotes(name);
+    };
+
+    // Shared cache of stream schema field names — populated by resolveStreamSchema,
+    // consumed by serviceNameField (model column resolution), resolveWorkloadFields
+    // and inferredTabConfigs. Declared here (ahead of serviceNameField) so the
+    // computed can read it without a temporal-dead-zone error at mount.
+    const streamFieldSet = ref<Set<string>>(new Set());
+
+    /**
+     * Returns the SQL expression for the node's identity column, used in WHERE
+     * clauses (`{expr} = 'name'`). A node falls into one of three families, keyed
+     * by `service_type`:
+     *
+     * - **Instrumented service** (`service_type` absent) → `service_name`.
+     * - **Inferred dependency** (`database`/`queue`/`rpc`/`external`) → discovered
+     *   from span peer attributes, keyed by `infer_service_name`.
+     * - **GenAI entity** (`agent`/`tool`/`model`) → derived from `gen_ai_*` columns.
+     *   `agent`/`tool` have a single column. `model` may land in either
+     *   `gen_ai_request_model` or `gen_ai_response_model` depending on the vendor
+     *   (Langfuse/OpenInference populate only response), so it resolves to a
+     *   COALESCE over whichever of the two the stream schema actually has —
+     *   referencing a missing column is a hard "field not found" error.
+     *
+     * All call sites use this only as `WHERE {expr} = '...'`, so a COALESCE(...)
+     * expression is valid everywhere it is interpolated.
+     */
+    const GENAI_NAME_FIELD: Record<string, string> = {
+      agent: "gen_ai_agent_name",
+      tool: "gen_ai_tool_name",
+    };
+
+    // Depth of the parent-chain climb used to attribute a tool/model span to its
+    // OWNING agent. Must match the backend (processor.rs AGENT_INHERIT_DEPTH):
+    // the agent name usually lives on an ANCESTOR span (real Google ADK nests
+    // generate_content(agent)→chat→execute_tool), not on the tool/LLM span
+    // itself, so the caller shown in this panel must climb the same way the graph
+    // edge does — otherwise the panel says the app called the tool while the
+    // graph correctly says the agent did.
+    const AGENT_INHERIT_DEPTH = 4;
+
+    // The nearest-ancestor-agent-or-service caller expression + chained ancestor
+    // LEFT JOINs, aliased to child `c` (p1 on c, p2 on p1, …). Mirrors query-4.
+    const genAiCallerClimb = (streamName: string) => {
+      const parts = ["c.gen_ai_agent_name"];
+      for (let k = 1; k <= AGENT_INHERIT_DEPTH; k++) parts.push(`p${k}.gen_ai_agent_name`);
+      parts.push("c.service_name");
+      const callerExpr = `COALESCE(${parts.join(", ")})`;
+      const joins = Array.from({ length: AGENT_INHERIT_DEPTH }, (_, i) => {
+        const k = i + 1;
+        const prev = k === 1 ? "c" : `p${k - 1}`;
+        return `LEFT JOIN "${streamName}" AS p${k} ON ${prev}.reference_parent_span_id = p${k}.span_id AND ${prev}.trace_id = p${k}.trace_id`;
+      }).join(" ");
+      return { callerExpr, joins };
+    };
+
+    /**
+     * The node's identity column expression, with every column prefixed by
+     * `alias` (e.g. `"c."` inside a self-join, `""` for a single-table query).
+     * The prefix is applied AT CONSTRUCTION from the known column names — callers
+     * never post-process the string, so there is no place for a column name to
+     * be missed. See `serviceNameField` for the family rules.
+     */
+    const identityField = (alias = ""): string => {
+      const st = props.selectedNode?.service_type;
+      if (!st) return `${alias}service_name`;
+      if (st === "model") {
+        // Prefer request.model, fall back to response.model; only include a
+        // column the schema has. If neither is known yet (schema unresolved),
+        // default to request.model — the query re-runs reactively once the
+        // schema fetch settles.
+        const fs = streamFieldSet.value;
+        const hasReq = fs.has("gen_ai_request_model");
+        const hasResp = fs.has("gen_ai_response_model");
+        if (hasReq && hasResp)
+          return `COALESCE(${alias}gen_ai_request_model, ${alias}gen_ai_response_model)`;
+        if (hasResp && !hasReq) return `${alias}gen_ai_response_model`;
+        return `${alias}gen_ai_request_model`;
+      }
+      return `${alias}${GENAI_NAME_FIELD[st] ?? "infer_service_name"}`;
+    };
+
+    // Single-table identity expression (unaliased) — used everywhere the query
+    // is a plain `FROM "{stream}"` with no join.
+    const serviceNameField = computed(() => identityField());
+
+    const hasCatalogServiceIdentity = computed(
+      () =>
+        Boolean(props.selectedNode?.service_type) &&
+        Object.prototype.hasOwnProperty.call(props.selectedNode ?? {}, "service_system"),
+    );
+
+    const serviceFilter = (alias = ""): string => {
+      const serviceName = buildServiceName();
+      let filter = `${identityField(alias)} = '${serviceName}'`;
+      if (!hasCatalogServiceIdentity.value) return filter;
+
+      filter += ` AND ${alias}infer_service_type = '${escapeSingleQuotes(props.selectedNode.service_type)}'`;
+      const serviceSystem = props.selectedNode.service_system;
+      if (serviceSystem) {
+        return `${filter} AND ${alias}infer_service_system = '${escapeSingleQuotes(serviceSystem)}'`;
+      }
+      return `${filter} AND (${alias}infer_service_system IS NULL OR ${alias}infer_service_system = '')`;
     };
 
     const loadDashboard = () => {
@@ -823,7 +1088,6 @@ export default defineComponent({
         return;
       }
 
-      const serviceName = buildServiceName();
       const streamName = props.streamFilter;
 
       selectedTimeObj.value = {
@@ -838,25 +1102,23 @@ export default defineComponent({
         },
       };
 
-      const convertedDashboard = convertDashboardSchemaVersion(
-        deepCopy(metrics),
-      );
-      const serviceFilter = `service_name = '${serviceName}'`;
+      const convertedDashboard = convertDashboardSchemaVersion(deepCopy(metrics));
+      const catalogServiceFilter = serviceFilter();
 
-      convertedDashboard.tabs[0].panels.forEach((panel: any, index) => {
+      convertedDashboard.tabs[0].panels.forEach((panel: any, index: number) => {
         let whereClause: string;
 
         if (panel.title === "Errors") {
-          whereClause = `WHERE span_status = 'ERROR' AND ${serviceFilter}`;
+          whereClause = `WHERE span_status = 'ERROR' AND ${catalogServiceFilter}`;
         } else {
-          whereClause = `WHERE ${serviceFilter}`;
+          whereClause = `WHERE ${catalogServiceFilter}`;
         }
 
         panel.layout.h = 10;
 
         let query = panel.queries[0].query
-          .replace("[STREAM_NAME]", `"${streamName}"`)
-          .replace("[WHERE_CLAUSE]", whereClause);
+          .replace("[STREAM_NAME]", () => `"${streamName}"`)
+          .replace("[WHERE_CLAUSE]", () => whereClause);
 
         // Use count(*) instead of approx_distinct(trace_id)
         query = query
@@ -883,9 +1145,7 @@ export default defineComponent({
       const panelTitle = data?.title || "Chart";
       if (
         panelId &&
-        (panelTitle === "Duration" ||
-          panelTitle === "Rate" ||
-          panelTitle === "Errors")
+        (panelTitle === "Duration" || panelTitle === "Rate" || panelTitle === "Errors")
       ) {
         localRangeFilters.value.set(panelId, {
           panelTitle,
@@ -932,7 +1192,7 @@ export default defineComponent({
       rangeFiltersVersion.value;
       const chips: {
         key: string;
-        label: string;
+        label: I18nText;
         type: "duration" | "error";
       }[] = [];
       localRangeFilters.value.forEach((f, key) => {
@@ -946,10 +1206,17 @@ export default defineComponent({
           chips.push({
             key,
             type: "duration",
-            label: `Duration: ${formatTimeWithSuffix(f.start)} – ${formatTimeWithSuffix(f.end)}`,
+            label: t("traces.serviceGraphNodeSidePanel.durationRange", {
+              start: formatTimeWithSuffix(f.start),
+              end: formatTimeWithSuffix(f.end),
+            }),
           });
         } else if (f.panelTitle === "Errors") {
-          chips.push({ key, type: "error", label: "Status: Error" });
+          chips.push({
+            key,
+            type: "error",
+            label: t("traces.serviceGraphNodeSidePanel.statusError"),
+          });
         }
       });
       return chips;
@@ -964,7 +1231,7 @@ export default defineComponent({
         if (f.panelTitle === "Errors") errorsOnly = true;
         if (f.panelTitle === "Duration" && f.start !== null && f.start > 0) {
           minDurationMicros = f.start;
-          maxDurationMicros = f.end;
+          maxDurationMicros = f.end ?? undefined;
         }
       });
 
@@ -975,10 +1242,21 @@ export default defineComponent({
     // appear in the metrics dashboard. Uses K8S_METRIC_GROUP_DEFINITIONS for OTel
     // semantic defaults; overrides the pods icon with the project-specific component.
     const metricGroupResources = ref<MetricGroupDefinition[]>(
-      K8S_METRIC_GROUP_DEFINITIONS.map((g) =>
-        g.id === "pods" ? { ...g, icon: DeployedCode } : g,
-      ),
+      K8S_METRIC_GROUP_DEFINITIONS.map((g) => (g.id === "pods" ? { ...g, icon: DeployedCode } : g)),
     );
+
+    // Semantic groups — fetched once for chip deduplication
+    const orgSemanticGroups = ref<FieldAlias[]>([]);
+    const loadOrgSemanticGroups = async () => {
+      if (orgSemanticGroups.value.length > 0) return;
+      try {
+        const org = store.state.selectedOrganization.identifier;
+        const resp = await getSemanticGroups(org);
+        orgSemanticGroups.value = resp.data || [];
+      } catch {
+        // non-fatal: chips won't be deduplicated but will still show
+      }
+    };
 
     // Metrics Correlation State
     const showTelemetryDialog = ref(false);
@@ -988,6 +1266,8 @@ export default defineComponent({
       serviceName: string;
       matchedDimensions: Record<string, string>;
       additionalDimensions: Record<string, string>;
+      matchedSetId?: string;
+      chipDimensions?: Record<string, string>;
       logStreams: any[];
       metricStreams: any[];
       traceStreams: any[];
@@ -1005,6 +1285,13 @@ export default defineComponent({
       serviceName: string;
       matchedDimensions: Record<string, string>;
       additionalDimensions: Record<string, string>;
+      matchedSetId?: string;
+      chipDimensions?: Record<string, string>;
+      sourceEvent?: {
+        timestamp?: number | string;
+        severity?: string;
+        message?: I18nText;
+      };
       logStreams: any[];
       metricStreams: any[];
       traceStreams: any[];
@@ -1020,10 +1307,9 @@ export default defineComponent({
 
       try {
         const org = store.state.selectedOrganization.identifier;
+        await loadOrgSemanticGroups();
         const serviceName =
-          props.selectedNode.name ||
-          props.selectedNode.label ||
-          props.selectedNode.id;
+          props.selectedNode.name || props.selectedNode.label || props.selectedNode.id;
 
         // Send service name directly to _correlate
         const correlateResponse = await correlateStreams(org, {
@@ -1034,7 +1320,7 @@ export default defineComponent({
 
         const data = correlateResponse.data;
         if (!data) {
-          correlationError.value = "No correlated streams found.";
+          correlationError.value = t("traces.serviceGraphNodeSidePanel.noCorrelatedStreams");
           correlationData.value = null;
           return;
         }
@@ -1043,17 +1329,19 @@ export default defineComponent({
           serviceName: data.service_name,
           matchedDimensions: data.matched_dimensions || {},
           additionalDimensions: data.additional_dimensions || {},
+          matchedSetId: data.matched_set_id,
+          chipDimensions: buildChipDimensionsFromFilters(data, orgSemanticGroups.value),
+          // No source row available here — subject chips will be added by metricsCorrelationData path
           logStreams: data.related_streams?.logs || [],
           metricStreams: data.related_streams?.metrics || [],
           traceStreams: data.related_streams?.traces || [],
         };
       } catch (err: any) {
         if (err.response?.status === 403) {
-          correlationError.value =
-            "Service Discovery is an enterprise feature.";
+          correlationError.value = t("traces.serviceGraphNodeSidePanel.enterpriseFeature");
         } else {
           correlationError.value =
-            err.message || "Failed to load service streams.";
+            err.message || t("traces.serviceGraphNodeSidePanel.failedToLoadStreams");
         }
         correlationData.value = null;
       } finally {
@@ -1070,48 +1358,8 @@ export default defineComponent({
       },
     );
 
-    // Extract semantic dimensions from a span for richer metric correlation
-    const extractSpanDimensions = (
-      span: Record<string, any>,
-    ): Record<string, string> => {
-      const dimensions: Record<string, string> = {};
-      if (span.service_name) dimensions["service"] = span.service_name;
-
-      const attributeMappings: Record<string, string> = {
-        k8s_namespace_name: "k8s-namespace",
-        "k8s.namespace.name": "k8s-namespace",
-        k8s_deployment_name: "k8s-deployment",
-        "k8s.deployment.name": "k8s-deployment",
-        k8s_pod_name: "k8s-pod",
-        "k8s.pod.name": "k8s-pod",
-        k8s_container_name: "k8s-container",
-        "k8s.container.name": "k8s-container",
-        k8s_node_name: "k8s-node",
-        "k8s.node.name": "k8s-node",
-        k8s_cluster_name: "k8s-cluster",
-        "k8s.cluster.name": "k8s-cluster",
-        host_name: "host-name",
-        "host.name": "host-name",
-        cloud_region: "cloud-region",
-        "cloud.region": "cloud-region",
-        cloud_availability_zone: "cloud-availability-zone",
-        "cloud.availability_zone": "cloud-availability-zone",
-        container_name: "container-name",
-        "container.name": "container-name",
-      };
-
-      for (const [attr, dim] of Object.entries(attributeMappings)) {
-        let service_attr = "service_" + attr;
-        if (span[service_attr] && !dimensions[dim]) {
-          dimensions[dim] = String(span[service_attr]);
-        }
-      }
-      return dimensions;
-    };
-
     // Fetch the most recent span for this service to extract rich semantic dimensions
     const fetchLatestSpan = async (): Promise<Record<string, any> | null> => {
-      const serviceName = buildServiceName();
       const streamName = props.streamFilter || "default";
       const org = store.state.selectedOrganization.identifier;
 
@@ -1120,7 +1368,7 @@ export default defineComponent({
           org_identifier: org,
           query: {
             query: {
-              sql: `SELECT * FROM "${streamName}" WHERE service_name = '${escapeSingleQuotes(serviceName)}' ORDER BY _timestamp DESC`,
+              sql: `SELECT * FROM "${streamName}" WHERE ${serviceFilter()} ORDER BY _timestamp DESC`,
               start_time: props.timeRange.startTime,
               end_time: props.timeRange.endTime,
               from: 0,
@@ -1166,21 +1414,46 @@ export default defineComponent({
           return;
         }
 
+        const spanSeverity = (() => {
+          if (!latestSpan) return undefined;
+          const ss =
+            typeof latestSpan.span_status === "string"
+              ? latestSpan.span_status.toUpperCase()
+              : null;
+          if (ss === "ERROR") return "ERROR";
+          return normalizeSeverity(latestSpan.severity_text ?? latestSpan.severity) ?? undefined;
+        })();
+
         metricsCorrelationData.value = {
           serviceName: data.service_name,
           matchedDimensions: data.matched_dimensions || {},
           additionalDimensions: data.additional_dimensions || {},
+          matchedSetId: data.matched_set_id,
+          chipDimensions: {
+            ...buildChipDimensionsFromFilters(data, orgSemanticGroups.value),
+            ...buildWorkloadChipDimensions(
+              data.matched_set_id,
+              orgSemanticGroups.value,
+              latestSpan ?? undefined,
+            ),
+          },
+          sourceEvent: latestSpan
+            ? {
+                timestamp: latestSpan.start_time ?? latestSpan._timestamp,
+                severity: spanSeverity,
+                message: latestSpan.operation_name,
+              }
+            : undefined,
           logStreams: data.related_streams?.logs || [],
           metricStreams: data.related_streams?.metrics || [],
           traceStreams: data.related_streams?.traces || [],
         };
       } catch (err: any) {
         if (err.response?.status === 403) {
-          metricsCorrelationError.value =
-            "Service Discovery is an enterprise feature.";
+          metricsCorrelationError.value = t("traces.serviceGraphNodeSidePanel.enterpriseFeature");
         } else {
           metricsCorrelationError.value =
-            err.message || "Failed to load metrics.";
+            err.message || t("traces.serviceGraphNodeSidePanel.failedToLoadMetrics");
         }
         metricsCorrelationData.value = null;
       } finally {
@@ -1189,7 +1462,12 @@ export default defineComponent({
       }
     };
 
-    // Reload RED charts when node, time range, stream, or visibility changes
+    // Reload RED charts when node, time range, stream, visibility — or the
+    // resolved identity column — changes. `serviceNameField` is in the deps
+    // because for a model node it depends on the stream schema (request vs
+    // response model column); the schema fetch settles AFTER the first render,
+    // so without re-running here the charts fire once with the wrong/absent
+    // column and error with "field not found".
     watch(
       () =>
         [
@@ -1197,6 +1475,7 @@ export default defineComponent({
           props.timeRange,
           props.streamFilter,
           props.visible,
+          serviceNameField.value,
         ] as const,
       ([, , , visible]) => {
         if (visible && props.selectedNode) {
@@ -1220,62 +1499,196 @@ export default defineComponent({
     });
     const loadingOperations = ref(false);
 
-    // Dynamic resource tabs state (replaces per-resource recentNodes/recentPods/loadingNodes/loadingPods)
+    // Dynamic resource tabs state
     const resourceTabData = ref<Record<string, ResourceRow[]>>({});
     const resourceTabLoading = ref<Record<string, boolean>>({});
     // Resource groups from getDimensionAnalytics that match the current stream schema
     // (after platform-priority filtering — see resolveWorkloadFields)
     const availableResourceTabConfigs = ref<ResourceTabConfig[]>([]);
-    // Tabs actually shown = those selected by the user in the dropdown
-    const activeResourceTabConfigs = computed(() =>
-      availableResourceTabConfigs.value.filter((c) =>
-        selectedWorkloadFields.value.includes(c.id),
-      ),
-    );
-    // Deduped list of environments detected from visible resource groups
-    const detectedEnvironments = computed<{ key: string; label: string }[]>(
-      () => {
-        const seen = new Set<string>();
-        const envs: { key: string; label: string }[] = [];
-        for (const cfg of availableResourceTabConfigs.value) {
-          if (!seen.has(cfg.environment)) {
-            seen.add(cfg.environment);
-            envs.push({
-              key: cfg.environment,
-              label: envLabel(cfg.environment),
-            });
-          }
-        }
-        return envs;
-      },
-    );
-
-    // Workload Field Discovery State
-    const resolvedWorkloadFields = ref<{ field: string; alias: FieldAlias }[]>(
-      [],
-    );
     // IDs of alias entries the user has checked in the dropdown
     const selectedWorkloadFields = ref<string[]>([]);
+
+    const schemaResolved = ref(false);
+
+    /** Fetch the trace stream schema and populate streamFieldSet.
+     *  Idempotent — skips if already resolved for the current stream.
+     *  Uses useStreams(t).getStream() which caches the schema in the Vuex store
+     *  so other components benefit from the cached data. */
+    const resolveStreamSchema = async () => {
+      if (
+        !props.visible ||
+        props.streamFilter === "all" ||
+        !props.streamFilter ||
+        schemaResolved.value
+      )
+        return;
+
+      try {
+        const stream = await getStream(props.streamFilter, "traces", true);
+        const schemaFields: { name: string; type: string }[] = stream?.schema || [];
+        streamFieldSet.value = new Set(schemaFields.map((f) => f.name));
+        schemaResolved.value = true;
+      } catch (err) {
+        console.error("[ServiceGraphNodeSidePanel] Failed to resolve stream schema:", err);
+        streamFieldSet.value = new Set();
+      }
+    };
+
+    // Inferred service tabs — built from INFERRED_SERVICE_TABS registry when
+    // the selected node has a service_type (database/queue/rpc/external).
+    // Each tab's fallback field chain is filtered to only include fields that
+    // actually exist in the stream schema. Tabs with zero surviving fields are
+    // dropped entirely.
+    const inferredTabConfigs = computed<ResourceTabConfig[]>(() => {
+      const st = props.selectedNode?.service_type as string | undefined;
+      if (!st) return [];
+      const tabs = INFERRED_SERVICE_TABS[st];
+      if (!tabs?.length) return [];
+      const fieldSet = streamFieldSet.value;
+      // If schema hasn't resolved yet, return empty — tabs appear once the
+      // schema fetch completes (reactive via streamFieldSet).
+      if (!schemaResolved.value) return [];
+      const resolved: ResourceTabConfig[] = [];
+      // named `tab`, not `t` — that would shadow the translator used just below
+      for (const tab of tabs) {
+        const present = tab.fields.filter((f) => fieldSet.has(f));
+        if (present.length === 0) continue;
+        resolved.push({
+          id: tab.id,
+          label: tab.labelKey ? t(tab.labelKey) : (tab.label ?? raw("")),
+          groupField: `COALESCE(${buildCoalesceExpr(present)})`,
+          colLabel: t(tab.colLabelKey),
+          colId: tab.id,
+          environment: "",
+          isDefault: true,
+          fields: present,
+        });
+      }
+      return resolved;
+    });
+
+    /** Whether the selected node is an inferred service (uninstrumented dependency). */
+    const isInferred = computed(() => !!props.selectedNode?.service_type);
+
+    // The clicked agent's display name (same value the graph node is keyed by
+    // and that AgentSignalDetailPanel filters on — see design §4b id-vs-name).
+    const behaviorAgentName = computed<string>(
+      () => props.selectedNode?.name || props.selectedNode?.label || props.selectedNode?.id || "",
+    );
+
+    // The Behavior tab (loop/failure signals) shows only for agent nodes on
+    // enterprise builds, and only when a concrete stream is selected (the
+    // signals stream is per-source-stream). The AgentNodeBehaviorTab itself
+    // degrades gracefully to a "feature off" hint if the rollup is disabled.
+    const showBehaviorTab = computed(
+      () =>
+        config.isEnterprise === "true" &&
+        props.selectedNode?.service_type === "agent" &&
+        props.streamFilter !== "all" &&
+        !!props.streamFilter,
+    );
+
+    // env/version for the clicked agent node. The graph topology doesn't carry
+    // these, so resolve them from the discovered-agents registry: fetch the
+    // agents for this stream and match the node's name. Cached per stream.
+    const agentEnvVersion = ref<{ env: string | null; version: string | null }>({
+      env: null,
+      version: null,
+    });
+    const loadAgentEnvVersion = async () => {
+      agentEnvVersion.value = { env: null, version: null };
+      if (
+        props.selectedNode?.service_type !== "agent" ||
+        !props.streamFilter ||
+        props.streamFilter === "all"
+      ) {
+        return;
+      }
+      try {
+        const org = store.state.selectedOrganization?.identifier;
+        if (!org) return;
+        const res = await queryClient.fetchQuery(
+          genAiAgentsQuery(
+            org,
+            Math.trunc(props.timeRange.startTime * 1000),
+            Math.trunc(props.timeRange.endTime * 1000),
+          ),
+        );
+        const match = res.agents.find(
+          (a) => a.source_stream === props.streamFilter && a.name === behaviorAgentName.value,
+        );
+        if (match) {
+          agentEnvVersion.value = {
+            env: match.env ?? null,
+            version: match.version ?? null,
+          };
+        }
+      } catch {
+        // Non-fatal: badges simply don't render if the lookup fails.
+      }
+    };
+    watch(
+      () => [props.selectedNode?.id, props.selectedNode?.service_type, props.streamFilter],
+      loadAgentEnvVersion,
+      { immediate: true },
+    );
+
+    // Tabs actually shown. For inferred services use the registry tabs;
+    // for instrumented services use the user-selected OTEL resource tabs.
+    const activeResourceTabConfigs = computed(() =>
+      isInferred.value
+        ? inferredTabConfigs.value
+        : availableResourceTabConfigs.value.filter((c) =>
+            selectedWorkloadFields.value.includes(c.id),
+          ),
+    );
+    // Deduped list of environments detected from visible resource groups
+    const detectedEnvironments = computed<{ key: string; label: string }[]>(() => {
+      const seen = new Set<string>();
+      const envs: { key: string; label: string }[] = [];
+      for (const cfg of availableResourceTabConfigs.value) {
+        if (!seen.has(cfg.environment)) {
+          seen.add(cfg.environment);
+          envs.push({
+            key: cfg.environment,
+            label: envLabel(cfg.environment),
+          });
+        }
+      }
+      return envs;
+    });
+
+    // Workload Field Discovery State
+    const resolvedWorkloadFields = ref<{ field: string; alias: FieldAlias }[]>([]);
+
+    // Toggle a workload field id in the selected set — invoked when the user
+    // selects the surrounding ODropdownItem (in addition to clicking the
+    // OCheckbox directly).
+    const toggleWorkloadField = (id: string) => {
+      const current = selectedWorkloadFields.value;
+      selectedWorkloadFields.value = current.includes(id)
+        ? current.filter((entry) => entry !== id)
+        : [...current, id];
+    };
 
     // Computed: Service Metrics
     const serviceMetrics = computed(() => {
       if (!props.selectedNode || !props.graphData) {
         return {
-          requestRate: "N/A",
-          requestRateValue: "N/A",
+          requestRate: raw("N/A"),
+          requestRateValue: raw("N/A"),
           totalRequests: 0,
           incomingRequests: 0,
           outgoingRequests: 0,
-          errorRate: "N/A",
-          p50Latency: "N/A",
-          p95Latency: "N/A",
-          p99Latency: "N/A",
+          errorRate: raw("N/A"),
+          p50Latency: raw("N/A"),
+          p95Latency: raw("N/A"),
+          p99Latency: raw("N/A"),
         };
       }
 
       // Get total request count - handle both graph view (uses 'value') and tree view (uses 'requests')
-      const totalRequests =
-        props.selectedNode.value || props.selectedNode.requests || 0;
+      const totalRequests = props.selectedNode.value || props.selectedNode.requests || 0;
 
       // Calculate incoming requests (sum of all edges TO this node)
       const incomingEdges = props.graphData.edges.filter(
@@ -1304,15 +1717,9 @@ export default defineComponent({
       let p95Latency = 0;
       let p99Latency = 0;
       if (incomingEdges.length > 0) {
-        p50Latency = Math.max(
-          ...incomingEdges.map((edge: any) => edge.p50_latency_ns || 0),
-        );
-        p95Latency = Math.max(
-          ...incomingEdges.map((edge: any) => edge.p95_latency_ns || 0),
-        );
-        p99Latency = Math.max(
-          ...incomingEdges.map((edge: any) => edge.p99_latency_ns || 0),
-        );
+        p50Latency = Math.max(...incomingEdges.map((edge: any) => edge.p50_latency_ns || 0));
+        p95Latency = Math.max(...incomingEdges.map((edge: any) => edge.p95_latency_ns || 0));
+        p99Latency = Math.max(...incomingEdges.map((edge: any) => edge.p99_latency_ns || 0));
       }
 
       // Format request rate value without unit
@@ -1332,12 +1739,9 @@ export default defineComponent({
         incomingRequests: incomingRequests,
         outgoingRequests: outgoingRequests,
         errorRate: errorRate.toFixed(2) + "%",
-        p50Latency:
-          incomingEdges.length > 0 ? formatLatency(p50Latency) : "N/A",
-        p95Latency:
-          incomingEdges.length > 0 ? formatLatency(p95Latency) : "N/A",
-        p99Latency:
-          incomingEdges.length > 0 ? formatLatency(p99Latency) : "N/A",
+        p50Latency: incomingEdges.length > 0 ? formatLatency(p50Latency) : raw("N/A"),
+        p95Latency: incomingEdges.length > 0 ? formatLatency(p95Latency) : raw("N/A"),
+        p99Latency: incomingEdges.length > 0 ? formatLatency(p99Latency) : raw("N/A"),
       };
     });
 
@@ -1346,9 +1750,7 @@ export default defineComponent({
       if (!props.selectedNode) {
         return {
           status: "unknown",
-          text: "Unknown",
-          color: "grey",
-          icon: "help",
+          text: t("traces.serviceGraphNodeSidePanel.unknown"),
         };
       }
 
@@ -1358,23 +1760,17 @@ export default defineComponent({
       if (errorRate > 10) {
         return {
           status: "critical",
-          text: "Critical",
-          color: "negative",
-          icon: "error",
+          text: t("traces.serviceGraphNodeSidePanel.critical"),
         };
       } else if (errorRate > 5) {
         return {
           status: "degraded",
-          text: "Degraded",
-          color: "warning",
-          icon: "warning",
+          text: t("traces.serviceGraphNodeSidePanel.degraded"),
         };
       } else {
         return {
           status: "healthy",
-          text: "Healthy",
-          color: "positive",
-          icon: "check_circle",
+          text: t("traces.serviceGraphNodeSidePanel.healthy"),
         };
       }
     });
@@ -1435,88 +1831,183 @@ export default defineComponent({
       });
     };
 
+    // ── Sorting state ──────────────────────────────────────────────────────
+    const sortBy = ref<string>("");
+    const sortOrder = ref<"asc" | "desc" | "">("");
+
+    // The table's sort-order prop only accepts "asc" | "desc" | undefined; our
+    // internal "" cleared-sentinel maps to undefined for the binding.
+    const sortOrderProp = computed<"asc" | "desc" | undefined>(() =>
+      sortOrder.value === "" ? undefined : sortOrder.value,
+    );
+
+    // 3-state sort cycle to match other O2 tables (OTable): asc → desc → cleared.
+    // TenstackTable itself only toggles asc/desc, so we drive the cycle from our
+    // own state and ignore its computed order — clearing restores the default order.
+    function handleSortChange(field: string) {
+      if (sortBy.value !== field) {
+        sortBy.value = field;
+        sortOrder.value = "asc";
+      } else if (sortOrder.value === "asc") {
+        sortOrder.value = "desc";
+      } else {
+        sortBy.value = "";
+        sortOrder.value = "";
+      }
+    }
+
+    const compareRows = (a: any, b: any, field: string): number => {
+      if (field === "p99" || field === "p95" || field === "p75") {
+        return (a[field] ?? 0) - (b[field] ?? 0);
+      }
+      // For requests, sort by raw _requests value
+      if (field === "requests") {
+        return (a.requests ?? 0) - (b.requests ?? 0);
+      }
+      const va = a[field];
+      const vb = b[field];
+      if (typeof va === "number" && typeof vb === "number") {
+        return va - vb;
+      }
+      return String(va ?? "").localeCompare(String(vb ?? ""));
+    };
+
+    const sortedOperationsTableRows = computed(() => {
+      const rows = operationsTableRows.value;
+      if (!sortBy.value) return rows;
+      const order = sortOrder.value;
+      return [...rows].sort((a, b) => {
+        const result = compareRows(a, b, sortBy.value);
+        return order === "desc" ? -result : result;
+      });
+    });
+
+    const sortResourceRows = (rows: any[]) => {
+      if (!sortBy.value) return rows;
+      const order = sortOrder.value;
+      return [...rows].sort((a, b) => {
+        const result = compareRows(a, b, sortBy.value);
+        return order === "desc" ? -result : result;
+      });
+    };
+
     // Generic helper: builds table columns with a dynamic first (entity) column
-    const buildEntityTableColumns = (
-      entityId: string,
-      entityHeader: string,
-    ) => [
+    const buildEntityTableColumns = (entityId: string, entityHeader: I18nText) => [
       {
         id: entityId,
         accessorKey: entityId,
         header: entityHeader,
         size: 220,
-        meta: { slot: false },
+        enableSorting: true,
+        meta: { slot: false, sortable: true },
       },
       {
         id: "requests",
-        accessorKey: "requests",
-        header: "Requests",
-        size: 100,
+        accessorFn: (row: any) => formatNumber(row.requests),
+        header: t("traces.serviceGraphNodeSidePanel.requests"),
+        size: 130,
+        enableSorting: true,
+        meta: { sortable: true, align: "right" },
       },
       {
         id: "errors",
         accessorKey: "errors",
-        header: "Errors",
-        size: 80,
-        meta: { slot: true },
+        header: t("traces.serviceGraphNodeSidePanel.errors"),
+        size: 110,
+        enableSorting: true,
+        meta: { slot: true, sortable: true, align: "right" },
       },
       {
         id: "p99",
         accessorKey: "p99",
-        header: "P99",
-        size: 80,
-        meta: { slot: true },
+        header: t("traces.serviceGraphNodeSidePanel.p99"),
+        size: 118,
+        enableSorting: true,
+        meta: { slot: true, sortable: true, align: "right" },
       },
       {
         id: "p95",
         accessorKey: "p95",
-        header: "P95",
-        size: 80,
-        meta: { slot: true },
+        header: t("traces.serviceGraphNodeSidePanel.p95"),
+        size: 118,
+        enableSorting: true,
+        meta: { slot: true, sortable: true, align: "right" },
       },
       {
         id: "p75",
         accessorKey: "p75",
-        header: "P75",
-        size: 80,
-        meta: { slot: true },
+        header: t("traces.serviceGraphNodeSidePanel.p75"),
+        size: 118,
+        enableSorting: true,
+        meta: { slot: true, sortable: true, align: "right" },
       },
     ];
 
     // Computed: Operations table columns
-    const operationsTableColumns = computed(() =>
-      buildEntityTableColumns("operation", "Operation"),
-    );
+    const operationsTableColumns = computed(() => {
+      const cols = buildEntityTableColumns(
+        "operation",
+        t("traces.serviceGraphNodeSidePanel.operation"),
+      );
+      if (isInferred.value) {
+        cols.unshift({
+          id: "caller",
+          accessorKey: "caller",
+          header: t("traces.serviceGraphNodeSidePanel.caller"),
+          size: 180,
+          enableSorting: true,
+          meta: { slot: false, sortable: true },
+        });
+      }
+      return cols;
+    });
 
     // Computed: Operations table rows
     const operationsTableRows = computed(() =>
       recentOperations.value.map((op) => ({
         operation: op.name,
-        requests: formatNumber(op.requestCount),
+        caller: op.callerService || "",
+        requests: op.requestCount,
         errors: op.errorCount,
-        p99: formatOperationLatency(op.p99Latency),
-        p95: formatOperationLatency(op.p95Latency),
-        p75: formatOperationLatency(op.p75Latency),
-        p50: formatOperationLatency(op.p50Latency),
-        _name: op.name,
-        _p99: op.p99Latency,
-        _p95: op.p95Latency,
-        _p75: op.p75Latency,
+        p99: op.p99Latency,
+        p95: op.p95Latency,
+        p75: op.p75Latency,
+        p50: op.p50Latency,
       })),
     );
 
-    // Fetch aggregated operations (grouped by operation_name with percentiles)
+    // Fetch aggregated operations (grouped by operation_name with percentiles).
+    // For inferred services we also GROUP BY service_name so the caller is visible.
     const fetchAggregatedOperations = async () => {
-      if (!props.selectedNode || !props.visible || props.streamFilter === "all")
-        return;
+      if (!props.selectedNode || !props.visible || props.streamFilter === "all") return;
 
       loadingOperations.value = true;
       recentOperations.value = [];
 
       try {
-        const serviceName = buildServiceName();
         const streamName = props.streamFilter || "default";
-        const sql = `SELECT operation_name, count(*) as request_count, count(*) FILTER (WHERE span_status = 'ERROR') as error_count, approx_percentile_cont(duration, 0.50) as p50_latency, approx_percentile_cont(duration, 0.75) as p75_latency, approx_percentile_cont(duration, 0.95) as p95_latency, approx_percentile_cont(duration, 0.99) as p99_latency FROM "${streamName}" WHERE service_name = '${serviceName}' GROUP BY operation_name`;
+        const st = props.selectedNode?.service_type;
+        // A tool/model node's caller is its OWNING AGENT, which usually sits on an
+        // ancestor span — resolve it with the same parent-chain climb the graph
+        // edge uses (else the panel would show the host app as the caller, in
+        // conflict with the graph). Genuinely-inferred deps (database/queue/…)
+        // keep the raw service_name as caller. Instrumented services show none.
+        const isGenAiChild = st === "tool" || st === "model";
+        const isInf = isInferred.value;
+
+        const metrics = `count(*) as request_count, count(*) FILTER (WHERE ${isGenAiChild ? "c." : ""}span_status = 'ERROR') as error_count, approx_percentile_cont(${isGenAiChild ? "c." : ""}duration, 0.50) as p50_latency, approx_percentile_cont(${isGenAiChild ? "c." : ""}duration, 0.75) as p75_latency, approx_percentile_cont(${isGenAiChild ? "c." : ""}duration, 0.95) as p95_latency, approx_percentile_cont(${isGenAiChild ? "c." : ""}duration, 0.99) as p99_latency`;
+
+        let sql: string;
+        if (isGenAiChild) {
+          const { callerExpr, joins } = genAiCallerClimb(streamName);
+          sql = `SELECT ${callerExpr} as caller_service, c.operation_name, ${metrics} FROM "${streamName}" AS c ${joins} WHERE ${serviceFilter("c.")} GROUP BY ${callerExpr}, c.operation_name`;
+        } else {
+          const selectCols = isInf
+            ? "service_name as caller_service, operation_name"
+            : "operation_name";
+          const groupCols = isInf ? "service_name, operation_name" : "operation_name";
+          sql = `SELECT ${selectCols}, ${metrics} FROM "${streamName}" WHERE ${serviceFilter()} GROUP BY ${groupCols}`;
+        }
 
         const response = await searchService.search({
           org_identifier: store.state.selectedOrganization.identifier,
@@ -1535,6 +2026,7 @@ export default defineComponent({
         if (response.data && response.data.hits) {
           recentOperations.value = response.data.hits.map((op: any) => ({
             name: op.operation_name || "unknown",
+            callerService: op.caller_service || undefined,
             requestCount: op.request_count || 0,
             errorCount: op.error_count || 0,
             p50Latency: op.p50_latency || 0,
@@ -1553,14 +2045,12 @@ export default defineComponent({
 
     // Fetch recent spans (error spans + slowest spans)
     const fetchRecentSpans = async () => {
-      if (!props.selectedNode || !props.visible || props.streamFilter === "all")
-        return;
+      if (!props.selectedNode || !props.visible || props.streamFilter === "all") return;
 
       loadingOperations.value = true;
       recentSpanData.value = { errorSpans: [], slowSpans: [] };
 
       try {
-        const serviceName = buildServiceName();
         const streamName = props.streamFilter || "default";
         const org = store.state.selectedOrganization.identifier;
         const timeParams = {
@@ -1574,7 +2064,7 @@ export default defineComponent({
             org_identifier: org,
             query: {
               query: {
-                sql: `SELECT operation_name, duration, start_time FROM "${streamName}" WHERE service_name = '${serviceName}' AND span_status = 'ERROR' ORDER BY start_time DESC`,
+                sql: `SELECT operation_name, duration, start_time FROM "${streamName}" WHERE ${serviceFilter()} AND span_status = 'ERROR' ORDER BY start_time DESC`,
                 ...timeParams,
                 size: 5,
               },
@@ -1585,7 +2075,7 @@ export default defineComponent({
             org_identifier: org,
             query: {
               query: {
-                sql: `SELECT operation_name, duration FROM "${streamName}" WHERE service_name = '${serviceName}' ORDER BY duration DESC`,
+                sql: `SELECT operation_name, duration FROM "${streamName}" WHERE ${serviceFilter()} ORDER BY duration DESC`,
                 ...timeParams,
                 size: 20,
               },
@@ -1598,9 +2088,7 @@ export default defineComponent({
           errorSpans: (errorRes.data?.hits || []).map((s: any) => ({
             name: s.operation_name || "unknown",
             duration: s.duration || 0,
-            timestampDisplay: s.start_time
-              ? formatSpanTimestamp(s.start_time)
-              : "",
+            timestampDisplay: s.start_time ? formatSpanTimestamp(s.start_time) : "",
           })),
           slowSpans: (slowRes.data?.hits || []).map((s: any) => ({
             name: s.operation_name || "unknown",
@@ -1631,23 +2119,23 @@ export default defineComponent({
         props.selectedNode?.id,
         props.streamFilter,
         operationsViewMode.value,
+        // Re-fetch once the schema resolves the model column (request vs
+        // response) — otherwise a model node's operations query fires with the
+        // wrong column and returns "No operations found".
+        serviceNameField.value,
       ],
       () => {
-        if (
-          props.visible &&
-          props.selectedNode &&
-          props.streamFilter !== "all"
-        ) {
+        if (props.visible && props.selectedNode && props.streamFilter !== "all") {
           fetchOperations();
         }
       },
       { immediate: true },
     );
 
-    // Generic fetch for any OTEL resource tab config
+    // Generic fetch for any OTEL resource tab config (supports both instrumented
+    // and inferred service tabs; inferred tabs use a COALESCE field chain).
     const fetchResourceData = async (config: ResourceTabConfig) => {
-      if (!props.selectedNode || !props.visible || props.streamFilter === "all")
-        return;
+      if (!props.selectedNode || !props.visible || props.streamFilter === "all") return;
 
       resourceTabLoading.value = {
         ...resourceTabLoading.value,
@@ -1656,12 +2144,17 @@ export default defineComponent({
       resourceTabData.value = { ...resourceTabData.value, [config.id]: [] };
 
       try {
-        const serviceName = buildServiceName();
         const streamName = props.streamFilter || "default";
         const groupField = config.groupField;
         const alias = config.colId + "_name";
 
-        const sql = `SELECT ${groupField} as ${alias}, count(*) as request_count, count(*) FILTER (WHERE span_status = 'ERROR') as error_count, approx_percentile_cont(duration, 0.50) as p50_latency, approx_percentile_cont(duration, 0.75) as p75_latency, approx_percentile_cont(duration, 0.95) as p95_latency, approx_percentile_cont(duration, 0.99) as p99_latency FROM "${streamName}" WHERE service_name = '${serviceName}' AND ${groupField} IS NOT NULL GROUP BY ${groupField} ORDER BY request_count DESC`;
+        // For inferred tabs with fallback fields, the null-check must span all
+        // fields in the chain; for instrumented tabs a simple IS NOT NULL works.
+        const nullClause = config.fields
+          ? `(${buildNullCheck(config.fields)})`
+          : `${groupField} IS NOT NULL`;
+
+        const sql = `SELECT ${groupField} as ${alias}, count(*) as request_count, count(*) FILTER (WHERE span_status = 'ERROR') as error_count, approx_percentile_cont(duration, 0.50) as p50_latency, approx_percentile_cont(duration, 0.75) as p75_latency, approx_percentile_cont(duration, 0.95) as p95_latency, approx_percentile_cont(duration, 0.99) as p99_latency FROM "${streamName}" WHERE ${serviceFilter()} AND ${nullClause} GROUP BY ${alias} ORDER BY request_count DESC`;
 
         const response = await searchService.search({
           org_identifier: store.state.selectedOrganization.identifier,
@@ -1707,8 +2200,11 @@ export default defineComponent({
     // groups (k8s / aws / azure / gcp) match the schema, show only those. Otherwise
     // fall back to generic groups (host, container, faas, process, cloud).
     const resolveWorkloadFields = async () => {
-      if (!props.visible || props.streamFilter === "all" || !props.streamFilter)
-        return;
+      if (!props.visible || props.streamFilter === "all" || !props.streamFilter) return;
+
+      // Ensure the stream schema is resolved (shared with inferred tab resolution)
+      await resolveStreamSchema();
+      if (streamFieldSet.value.size === 0) return;
 
       try {
         const org = store.state.selectedOrganization.identifier;
@@ -1722,47 +2218,34 @@ export default defineComponent({
           }
         }
 
-        // Fetch trace stream schema
-        const schemaResponse = await streamService.schema(
-          org,
-          props.streamFilter,
-          "traces",
-        );
-        const schemaFields: { name: string; type: string }[] =
-          schemaResponse.data?.schema || schemaResponse.data?.fields || [];
-        const schemaFieldSet = new Set(schemaFields.map((f) => f.name));
-
         // Filter for service_ fields, intersect with semantic groups, deduplicate by alias.id
         const seen = new Set<string>();
         const matched: { field: string; alias: FieldAlias }[] = [];
-        for (const schemaField of schemaFields) {
-          if (!schemaField.name.startsWith("service_")) continue;
-          const alias = fieldToAliasMap.get(schemaField.name);
+        const schemaFields = [...streamFieldSet.value]; // already resolved above
+        for (const fieldName of schemaFields) {
+          if (!fieldName.startsWith("service_")) continue;
+          const alias = fieldToAliasMap.get(fieldName);
           if (!alias || seen.has(alias.id)) continue;
           seen.add(alias.id);
-          matched.push({ field: schemaField.name, alias });
+          matched.push({ field: fieldName, alias });
         }
         resolvedWorkloadFields.value = matched;
 
         // Fetch org-wide dimension analytics to discover all available resource groups
         const analyticsResp = await getDimensionAnalytics(org);
-        const allGroups: FoundGroup[] =
-          analyticsResp.data?.available_groups ?? [];
+        const allGroups: FoundGroup[] = analyticsResp.data?.available_groups ?? [];
 
         // Filter to groups whose traces (or spans) alias exists in this stream's schema
         const schemaMatchedGroups = allGroups.filter((g) => {
           const field = g.aliases["traces"] ?? g.aliases["spans"];
-          return field && schemaFieldSet.has(field);
+          return field && streamFieldSet.value.has(field);
         });
 
         // Apply ENV_SEGMENTS priority
         // If any primary-platform groups (k8s / aws / azure / gcp) are present
         // in this stream, show ONLY those. Otherwise fall back to generic groups.
-        const platformGroups = schemaMatchedGroups.filter(
-          (g) => groupEnvKey(g.group_id) !== null,
-        );
-        const visibleGroups =
-          platformGroups.length > 0 ? platformGroups : schemaMatchedGroups;
+        const platformGroups = schemaMatchedGroups.filter((g) => groupEnvKey(g.group_id) !== null);
+        const visibleGroups = platformGroups.length > 0 ? platformGroups : schemaMatchedGroups;
 
         // Build ResourceTabConfig from FoundGroup data
         availableResourceTabConfigs.value = visibleGroups.map((g) => {
@@ -1770,9 +2253,9 @@ export default defineComponent({
           const envKey = groupEnvKey(g.group_id) ?? g.group_id.split("-")[0];
           return {
             id: g.group_id,
-            label: g.display,
+            label: raw(g.display),
             groupField: field,
-            colLabel: g.display,
+            colLabel: raw(g.display),
             colId: g.group_id.replace(/-/g, "_"),
             environment: envKey,
             isDefault: DEFAULT_GROUP_FIELDS.has(field),
@@ -1784,10 +2267,7 @@ export default defineComponent({
           .filter((c) => c.isDefault)
           .map((c) => c.id);
       } catch (err) {
-        console.error(
-          "[ServiceGraphNodeSidePanel] Failed to resolve workload fields:",
-          err,
-        );
+        console.error("[ServiceGraphNodeSidePanel] Failed to resolve workload fields:", err);
         resolvedWorkloadFields.value = [];
         availableResourceTabConfigs.value = [];
         selectedWorkloadFields.value = [];
@@ -1798,36 +2278,20 @@ export default defineComponent({
     const buildResourceTableRows = (config: ResourceTabConfig) =>
       (resourceTabData.value[config.id] || []).map((row) => ({
         [config.colId]: row.name,
-        requests: formatNumber(row.requestCount),
+        requests: row.requestCount,
         errors: row.errorCount,
-        p99: formatOperationLatency(row.p99Latency),
-        p95: formatOperationLatency(row.p95Latency),
-        p75: formatOperationLatency(row.p75Latency),
-        p50: formatOperationLatency(row.p50Latency),
-        _name: row.name,
-        _p99: row.p99Latency,
-        _p95: row.p95Latency,
-        _p75: row.p75Latency,
+        p99: row.p99Latency,
+        p95: row.p95Latency,
+        p75: row.p75Latency,
+        p50: row.p50Latency,
       }));
 
     // Lazy-fetch resource tab data / metrics when their tab is activated
     watch(
-      () => [
-        props.visible,
-        props.selectedNode?.id,
-        props.streamFilter,
-        activeTab.value,
-      ],
+      () => [props.visible, props.selectedNode?.id, props.streamFilter, activeTab.value],
       () => {
-        if (
-          !props.visible ||
-          !props.selectedNode ||
-          props.streamFilter === "all"
-        )
-          return;
-        const config = activeResourceTabConfigs.value.find(
-          (c) => c.id === activeTab.value,
-        );
+        if (!props.visible || !props.selectedNode || props.streamFilter === "all") return;
+        const config = activeResourceTabConfigs.value.find((c) => c.id === activeTab.value);
         if (config && !resourceTabData.value[config.id]?.length) {
           fetchResourceData(config);
         }
@@ -1835,12 +2299,18 @@ export default defineComponent({
       },
     );
 
-    // Trigger workload field discovery when the panel becomes visible with a valid stream
+    // Trigger workload field discovery when the panel becomes visible with a valid stream.
+    // For inferred services, resolve the stream schema so inferredTabConfigs can filter
+    // fallback field chains to only those present in the schema.
     watch(
       () => [props.visible, props.selectedNode?.id, props.streamFilter],
       ([visible]) => {
         if (visible && props.selectedNode && props.streamFilter !== "all") {
-          resolveWorkloadFields();
+          if (isInferred.value) {
+            resolveStreamSchema();
+          } else {
+            resolveWorkloadFields();
+          }
         }
       },
       { immediate: true },
@@ -1855,6 +2325,8 @@ export default defineComponent({
         availableResourceTabConfigs.value = [];
         resolvedWorkloadFields.value = [];
         selectedWorkloadFields.value = [];
+        schemaResolved.value = false;
+        streamFieldSet.value = new Set();
         metricsCorrelationData.value = null;
         metricsCorrelationError.value = null;
         metricsCorrelationLoaded.value = false;
@@ -1867,12 +2339,15 @@ export default defineComponent({
     // Navigate to traces explore page with contextual filters
     const navigateToTraces = (params: {
       operationName?: string;
+      /** When the service is inferred, this is the caller's service_name. */
+      callerService?: string;
       /** @deprecated use resourceFilter instead */
       nodeName?: string;
       /** @deprecated use resourceFilter instead */
       podName?: string;
-      /** Generic OTEL resource filter: { field: stream field name, value: field value } */
-      resourceFilter?: { field: string; value: string };
+      /** Generic OTEL resource filter. Use `field` for a single field,
+       *  or `fields` for a fallback chain (OR clause in the filter). */
+      resourceFilter?: { field?: string; fields?: string[]; value: string };
       errorsOnly?: boolean;
       minDurationMicros?: number;
       maxDurationMicros?: number;
@@ -1881,10 +2356,13 @@ export default defineComponent({
       emit("view-traces", {
         stream: props.streamFilter,
         serviceName:
-          props.selectedNode?.name ||
-          props.selectedNode?.label ||
-          props.selectedNode?.id,
+          props.selectedNode?.name || props.selectedNode?.label || props.selectedNode?.id,
+        serviceType: props.selectedNode?.service_type,
+        ...(hasCatalogServiceIdentity.value
+          ? { serviceSystem: props.selectedNode?.service_system }
+          : {}),
         operationName: params.operationName,
+        callerService: params.callerService,
         nodeName: params.nodeName,
         podName: params.podName,
         resourceFilter: params.resourceFilter,
@@ -1905,6 +2383,33 @@ export default defineComponent({
       navigateToTraces({ mode: "traces" });
     };
 
+    /** Database Monitoring is on for this instance, so the service→databases
+     *  entry point may render. Same flag the DBM routes and nav gate on. */
+    const dbmEnabled = computed(() => Boolean(store.state.zoConfig?.database_monitoring_enabled));
+
+    /**
+     * Service → databases (DBM FR-7). Top queries scoped to this service over
+     * the panel's window: the question from a service is "which of MY queries
+     * is hurting", which is the query grain — the databases tab cannot scope
+     * to a service without collapsing to estimated per-query totals. The name
+     * goes in RAW (the router encodes it); `buildServiceName` is SQL-escaped
+     * and would corrupt an O'Reilly-style name in a URL.
+     */
+    const viewRelatedDatabases = () => {
+      const node = props.selectedNode;
+      const serviceName = node?.name || node?.label || node?.id;
+      if (!serviceName) return;
+      router.push({
+        name: "dbmQueries",
+        query: {
+          org_identifier: store.state.selectedOrganization.identifier,
+          service: String(serviceName),
+          from: String(props.timeRange.startTime),
+          to: String(props.timeRange.endTime),
+        },
+      });
+    };
+
     const viewRelatedLogs = async () => {
       const serviceName = buildServiceName();
       if (!serviceName) return;
@@ -1912,7 +2417,7 @@ export default defineComponent({
       const org = store.state.selectedOrganization.identifier;
 
       let streamName: string | undefined;
-      let filterQuery = `service_name='${escapeSingleQuotes(serviceName)}'`;
+      let filterQuery = `${serviceNameField.value}='${serviceName}'`;
 
       try {
         const correlateResponse = await correlateStreams(org, {
@@ -1935,20 +2440,16 @@ export default defineComponent({
             filterQuery = filterParts;
           }
         } else {
-          $q.notify({
-            type: "warning",
+          toast({
+            variant: "warning",
             message: t("traces.noLogsAvailableForService"),
-            timeout: 3000,
-            position: "bottom",
           });
           return;
         }
       } catch {
-        $q.notify({
-          type: "warning",
+        toast({
+          variant: "warning",
           message: t("traces.noLogsAvailableForService"),
-          timeout: 3000,
-          position: "bottom",
         });
         return;
       }
@@ -1960,11 +2461,20 @@ export default defineComponent({
         sql_mode: "false",
         query: b64EncodeUnicode(filterQuery),
         org_identifier: org,
+        // The Logs route is keep-alive, so a repeat visit only runs onActivated —
+        // which restores the URL params solely on the trace-explorer branch.
+        type: "trace_explorer",
       };
 
       if (streamName) {
-        queryParams.stream_value = streamName;
+        queryParams.stream = streamName;
       }
+
+      // The Logs page keeps `isInitialized` in the store across unmounts, and while
+      // it is set it restores the previous session from the store instead of reading
+      // these params — dropping the stream, time range and filter. Clearing it makes
+      // the URL the source of truth, same as the trace-details "View Logs" button.
+      store.dispatch("logs/setIsInitialized", false);
 
       router.push({
         path: "/logs",
@@ -1977,11 +2487,9 @@ export default defineComponent({
       if (correlationData.value) {
         showTelemetryDialog.value = true;
       } else if (correlationError.value) {
-        $q.notify({
-          type: "warning",
-          message: correlationError.value,
-          timeout: 3000,
-          position: "bottom",
+        toast({
+          variant: "warning",
+          message: raw(correlationError.value),
         });
       }
     };
@@ -2014,17 +2522,38 @@ export default defineComponent({
       return "status-critical";
     };
 
+    const isDurationColumn = (column: string) => {
+      return ["p99", "p95", "p75"].includes(column);
+    };
+
+    function rowMaxes(rows: any[], fields: string[]): Record<string, number> {
+      const result: Record<string, number> = {};
+      for (const f of fields) {
+        result[f] = rows.reduce((m, r) => Math.max(m, r[f] ?? 0), 0) || 1;
+      }
+      return result;
+    }
+
     return {
+      raw,
       t,
       serviceMetrics,
       serviceHealth,
       isAllStreamsSelected,
+      isInferred,
+      showBehaviorTab,
+      behaviorAgentName,
+      agentEnvVersion,
+      serviceNameField,
+      streamFieldSet,
       formatNumber,
       getErrorRateClass,
       getLatencyClass,
       handleClose,
       viewRelatedTraces,
       viewRelatedLogs,
+      dbmEnabled,
+      viewRelatedDatabases,
       handleShowTelemetry,
       // RED Charts
       dashboardData,
@@ -2060,6 +2589,7 @@ export default defineComponent({
       // Workload Field Discovery
       resolvedWorkloadFields,
       selectedWorkloadFields,
+      toggleWorkloadField,
       // Metrics Tab
       metricsCorrelationLoading,
       metricsCorrelationError,
@@ -2067,874 +2597,80 @@ export default defineComponent({
       metricsCorrelationLoaded,
       fetchMetricsCorrelation,
       metricGroupResources,
+      sortedOperationsTableRows,
+      sortBy,
+      sortOrder,
+      sortOrderProp,
+      handleSortChange,
+      sortResourceRows,
+      formatOperationLatency,
+      isDurationColumn,
+      rowMaxes,
     };
   },
 });
 </script>
 
-<style scoped lang="scss">
-.service-graph-side-panel {
-  position: absolute;
-  right: 0;
-  top: 0;
-  min-width: 600px;
-  width: 60%;
-  height: 100%;
-  z-index: 100;
-  display: flex;
-  flex-direction: column;
-  background: #1a1f2e;
-  border-left: 1px solid #2d3548;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.5);
+<style scoped>
+/* keep(scrollbar): ::-webkit-scrollbar pseudo-elements have no utility form.
+   This panel has both a light treatment (default values) and a dark
+   indigo-tinted "glass" treatment (under `.dark &`). Keep the light rules — do
+   not make it always-dark. */
+.panel-content::-webkit-scrollbar {
+  width: 0.5rem;
+}
+
+.panel-content::-webkit-scrollbar-track {
+  background: var(--color-surface-panel);
+}
+
+.panel-content::-webkit-scrollbar-thumb {
+  background: var(--color-border-default);
+  border-radius: 0.25rem;
+}
+
+.panel-content::-webkit-scrollbar-thumb:hover {
+  background: var(--color-grey-300);
+}
+
+.dark .panel-content::-webkit-scrollbar-track {
+  background: color-mix(in srgb, var(--color-grey-900) 70%, var(--color-indigo-900));
+}
+
+.dark .panel-content::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--color-grey-800) 80%, var(--color-indigo-900));
+}
+
+.dark .panel-content::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--color-grey-700) 80%, var(--color-indigo-900));
+}
+
+.panel-section:last-child {
+  margin-bottom: 0;
+}
+
+/* The panel itself scrolls, so these short summary tables should render at their
+   natural height without their own scrollbars. Let the inner scroll container
+   grow to content and hide its scrollbars. */
+.svc-panel-table :deep([data-test="o2-table-scroll-container"]) {
   overflow: hidden;
-  animation: slideIn 0.3s ease-out;
+  height: auto;
+  max-height: none;
 }
 
-@keyframes slideIn {
-  from {
-    transform: translateX(100%);
-  }
-  to {
-    transform: translateX(0);
-  }
+/* Align the first column's content with the tab labels above (page-edge + the
+   tab's own 0.5rem px-2) while the header band and rows still bleed to the edge. */
+.svc-panel-table :deep(tr > th:first-child),
+.svc-panel-table :deep(tr > td:first-child) {
+  padding-left: calc(var(--spacing-page-edge) + 0.5rem);
 }
 
-// Light mode support
-.body--light .service-graph-side-panel {
-  background: #ffffff;
-  border-left: 1px solid #e0e0e0;
-  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
-}
-
-// Slide animation
-.slide-enter-active,
-.slide-leave-active {
-  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-.slide-enter-from,
-.slide-leave-to {
-  transform: translateX(100%);
-}
-
-.slide-enter-to,
-.slide-leave-from {
-  transform: translateX(0);
-}
-
-// Header (compact with inline health badge)
-.panel-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-bottom: 1px solid #2d3548;
-  background: #1a1f2e;
-  flex-shrink: 0;
-
-  .panel-title {
-    flex: 1;
-
-    .service-name {
-      font-size: 18px;
-      font-weight: 600;
-      margin: 0;
-      line-height: 1.2; // Reduce line height for compactness
-      color: #e4e7eb;
-      letter-spacing: normal;
-      display: flex;
-      align-items: center;
-      gap: 10px;
-
-      .health-badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px; // Reduced from 6px
-        padding: 2px 8px; // Reduced from 4px 10px for more compact badge
-        border-radius: 10px; // Slightly reduced from 12px
-        font-size: 11px; // Reduced from 12px
-        font-weight: 600;
-        line-height: 1;
-
-        // Add dot indicator
-        &::before {
-          content: "●";
-          font-size: 10px; // Reduced from 12px
-        }
-
-        &.healthy {
-          background: rgba(16, 185, 129, 0.15);
-          color: #10b981;
-        }
-
-        &.degraded {
-          background: rgba(251, 191, 36, 0.15);
-          color: #fbbf24;
-        }
-
-        &.critical {
-          background: rgba(239, 68, 68, 0.15);
-          color: #ef4444;
-        }
-
-        &.warning {
-          background: rgba(249, 115, 22, 0.15);
-          color: #f97316;
-        }
-      }
-    }
-  }
-
-  .panel-header-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .telemetry-btn {
-    background: linear-gradient(135deg, #3b82f6, #6366f1) !important;
-    color: #fff !important;
-    border-radius: 6px;
-    padding: 4px 12px;
-    font-size: 12px;
-    font-weight: 500;
-    letter-spacing: 0.02em;
-    transition: all 0.2s;
-
-    &:hover {
-      filter: brightness(1.1);
-      box-shadow: 0 2px 8px rgba(59, 130, 246, 0.4);
-    }
-  }
-
-  .close-btn {
-    flex-shrink: 0;
-    width: 24px;
-    height: 24px;
-  }
-}
-
-.body--light .panel-header {
-  border-bottom: 1px solid #e0e0e0;
-  background: #f5f5f5;
-
-  .panel-title {
-    .service-name {
-      color: #202124;
-      line-height: 1.2;
-
-      .health-badge {
-        &.healthy {
-          background: rgba(16, 185, 129, 0.08);
-          color: #059669;
-        }
-
-        &.degraded {
-          background: rgba(251, 191, 36, 0.08);
-          color: #d97706;
-        }
-
-        &.critical {
-          background: rgba(239, 68, 68, 0.08);
-          color: #dc2626;
-        }
-
-        &.warning {
-          background: rgba(249, 115, 22, 0.08);
-          color: #ea580c;
-        }
-      }
-    }
-  }
-}
-
-// Actions Section (moved to content area)
-.actions-section {
-  display: flex;
-  gap: 8px;
-  padding: 0;
-  margin-bottom: 8px;
-  flex-wrap: wrap;
-
-  .action-btn {
-    width: 35%;
-    padding: 8px 16px;
-    font-size: 13px;
-    font-weight: 500;
-    border: 1px solid #2d3548;
-    color: #e4e7eb;
-    background: #242938;
-    transition: all 0.2s;
-
-    &:hover {
-      background: #1a1f2e;
-      border-color: #3b82f6;
-      transform: translateY(-1px);
-    }
-  }
-}
-
-.view-traces-btn {
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 16px;
-  border-radius: 4px;
-  padding: 0px 12px;
-  min-width: 90px;
-  transition:
-    box-shadow 0.3s ease,
-    opacity 0.2s ease;
-  background: color-mix(in srgb, var(--o2-primary-btn-bg) 20%, white 10%);
-
-  &:hover {
-    opacity: 0.8;
-    box-shadow: 0 0 7px
-      color-mix(in srgb, var(--o2-primary-btn-bg), transparent 10%);
-  }
-}
-
-.body--light .actions-section .action-btn {
-  border-color: #e0e0e0;
-  color: #333;
-  background: #f9f9f9;
-
-  &:hover {
-    background: #ffffff;
-    border-color: #3b82f6;
-  }
-}
-
-.panel-content {
-  flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  background: #0f1419;
-  padding: 0.625rem;
-
-  &::-webkit-scrollbar {
-    width: 8px;
-  }
-
-  &::-webkit-scrollbar-track {
-    background: #1a1f2e;
-  }
-
-  &::-webkit-scrollbar-thumb {
-    background: #242938;
-    border-radius: 4px;
-
-    &:hover {
-      background: #2d3548;
-    }
-  }
-}
-
-.body--light .panel-content {
-  background: #ffffff;
-
-  &::-webkit-scrollbar-track {
-    background: #f8f9fa;
-  }
-
-  &::-webkit-scrollbar-thumb {
-    background: #e0e0e0;
-
-    &:hover {
-      background: #d0d0d0;
-    }
-  }
-}
-
-.operation-row {
-  transition: background 0.15s ease;
-
-  &:hover {
-    background: rgba(99, 102, 241, 0.1);
-
-    .operation-link-icon {
-      opacity: 1 !important;
-    }
-  }
-
-  .operation-link-icon {
-    opacity: 0;
-    color: var(--o2-text-secondary);
-    transition: opacity 0.15s ease;
-  }
-}
-
-.body--light .operation-row:hover {
-  background: rgba(99, 102, 241, 0.07);
-}
-
-.panel-section {
-  padding: 0;
-  margin-bottom: 12px;
-
-  &:last-child {
-    margin-bottom: 0;
-  }
-
-  .section-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-  }
-
-  .section-header-actions {
-    display: flex;
-    gap: 6px;
-  }
-
-  .section-title {
-    font-size: 14px;
-    font-weight: 600;
-    text-transform: none;
-    letter-spacing: 0;
-    color: #e4e7eb;
-  }
-}
-
-.body--light .panel-section .section-title {
-  color: #202124;
-}
-
-.metrics-section {
-  // Full-width card for total requests (single line)
-  .metric-card-full {
-    padding: 10px 12px;
-    border-radius: 8px;
-    background: linear-gradient(135deg, #242938 0%, #1f2937 100%);
-    border: 1px solid #374151;
-    margin-bottom: 12px;
-    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-
-    &:hover {
-      transform: translateY(-2px);
-      box-shadow:
-        0 6px 12px rgba(0, 0, 0, 0.2),
-        0 0 0 1px rgba(99, 102, 241, 0.3);
-      border-color: rgba(99, 102, 241, 0.4);
-    }
-
-    .metric-single-line {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-
-      .metric-total {
-        display: flex;
-        align-items: baseline;
-        gap: 6px;
-        padding: 6px 10px;
-        border-radius: 6px;
-        background: linear-gradient(
-          135deg,
-          rgba(99, 102, 241, 0.08),
-          rgba(99, 102, 241, 0.02)
-        );
-        border: 1px solid rgba(99, 102, 241, 0.15);
-
-        .total-label {
-          font-size: 12px;
-          font-weight: 600;
-          color: #a5b4fc;
-        }
-
-        .total-value {
-          font-size: 16px;
-          font-weight: 800;
-          color: #e0e7ff;
-          letter-spacing: -0.02em;
-        }
-
-        .total-unit {
-          font-size: 10px;
-          font-weight: 500;
-          color: #a5b4fc;
-        }
-      }
-
-      .metric-divider {
-        width: 1px;
-        height: 20px;
-        background: #374151;
-      }
-
-      .metric-inline {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        padding: 4px 8px;
-        border-radius: 4px;
-        transition: all 0.2s ease;
-        flex: 1;
-
-        &.incoming {
-          color: #a5b4fc;
-          background: linear-gradient(
-            135deg,
-            rgba(99, 102, 241, 0.1),
-            rgba(99, 102, 241, 0.02)
-          );
-          border: 1px solid rgba(99, 102, 241, 0.15);
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(99, 102, 241, 0.15),
-              rgba(99, 102, 241, 0.05)
-            );
-            box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
-          }
-        }
-
-        &.outgoing {
-          color: #a5b4fc;
-          background: linear-gradient(
-            135deg,
-            rgba(99, 102, 241, 0.1),
-            rgba(99, 102, 241, 0.02)
-          );
-          border: 1px solid rgba(99, 102, 241, 0.15);
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(99, 102, 241, 0.15),
-              rgba(99, 102, 241, 0.05)
-            );
-            box-shadow: 0 0 8px rgba(99, 102, 241, 0.2);
-          }
-        }
-
-        .inline-value {
-          font-size: 14px;
-          font-weight: 700;
-          letter-spacing: -0.01em;
-        }
-      }
-    }
-
-    // Horizontal divider between top and bottom rows
-    .metric-horizontal-divider {
-      width: 100%;
-      height: 1px;
-      background: #374151;
-      margin: 10px 0 8px 0;
-    }
-
-    // Bottom row for error rate and p95 latency
-    .metric-bottom-row {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-
-      .metric-inline-item {
-        flex: 1;
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 8px;
-        border-radius: 4px;
-        transition: all 0.2s ease;
-
-        // Status-based styling
-        &.status-healthy {
-          background: linear-gradient(
-            135deg,
-            rgba(16, 185, 129, 0.08),
-            rgba(16, 185, 129, 0.02)
-          );
-          border: 1px solid rgba(16, 185, 129, 0.15);
-
-          .q-icon {
-            color: #10b981;
-          }
-
-          .metric-value {
-            color: #10b981;
-          }
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(16, 185, 129, 0.12),
-              rgba(16, 185, 129, 0.04)
-            );
-            box-shadow: 0 0 6px rgba(16, 185, 129, 0.15);
-          }
-        }
-
-        &.status-warning {
-          background: linear-gradient(
-            135deg,
-            rgba(251, 191, 36, 0.08),
-            rgba(251, 191, 36, 0.02)
-          );
-          border: 1px solid rgba(251, 191, 36, 0.15);
-
-          .q-icon {
-            color: #fbbf24;
-          }
-
-          .metric-value {
-            color: #fbbf24;
-          }
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(251, 191, 36, 0.12),
-              rgba(251, 191, 36, 0.04)
-            );
-            box-shadow: 0 0 6px rgba(251, 191, 36, 0.15);
-          }
-        }
-
-        &.status-critical {
-          background: linear-gradient(
-            135deg,
-            rgba(239, 68, 68, 0.08),
-            rgba(239, 68, 68, 0.02)
-          );
-          border: 1px solid rgba(239, 68, 68, 0.15);
-
-          .q-icon {
-            color: #ef4444;
-          }
-
-          .metric-value {
-            color: #ef4444;
-          }
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(239, 68, 68, 0.12),
-              rgba(239, 68, 68, 0.04)
-            );
-            box-shadow: 0 0 6px rgba(239, 68, 68, 0.15);
-          }
-        }
-
-        &.status-unknown {
-          background: linear-gradient(
-            135deg,
-            rgba(107, 114, 128, 0.08),
-            rgba(107, 114, 128, 0.02)
-          );
-          border: 1px solid rgba(107, 114, 128, 0.15);
-
-          .q-icon {
-            color: #6b7280;
-          }
-
-          .metric-value {
-            color: #9ca3af;
-          }
-        }
-
-        .metric-label {
-          font-size: 11px;
-          font-weight: 600;
-          color: #9ca3af;
-          white-space: nowrap;
-        }
-
-        .metric-value {
-          font-size: 13px;
-          font-weight: 700;
-          letter-spacing: -0.01em;
-        }
-      }
-
-      .metric-row-divider {
-        width: 1px;
-        height: 20px;
-        background: #374151;
-      }
-    }
-  }
-}
-
-.body--light .metrics-section {
-  .metric-card-full {
-    background: linear-gradient(135deg, #ffffff 0%, #f9fafb 100%);
-    border-color: #d1d5db;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
-
-    &:hover {
-      box-shadow:
-        0 6px 12px rgba(0, 0, 0, 0.08),
-        0 0 0 1px rgba(99, 102, 241, 0.2);
-      border-color: rgba(99, 102, 241, 0.3);
-    }
-
-    .metric-single-line {
-      .metric-total {
-        background: linear-gradient(
-          135deg,
-          rgba(99, 102, 241, 0.08),
-          rgba(99, 102, 241, 0.03)
-        );
-        border-color: rgba(99, 102, 241, 0.2);
-
-        .total-label {
-          color: #6366f1;
-        }
-
-        .total-value {
-          color: #4338ca;
-        }
-
-        .total-unit {
-          color: #6366f1;
-        }
-      }
-
-      .metric-divider {
-        background: #d1d5db;
-      }
-
-      .metric-inline {
-        &.incoming {
-          color: #6366f1;
-          background: linear-gradient(
-            135deg,
-            rgba(99, 102, 241, 0.08),
-            rgba(99, 102, 241, 0.02)
-          );
-          border-color: rgba(99, 102, 241, 0.2);
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(99, 102, 241, 0.12),
-              rgba(99, 102, 241, 0.04)
-            );
-            box-shadow: 0 0 8px rgba(99, 102, 241, 0.15);
-          }
-        }
-
-        &.outgoing {
-          color: #6366f1;
-          background: linear-gradient(
-            135deg,
-            rgba(99, 102, 241, 0.08),
-            rgba(99, 102, 241, 0.02)
-          );
-          border-color: rgba(99, 102, 241, 0.2);
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(99, 102, 241, 0.12),
-              rgba(99, 102, 241, 0.04)
-            );
-            box-shadow: 0 0 8px rgba(99, 102, 241, 0.15);
-          }
-        }
-      }
-    }
-
-    .metric-horizontal-divider {
-      background: #d1d5db;
-    }
-
-    .metric-bottom-row {
-      .metric-inline-item {
-        &.status-healthy {
-          background: linear-gradient(
-            135deg,
-            rgba(16, 185, 129, 0.06),
-            rgba(16, 185, 129, 0.01)
-          );
-          border-color: rgba(16, 185, 129, 0.2);
-
-          .q-icon {
-            color: #059669;
-          }
-
-          .metric-value {
-            color: #059669;
-          }
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(16, 185, 129, 0.1),
-              rgba(16, 185, 129, 0.03)
-            );
-            box-shadow: 0 0 6px rgba(16, 185, 129, 0.12);
-          }
-        }
-
-        &.status-warning {
-          background: linear-gradient(
-            135deg,
-            rgba(217, 119, 6, 0.06),
-            rgba(217, 119, 6, 0.01)
-          );
-          border-color: rgba(217, 119, 6, 0.2);
-
-          .q-icon {
-            color: #d97706;
-          }
-
-          .metric-value {
-            color: #d97706;
-          }
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(217, 119, 6, 0.1),
-              rgba(217, 119, 6, 0.03)
-            );
-            box-shadow: 0 0 6px rgba(217, 119, 6, 0.12);
-          }
-        }
-
-        &.status-critical {
-          background: linear-gradient(
-            135deg,
-            rgba(220, 38, 38, 0.06),
-            rgba(220, 38, 38, 0.01)
-          );
-          border-color: rgba(220, 38, 38, 0.2);
-
-          .q-icon {
-            color: #dc2626;
-          }
-
-          .metric-value {
-            color: #dc2626;
-          }
-
-          &:hover {
-            background: linear-gradient(
-              135deg,
-              rgba(220, 38, 38, 0.1),
-              rgba(220, 38, 38, 0.03)
-            );
-            box-shadow: 0 0 6px rgba(220, 38, 38, 0.12);
-          }
-        }
-
-        &.status-unknown {
-          background: linear-gradient(
-            135deg,
-            rgba(107, 114, 128, 0.06),
-            rgba(107, 114, 128, 0.01)
-          );
-          border-color: rgba(107, 114, 128, 0.2);
-
-          .q-icon {
-            color: #6b7280;
-          }
-
-          .metric-value {
-            color: #6b7280;
-          }
-        }
-
-        .metric-label {
-          color: rgba(0, 0, 0, 0.6);
-        }
-      }
-
-      .metric-row-divider {
-        background: #d1d5db;
-      }
-    }
-  }
-}
-
-// Empty/Loading/Error States
-.empty-state,
-.loading-state,
-.error-state {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 2.5rem 1.5rem;
-  text-align: center;
-  color: rgba(255, 255, 255, 0.5);
-  font-size: 0.875rem;
-
-  .loading-text,
-  .error-text {
-    margin-top: 0.75rem;
-    font-weight: 400;
-  }
-}
-
-.body--light {
-  .empty-state,
-  .loading-state,
-  .error-state {
-    color: rgba(0, 0, 0, 0.5);
-  }
-}
-
-.error-state {
-  color: #f44336;
-  font-weight: 500;
-}
-
-.body--light .error-state {
-  color: #c62828;
-}
-
-.error-state {
-  color: var(--q-negative);
-}
-
-.red-charts-section {
-  :deep(.card-container) {
-    box-shadow: none;
-
-    :first-child {
-      padding: 0 0.0625rem !important;
-    }
-  }
-}
-
-:deep(
-  .metrics-correlation-dashboard .q-splitter--vertical > .q-splitter__separator
-) {
-  height: 100% !important;
-}
-</style>
-
-<style lang="scss">
-// Dark mode - consistent background
-.body--dark {
-  .service-graph-side-panel {
-    background: #1a1f2e; // Consistent panel background
-    color: #e4e7eb;
-    border-left: 1px solid rgba(255, 255, 255, 0.08);
-
-    .metric-card {
-      background: rgba(255, 255, 255, 0.05);
-    }
-  }
-}
-
-// Light mode
-.body--light {
-  .service-graph-side-panel {
-    background: #ffffff;
-    color: #333333;
-    border-left: 1px solid #e0e0e0;
-
-    .metric-card {
-      background: #f9f9f9;
-    }
-  }
+/* Numeric columns reserve a fixed right-hand slot: the value sits just left of
+   it, and the per-cell "view in traces" button lives in that slot on hover — so
+   there's no overlap and no shift. Headers get the same reserve so their text /
+   sort-icon stay aligned with the values. */
+.svc-panel-table :deep(td[class~="text-right!"]) > div,
+.svc-panel-table :deep(th[class~="text-right!"]) {
+  padding-right: 1.75rem;
 }
 </style>

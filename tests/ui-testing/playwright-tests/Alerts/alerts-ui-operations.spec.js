@@ -7,7 +7,6 @@ const { getOrgIdentifier } = require('../utils/cloud-auth.js');
 // Test timeout constants (in milliseconds)
 const FIVE_MINUTES_MS = 300000;
 const THREE_MINUTES_MS = 180000;
-const UI_STABILIZATION_WAIT_MS = 2000;
 
 // ============================================================================
 // Alerts UI Operations — each test is self-contained with its own suffix
@@ -40,7 +39,7 @@ test.describe("Alerts UI Operations", () => {
     testLogger.info('Created template', { templateName });
 
     const destinationName = 'auto_playwright_destination_' + suffix;
-    const slackUrl = "DEMO";
+    const slackUrl = "http://demo.com";
     await pm.alertDestinationsPage.ensureDestinationExists(destinationName, slackUrl, templateName);
     testLogger.info('Created destination', { destinationName });
   });
@@ -60,7 +59,6 @@ test.describe("Alerts UI Operations", () => {
     testLogger.info('Created isolated template for deletion test', { templateName: deleteTemplateName });
 
     await pm.alertTemplatesPage.navigateToTemplates();
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     await pm.alertTemplatesPage.deleteTemplateAndVerify(deleteTemplateName);
     testLogger.info('Successfully deleted isolated template', { templateName: deleteTemplateName });
@@ -75,11 +73,16 @@ test.describe("Alerts UI Operations", () => {
     timeout: FIVE_MINUTES_MS
   }, async ({ page }) => {
     const suffix = pm.alertsPage.generateRandomString();
-    const streamName = 'auto_playwright_stream';
+    // Use the shared e2e_automate fixture: it is pre-ingested by global-setup (so it's in
+    // the alert wizard's page-load stream cache and is selectable) AND is universally
+    // protected from cleanup on every branch, so it can't be deleted mid-run. A dedicated
+    // auto_pw_stream_* fixture was fragile — on re-runs GITHUB_RUN_ID is stable, so the
+    // pre-test cleanup deleted the previous attempt's stream and global-setup's re-ingest
+    // hit the async "is being deleted" race, leaving the wizard dropdown empty.
+    const streamName = 'e2e_automate';
 
     // Ingest test data for the stream
     await pm.commonActions.ingestTestData(streamName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     // Create validation infrastructure with unique names
     const validationInfra = await pm.alertsPage.ensureValidationInfrastructure(pm, suffix);
@@ -90,11 +93,9 @@ test.describe("Alerts UI Operations", () => {
     await pm.alertTemplatesPage.ensureTemplateExists(templateName);
 
     await pm.commonActions.navigateToAlerts();
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     // Ingest custom test data for better query results
     await pm.commonActions.ingestCustomTestData(streamName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     // Create folder
     const folderName = 'auto_' + suffix;
@@ -114,7 +115,6 @@ test.describe("Alerts UI Operations", () => {
     // Cleanup
     await pm.commonActions.navigateToAlerts();
     await pm.alertsPage.navigateToFolder(folderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     await pm.alertsPage.deleteAlertByRow(alertName);
     await pm.dashboardFolder.searchFolder(folderName);
@@ -133,7 +133,13 @@ test.describe("Alerts UI Operations", () => {
     timeout: THREE_MINUTES_MS
   }, async ({ page }) => {
     const suffix = pm.alertsPage.generateRandomString();
-    const streamName = 'auto_playwright_stream';
+    // Use the shared e2e_automate fixture: it is pre-ingested by global-setup (so it's in
+    // the alert wizard's page-load stream cache and is selectable) AND is universally
+    // protected from cleanup on every branch, so it can't be deleted mid-run. A dedicated
+    // auto_pw_stream_* fixture was fragile — on re-runs GITHUB_RUN_ID is stable, so the
+    // pre-test cleanup deleted the previous attempt's stream and global-setup's re-ingest
+    // hit the async "is being deleted" race, leaving the wizard dropdown empty.
+    const streamName = 'e2e_automate';
 
     // Ensure stream has data
     await pm.commonActions.ingestTestData(streamName);
@@ -143,7 +149,6 @@ test.describe("Alerts UI Operations", () => {
     testLogger.info('Validation infrastructure ready for manual trigger test', validationInfra);
 
     await pm.commonActions.navigateToAlerts();
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     // Create folder for the test
     const folderName = 'auto_trigger_' + suffix;
@@ -165,14 +170,16 @@ test.describe("Alerts UI Operations", () => {
     expect(triggerSuccess).toBe(true);
     testLogger.info('Manual alert trigger successful', { alertName });
 
-    // Cleanup: delete the alert and folder
+    // Cleanup: delete the alert then the folder
+    // navigateToFolder puts us inside the folder (alert list view); after deleting
+    // the alert we must navigate back to the alerts root (folder list) before
+    // deleting the folder. dashboardFolder.* uses dashboard-specific locators that
+    // don't exist on the alerts page, so use alertsPage.deleteFolder instead.
     await pm.commonActions.navigateToAlerts();
     await pm.alertsPage.navigateToFolder(folderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
     await pm.alertsPage.deleteAlertByRow(alertName);
-    await pm.dashboardFolder.searchFolder(folderName);
-    await pm.dashboardFolder.verifyFolderVisible(folderName);
-    await pm.dashboardFolder.deleteFolder(folderName);
+    await pm.commonActions.navigateToAlerts();
+    await pm.alertsPage.deleteFolder(folderName);
 
     testLogger.info('Feature #9484 test completed: Manual Alert Trigger via UI');
   });
@@ -186,7 +193,13 @@ test.describe("Alerts UI Operations", () => {
     timeout: FIVE_MINUTES_MS
   }, async ({ page }) => {
     const suffix = pm.alertsPage.generateRandomString();
-    const streamName = 'auto_playwright_stream';
+    // Use the shared e2e_automate fixture: it is pre-ingested by global-setup (so it's in
+    // the alert wizard's page-load stream cache and is selectable) AND is universally
+    // protected from cleanup on every branch, so it can't be deleted mid-run. A dedicated
+    // auto_pw_stream_* fixture was fragile — on re-runs GITHUB_RUN_ID is stable, so the
+    // pre-test cleanup deleted the previous attempt's stream and global-setup's re-ingest
+    // hit the async "is being deleted" race, leaving the wizard dropdown empty.
+    const streamName = 'e2e_automate';
 
     // Ensure stream has data
     await pm.commonActions.ingestTestData(streamName);
@@ -197,7 +210,7 @@ test.describe("Alerts UI Operations", () => {
     testLogger.info('Template ready for use', { templateName });
 
     const destinationName = 'auto_playwright_destination_' + suffix;
-    const slackUrl = "DEMO";
+    const slackUrl = "http://demo.com";
     await pm.alertDestinationsPage.ensureDestinationExists(destinationName, slackUrl, templateName);
     testLogger.info('Destination ready for use', { destinationName });
 
@@ -223,7 +236,6 @@ test.describe("Alerts UI Operations", () => {
     // Create a valid alert
     await pm.commonActions.navigateToAlerts();
     await pm.alertsPage.navigateToFolder(folderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
     const column = 'log';
     const value = 'test';
     const alertName = await pm.alertsPage.createAlert(streamName, column, value, destinationName, suffix);
@@ -239,7 +251,6 @@ test.describe("Alerts UI Operations", () => {
     // Navigate back and verify alert
     await pm.commonActions.navigateToAlerts();
     await pm.alertsPage.navigateToFolder(folderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     await pm.alertsPage.verifyAlertCellVisible(alertName);
     await pm.alertsPage.verifyCloneAlertUIValidation(alertName);
@@ -249,17 +260,17 @@ test.describe("Alerts UI Operations", () => {
     // Move alert to target folder
     const targetFolderName = 'testfoldermove';
     await pm.alertsPage.ensureFolderExists(targetFolderName, 'Test Folder for Moving Alerts');
-    await pm.alertsPage.moveAllAlertsToFolder(targetFolderName);
+    // Navigate back to source folder — ensureFolderExists may navigate away via createFolder
+    await pm.alertsPage.navigateToFolder(folderName);
+    await pm.alertsPage.moveAllAlertsToFolder(targetFolderName, { expectAlertName: alertName });
 
     // Verify in target folder
     await pm.dashboardFolder.searchFolder(folderName);
     await pm.dashboardFolder.verifyFolderVisible(folderName);
     await pm.dashboardFolder.deleteFolder(folderName);
 
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
     await pm.dashboardFolder.searchFolder(targetFolderName);
     await pm.alertsPage.navigateToFolder(targetFolderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
 
     await pm.alertsPage.searchAlert(alertName);
     await pm.alertsPage.verifySearchResultsUIValidation(1);
@@ -293,22 +304,14 @@ test.describe("Alerts & Incidents Page Navigation", { tag: '@enterprise' }, () =
         // Wait for alert list page to be ready
         await pm.alertsPage.waitForAlertListPageReady();
 
-        // Check config API for enterprise feature flag (service_graph_enabled)
-        let isEnterprise = false;
-        try {
-            const configResp = await page.waitForResponse(
-                response => response.url().includes('/config') && response.status() === 200,
-                { timeout: 10000 }
-            );
-            const configBody = await configResp.json();
-            isEnterprise = configBody?.service_graph_enabled === true;
-        } catch {
-            const incidentsMenu = page.locator(pm.alertsPage.locators.incidentsMenuItem);
-            isEnterprise = await incidentsMenu.isVisible({ timeout: 5000 }).catch(() => false);
-        }
+        // Check if incidents feature is enabled (controlled by incidents_enabled in the
+        // config API on ENT builds). We detect it by checking whether the incidents
+        // sidebar menu item is visible — it is added dynamically after the config loads.
+        // waitForAlertListPageReady() above ensures config has already been processed.
+        const isEnterprise = await pm.alertsPage.isIncidentsFeatureEnabled(5000);
 
         if (!isEnterprise) {
-            test.skip(true, 'service_graph_enabled is false — enterprise feature, skipping on OSS');
+            test.skip(true, 'incidents_enabled is false — enterprise feature, skipping on OSS');
         }
         testLogger.info('Alert page loaded successfully (enterprise features enabled)');
     });

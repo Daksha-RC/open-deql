@@ -15,133 +15,289 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="step-advanced" :class="store.state.theme === 'dark' ? 'dark-mode' : 'light-mode'">
-    <div class="step-content card-container">
-      <!-- Section header -->
-      <div class="section-header">
-        <div class="section-header-accent" />
-        <span class="section-header-title">{{ t('alerts.additional_settings') || 'Additional Settings' }}</span>
-      </div>
-
-      <div class="tw:px-3 tw:py-3 tw:flex tw:flex-col tw:gap-4">
-
-        <!-- Template Override -->
-        <div>
-          <div class="subsection-label tw:mb-2">
-            <span>{{ t("alerts.template") }}</span>
-            <q-btn style="color: #A0A0A0;" no-caps padding="xs" size="sm" flat icon="info_outline">
-              <q-tooltip>{{ t('alerts.alertSettings.templateTooltip') }}</q-tooltip>
-            </q-btn>
-          </div>
-          <div class="tw:flex tw:items-center tw:gap-2">
-            <q-select
-              v-model="localTemplate"
-              :options="filteredTemplates"
-              class="no-case q-py-none inline-condition-select alert-v3-select"
-              borderless dense use-input clearable emit-value
-              :input-debounce="400" hide-bottom-space
-              @filter="filterTemplates"
-              @update:model-value="emitTemplateUpdate"
-              style="min-width: 240px; max-width: 300px"
-            >
-              <template v-slot:selected>
-                <div v-if="localTemplate" class="ellipsis">{{ localTemplate }}<q-tooltip>{{ localTemplate }}</q-tooltip></div>
-              </template>
-              <template v-slot:no-option>
-                <q-item><q-item-section class="text-grey">{{ t('alerts.advanced.noTemplatesAvailable') }}</q-item-section></q-item>
-              </template>
-            </q-select>
-            <q-btn icon="refresh" padding="xs" unelevated size="sm" round flat :title="t('alerts.advanced.refreshTemplates')" @click="$emit('refresh:templates')" />
-          </div>
-        </div>
-
-        <!-- Context Variables -->
-        <div>
-          <div class="subsection-label tw:mb-2">
-            <span>{{ t("alerts.additionalVariables") }}</span>
-            <q-btn style="color: #A0A0A0;" no-caps padding="xs" size="sm" flat icon="info_outline">
-              <q-tooltip>{{ t('alerts.advanced.variablesTooltip') }}</q-tooltip>
-            </q-btn>
-          </div>
-          <template v-if="!localVariables.length">
-            <q-btn data-test="alert-variables-add-btn" size="sm" class="no-border o2-secondary-button tw:h-[28px]" flat no-caps @click="addVariable">
-              <span>{{ t('alerts.advanced.addVariable') }}</span>
-            </q-btn>
-          </template>
-          <template v-else>
-            <div
-              v-for="(variable, index) in localVariables"
-              :key="variable.id"
-              class="tw:flex tw:items-center tw:gap-2 tw:mb-2"
-              :data-test="`alert-variables-${index + 1}`"
-            >
-              <q-input data-test="alert-variables-key-input" v-model="variable.key" :placeholder="t('common.name')" dense borderless class="inline-condition-select alert-v3-input" style="min-width: 140px;" @update:model-value="emitUpdate" />
-              <q-input data-test="alert-variables-value-input" v-model="variable.value" :placeholder="t('common.value')" dense borderless class="inline-condition-select alert-v3-input" style="min-width: 200px;" @update:model-value="emitUpdate" />
-              <q-btn data-test="alert-variables-delete-variable-btn" icon="delete_outline" padding="xs" unelevated size="sm" round flat @click="removeVariable(variable)" />
-              <q-btn data-test="alert-variables-add-variable-btn" v-if="index === localVariables.length - 1" icon="add" padding="xs" unelevated size="sm" round flat @click="addVariable" />
-            </div>
-          </template>
-        </div>
-
-        <!-- Description -->
-        <div>
-          <div class="subsection-label tw:mb-2"><span>{{ t("alerts.description") }}</span></div>
-          <q-input
-            v-model="localDescription"
-            dense borderless
-            class="inline-condition-select"
-            style="width: 100%; resize: none;"
-            type="textarea"
-            :placeholder="t('alerts.placeholders.typeSomething')"
-            rows="4"
-            @update:model-value="emitUpdate"
+  <div class="step-advanced w-full">
+    <!-- DESCENDANT step (Rule ③): the AddAlert orchestrator owns the ONE <OForm>
+         and provides FORM_CONTEXT_KEY. The OForm* fields below inject that form
+         and bind by nested `name=` (template, context_attributes[i].*,
+         description, row_template, row_template_type); the composed schema in
+         AddAlert.schema.ts validates on save. -->
+    <div>
+      <div class="step-content rounded-default bg-surface-overlay border-border-default border">
+        <!-- Section header -->
+        <div class="section-header border-border-default flex items-center border-b px-3 py-2.5">
+          <div
+            class="section-header-accent rounded-default bg-theme-accent me-2 h-4 w-0.75 shrink-0"
           />
+          <span class="section-header-title text-compact text-text-heading font-semibold">{{
+            t("alerts.additional_settings")
+          }}</span>
         </div>
 
-        <!-- Row Template -->
-        <div>
-          <div class="tw:flex tw:items-center tw:justify-between tw:mb-2">
-            <div class="subsection-label">
-              <span>{{ t("alerts.row") }}</span>
-              <q-btn data-test="add-alert-row-input-info-btn" style="color: #A0A0A0;" no-caps padding="xs" size="sm" flat icon="info_outline">
-                <q-tooltip>{{ t('alerts.advanced.rowTemplateTooltip') }}</q-tooltip>
-              </q-btn>
+        <div class="flex flex-col gap-4 px-3 py-3">
+          <!-- Template Override -->
+          <div>
+            <div
+              class="subsection-label text-text-secondary mb-2 flex items-center text-xs font-semibold"
+            >
+              <span>{{ t("alerts.template") }}</span>
+              <OButton
+                data-test="advanced-template-info-btn"
+                variant="ghost-primary"
+                size="xs"
+                class="gap-1 font-medium"
+                @click="openHelp('template')"
+              >
+                <OIcon name="help" size="xs" />
+                <span>{{ t("alerts.alertSettings.helpLearnMore") }}</span>
+              </OButton>
             </div>
-            <div class="tw:flex tw:items-center tw:gap-2">
-              <span class="tw:text-xs tw:opacity-60">{{ t('alerts.advanced.templateType') }}</span>
-              <q-btn-toggle
-                data-test="add-alert-row-template-type-toggle"
-                v-model="localRowTemplateType"
-                toggle-color="primary"
-                :options="rowTemplateTypeOptions"
-                dense no-caps unelevated size="sm"
-                @update:model-value="emitUpdate"
+            <div class="flex items-center gap-2">
+              <OFormSelect
+                name="template"
+                :options="formattedTemplates"
+                clearable
+                :placeholder="t('alerts.advanced.selectTemplate')"
+                class="max-w-75 min-w-60"
+                data-test="advanced-template-override-select"
+              >
+                <template #empty>{{ t("alerts.advanced.noTemplatesAvailable") }}</template>
+              </OFormSelect>
+              <OButton
+                variant="ghost"
+                size="icon-circle-sm"
+                :title="t('alerts.advanced.refreshTemplates')"
+                @click="$emit('refresh:templates')"
+              >
+                <OIcon name="refresh" size="sm" />
+              </OButton>
+            </div>
+          </div>
+
+          <!-- Context Variables -->
+          <div>
+            <div
+              class="subsection-label text-text-secondary mb-2 flex items-center text-xs font-semibold"
+            >
+              <span>{{ t("alerts.additionalVariables") }}</span>
+              <OButton
+                data-test="advanced-variables-info-btn"
+                variant="ghost-primary"
+                size="xs"
+                class="gap-1 font-medium"
+                @click="openHelp('variables')"
+              >
+                <OIcon name="help" size="xs" />
+                <span>{{ t("alerts.alertSettings.helpLearnMore") }}</span>
+              </OButton>
+            </div>
+            <template v-if="!variableRows.length">
+              <OButton
+                data-test="alert-variables-add-btn"
+                variant="outline"
+                size="sm"
+                @click="addVariable"
+              >
+                <span>{{ t("alerts.advanced.addVariable") }}</span>
+              </OButton>
+            </template>
+            <template v-else>
+              <!-- Rule ①: repeatable key/value rows are FORM-OWNED. Each row's
+                 fields bind by INDEX-based `name=` (`context_attributes[i].*`),
+                 so the v-for `:key` MUST be the array INDEX — a stable-id/uuid
+                 `:key` would leave surviving rows bound to their OLD index after a
+                 mid-list delete (inputs shift/blank while data stays correct).
+                 Proven by the delete test in Advanced.spec.ts. -->
+              <div
+                v-for="(variable, index) in variableRows"
+                :key="index"
+                class="mb-2 flex items-center gap-2"
+                :data-test="`alert-variables-${index + 1}`"
+              >
+                <OFormInput
+                  data-test="alert-variables-key-input"
+                  :name="`context_attributes[${index}].key`"
+                  :placeholder="t('common.name')"
+                  class="min-w-35"
+                />
+                <OFormInput
+                  data-test="alert-variables-value-input"
+                  :name="`context_attributes[${index}].value`"
+                  :placeholder="t('common.value')"
+                  class="min-w-50"
+                />
+                <OButton
+                  data-test="alert-variables-delete-variable-btn"
+                  variant="ghost"
+                  size="icon-circle-sm"
+                  @click="removeVariable(index)"
+                >
+                  <OIcon name="delete-outline" size="sm" />
+                </OButton>
+                <OButton
+                  data-test="alert-variables-add-variable-btn"
+                  v-if="index === variableRows.length - 1"
+                  variant="ghost"
+                  size="icon-circle-sm"
+                  @click="addVariable"
+                >
+                  <OIcon name="add" size="sm" />
+                </OButton>
+              </div>
+            </template>
+          </div>
+
+          <!-- Priority & tags (Feature 2, PT-10) -->
+          <div class="flex flex-col gap-4">
+            <div>
+              <div
+                class="subsection-label text-text-secondary mb-2 flex items-center text-xs font-semibold"
+              >
+                <span>{{ t("alerts.priority") }}</span>
+                <OIcon name="info" size="sm" class="ms-1 cursor-pointer" />
+                <OTooltip :content="t('alerts.priorityTooltip')" side="right" />
+              </div>
+              <OFormSelect
+                name="priority"
+                :options="priorityOptions"
+                :searchable="false"
+                clearable
+                width="xs"
+                :placeholder="t('alerts.priorityUnset')"
+                data-test="alert-priority-select"
+              />
+            </div>
+            <!-- The escape hatch for an alert whose identity dimensions cannot
+                 express its owner. Normally routing works it out. -->
+            <div v-if="oncallEnabled">
+              <div
+                class="subsection-label text-text-secondary mb-2 flex items-center text-xs font-semibold"
+              >
+                <span>{{ t("alerts.oncallTeam") }}</span>
+                <OIcon name="info" size="sm" class="ms-1 cursor-pointer" />
+                <OTooltip :content="t('alerts.oncallTeamTooltip')" side="right" />
+              </div>
+              <OFormSelect
+                name="oncall_team"
+                :options="oncallTeamOptions"
+                clearable
+                width="md"
+                :placeholder="t('alerts.oncallTeamPlaceholder')"
+                data-test="alert-oncall-team-select"
+              >
+                <template #empty>{{ t("alerts.oncallTeamNoTeams") }}</template>
+              </OFormSelect>
+            </div>
+            <div>
+              <div
+                class="subsection-label text-text-secondary mb-2 flex items-center text-xs font-semibold"
+              >
+                <span>{{ t("alerts.tags") }}</span>
+                <OIcon name="info" size="sm" class="ms-1 cursor-pointer" />
+                <OTooltip :content="t('alerts.tagsTooltip')" side="right" />
+              </div>
+              <OFormTagInput
+                name="tags"
+                :placeholder="t('alerts.placeholders.addTag')"
+                data-test="alert-tags-input"
               />
             </div>
           </div>
-          <q-input
-            data-test="add-alert-row-input-textarea"
-            v-model="localRowTemplate"
-            dense borderless
-            class="inline-condition-select"
-            style="width: 100%; resize: none;"
-            type="textarea"
-            :placeholder="rowTemplatePlaceholder"
-            rows="4"
-            @update:model-value="emitUpdate"
-          />
-        </div>
 
+          <!-- Description -->
+          <div>
+            <div
+              class="subsection-label text-text-secondary mb-2 flex items-center text-xs font-semibold"
+            >
+              <span>{{ t("alerts.description") }}</span>
+            </div>
+            <OFormTextarea
+              name="description"
+              :placeholder="t('alerts.placeholders.typeSomething')"
+              :rows="4"
+            />
+          </div>
+
+          <!-- Row Template -->
+          <div>
+            <div class="mb-2 flex items-center justify-between">
+              <div
+                class="subsection-label text-text-secondary flex items-center text-xs font-semibold"
+              >
+                <span>{{ t("alerts.row") }}</span>
+                <OButton
+                  data-test="add-alert-row-input-info-btn"
+                  variant="ghost-primary"
+                  size="xs"
+                  class="gap-1 font-medium"
+                  @click="openHelp('rowTemplate')"
+                >
+                  <OIcon name="help" size="xs" />
+                  <span>{{ t("alerts.alertSettings.helpLearnMore") }}</span>
+                </OButton>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-xs opacity-60">{{ t("alerts.advanced.templateType") }}</span>
+                <OFormToggleGroup
+                  data-test="add-alert-row-template-type-toggle"
+                  name="row_template_type"
+                >
+                  <OToggleGroupItem value="String" size="sm">
+                    <template #icon-left><OIcon name="title" size="sm" /></template>
+                    {{ t("alerts.advanced.templateTypeString") }}
+                  </OToggleGroupItem>
+                  <OToggleGroupItem value="Json" size="sm">
+                    <template #icon-left><OIcon name="data-object" size="sm" /></template>
+                    {{ t("alerts.advanced.templateTypeJson") }}
+                  </OToggleGroupItem>
+                </OFormToggleGroup>
+              </div>
+            </div>
+            <OFormTextarea
+              data-test="add-alert-row-input-textarea"
+              name="row_template"
+              :placeholder="rowTemplatePlaceholder"
+              :rows="4"
+            />
+          </div>
+        </div>
       </div>
     </div>
+    <AlertSettingsHelpDrawer
+      v-model:open="helpDrawerOpen"
+      :topic="helpTopic"
+      :templates="templates"
+      :current-template="templateValue || ''"
+      :selected-destinations="selectedDestinations"
+      :destinations="destinations"
+      :context-attributes="variableRows"
+      :row-template="rowTemplateValue"
+      :row-template-type="rowTemplateTypeValue"
+      :facts="previewFacts"
+      :extra="previewExtra"
+      @apply:template="onApplyTemplate"
+    />
   </div>
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, computed, watch, type PropType, type Ref } from "vue";
-import { useI18n } from "vue-i18n";
+import { defineComponent, ref, computed, inject, onMounted, type PropType, type Ref } from "vue";
+import { raw, type I18nText, useI18nTyped } from "@/types/i18n";
 import { useStore } from "vuex";
 import { getUUID } from "@/utils/zincutils";
+import OToggleGroupItem from "@/lib/core/ToggleGroup/OToggleGroupItem.vue";
+import OFormToggleGroup from "@/lib/core/ToggleGroup/OFormToggleGroup.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OFormInput from "@/lib/forms/Input/OFormInput.vue";
+import OFormTextarea from "@/lib/forms/Input/OFormTextarea.vue";
+import OFormSelect from "@/lib/forms/Select/OFormSelect.vue";
+import OFormTagInput from "@/lib/forms/TagInput/OFormTagInput.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import { FORM_CONTEXT_KEY } from "@/lib/forms/Form/OForm.types";
+import AlertSettingsHelpDrawer from "@/components/alerts/AlertSettingsHelpDrawer.vue";
+import { queryClient } from "@/composables/query/queryClient";
+import { oncallTeamsQuery } from "@/services/oncall.queries";
+import type { OnCallTeam } from "@/ts/interfaces/oncall";
 
 export interface Variable {
   id: string;
@@ -151,6 +307,18 @@ export interface Variable {
 
 export default defineComponent({
   name: "Step6Advanced",
+  components: {
+    OFormToggleGroup,
+    OToggleGroupItem,
+    OButton,
+    OIcon,
+    OFormInput,
+    OFormTextarea,
+    OFormSelect,
+    OFormTagInput,
+    OTooltip,
+    AlertSettingsHelpDrawer,
+  },
   props: {
     template: {
       type: String,
@@ -165,8 +333,8 @@ export default defineComponent({
       default: () => [],
     },
     description: {
-      type: String,
-      default: "",
+      type: String as unknown as PropType<I18nText>,
+      default: raw(""),
     },
     rowTemplate: {
       type: String,
@@ -176,227 +344,180 @@ export default defineComponent({
       type: String,
       default: "String",
     },
+    destinations: {
+      type: Array as PropType<any[]>,
+      default: () => [],
+    },
+    selectedDestinations: {
+      type: Array as PropType<string[]>,
+      default: () => [],
+    },
+    alertName: {
+      type: String,
+      default: "",
+    },
+    streamName: {
+      type: String,
+      default: "",
+    },
+    streamType: {
+      type: String,
+      default: "",
+    },
+    triggerCondition: {
+      type: Object as PropType<any>,
+      default: () => ({}),
+    },
+    streamFields: {
+      type: Array as PropType<any[]>,
+      default: () => [],
+    },
   },
-  emits: ["update:template", "refresh:templates", "update:contextAttributes", "update:description", "update:rowTemplate", "update:rowTemplateType"],
-  setup(props, { emit }) {
-    const { t } = useI18n();
+  emits: [
+    "update:template",
+    "refresh:templates",
+    "update:contextAttributes",
+    "update:description",
+    "update:rowTemplate",
+    "update:rowTemplateType",
+  ],
+  setup(props) {
+    const { t } = useI18nTyped();
     const store = useStore();
 
-    // Template override
-    const localTemplate = ref(props.template);
-    const formattedTemplates = computed(() => props.templates.map((t: any) => t.name));
-    const filteredTemplates: Ref<string[]> = ref([]);
-    const filterTemplates = (val: string, update: any) => {
-      update(() => {
-        if (val === "") {
-          filteredTemplates.value = [...formattedTemplates.value];
-        } else {
-          const needle = val.toLowerCase();
-          filteredTemplates.value = formattedTemplates.value.filter(
-            (v: string) => v.toLowerCase().indexOf(needle) > -1
-          );
-        }
-      });
-    };
-    const emitTemplateUpdate = () => {
-      emit("update:template", localTemplate.value || "");
-    };
+    // DESCENDANT step (Rule ③): the AddAlert orchestrator provides
+    // FORM_CONTEXT_KEY — this is the ONE form all reads/writes go through.
+    const form: any = inject(FORM_CONTEXT_KEY, null);
 
-    watch(
-      () => props.template,
-      (newVal) => {
-        localTemplate.value = newVal;
+    // Priority options (PT-1). Value is the INTEGER storage id so the form
+    // holds exactly what the API serializes — the `P3` form is display only.
+    const priorityOptions = [1, 2, 3, 4, 5].map((value) => ({
+      label: raw(`P${value}`),
+      value,
+    }));
+
+    // ── Reactive form reads (single source of truth for preview + help
+    //    drawer). ────────────────────────────────────────────────────────────
+    const variableRows: Ref<Variable[]> = form.useStore(
+      (s: any) => (s.values?.context_attributes ?? []) as Variable[],
+    );
+    const templateValue = form.useStore((s: any) => (s.values?.template ?? "") as string);
+    const descriptionValue = form.useStore((s: any) => (s.values?.description ?? "") as string);
+    const rowTemplateValue = form.useStore((s: any) => (s.values?.row_template ?? "") as string);
+    const rowTemplateTypeValue = form.useStore(
+      (s: any) => (s.values?.row_template_type ?? "String") as string,
+    );
+
+    const formattedTemplates = computed(() => props.templates.map((tpl: any) => tpl.name));
+
+    // Hidden entirely when on-call is off, so an OSS build never shows a
+    // control that cannot page anybody.
+    const oncallEnabled = computed(() => store.state.zoConfig?.oncall_enabled === true);
+    const oncallTeams = ref<OnCallTeam[]>([]);
+    const oncallTeamOptions = computed(() =>
+      oncallTeams.value.map((team) => ({ label: raw(team.name), value: team.id })),
+    );
+
+    // A failed lookup leaves the picker empty rather than blocking the save:
+    // the field is optional, and routing still resolves from ownership.
+    onMounted(async () => {
+      if (!oncallEnabled.value) return;
+      try {
+        oncallTeams.value = await queryClient.fetchQuery(
+          oncallTeamsQuery(store.state.selectedOrganization.identifier),
+        );
+      } catch {
+        oncallTeams.value = [];
       }
-    );
-    watch(
-      () => props.templates,
-      () => {
-        filteredTemplates.value = [...formattedTemplates.value];
-      },
-      { immediate: true }
-    );
-
-    const localVariables = ref<Variable[]>([...props.contextAttributes]);
-    const localDescription = ref(props.description);
-    const localRowTemplate = ref(props.rowTemplate);
-    const localRowTemplateType = ref(props.rowTemplateType);
-
-    const rowTemplateTypeOptions = [
-      {
-        label: "String",
-        value: "String",
-      },
-      {
-        label: "JSON",
-        value: "Json",
-      },
-    ];
-
-    const rowTemplatePlaceholder = computed(() => {
-      return localRowTemplateType.value === 'Json'
-        ? 'e.g - {"user": "{name}", "timestamp": "{timestamp}"}'
-        : 'e.g - Alert was triggered at {timestamp}';
     });
 
-    // Watch for prop changes
-    watch(
-      () => props.contextAttributes,
-      (newVal) => {
-        localVariables.value = [...newVal];
-      },
-      { deep: true }
-    );
+    // NOTE: these two messages contain `{name}` / `{timestamp}` — END-USER row
+    // template syntax, NOT i18n params. Their braces are escaped in en.json
+    // (`{'{'}` / `{'}'}`) so vue-i18n emits them verbatim instead of trying to
+    // interpolate them. Advanced.spec.ts asserts the rendered strings.
+    const rowTemplatePlaceholder = computed(() => {
+      return rowTemplateTypeValue.value === "Json"
+        ? t("alerts.advanced.rowTemplatePlaceholderJson")
+        : t("alerts.advanced.rowTemplatePlaceholderString");
+    });
 
-    watch(
-      () => props.description,
-      (newVal) => {
-        localDescription.value = newVal;
-      }
-    );
-
-    watch(
-      () => props.rowTemplate,
-      (newVal) => {
-        localRowTemplate.value = newVal;
-      }
-    );
-
-    watch(
-      () => props.rowTemplateType,
-      (newVal) => {
-        localRowTemplateType.value = newVal;
-      }
-    );
-
+    // ── Field-array add/remove — mutate the form (Rule ①), never a local ref.
+    //    The OForm* fields write their own values; no emit mirror is needed —
+    //    the ONE form is the single source of truth. ───────────────────────────
     const addVariable = () => {
-      localVariables.value.push({
+      form.pushFieldValue("context_attributes", {
         id: getUUID(),
         key: "",
         value: "",
       });
-      emitUpdate();
     };
 
-    const removeVariable = (variable: Variable) => {
-      localVariables.value = localVariables.value.filter(
-        (v: Variable) => v.id !== variable.id
-      );
-      emitUpdate();
+    const removeVariable = (index: number) => {
+      form.removeFieldValue("context_attributes", index);
     };
 
-    const emitUpdate = () => {
-      emit("update:contextAttributes", localVariables.value);
-      emit("update:description", localDescription.value);
-      emit("update:rowTemplate", localRowTemplate.value);
-      emit("update:rowTemplateType", localRowTemplateType.value);
+    const helpDrawerOpen = ref(false);
+    const helpTopic = ref<"template" | "variables" | "rowTemplate">("template");
+    const openHelp = (topic: "template" | "variables" | "rowTemplate") => {
+      helpTopic.value = topic;
+      helpDrawerOpen.value = true;
+    };
+
+    // Facts the preview can render truthfully from data the form already
+    // holds — surfaced as "your data" (live) rather than chipped. Runtime-only
+    // values (count, trigger time, rows) stay sample/opaque.
+    const previewFacts = computed(() => ({
+      alert_name: props.alertName,
+      stream_name: props.streamName,
+      stream_type: props.streamType,
+      alert_operator: props.triggerCondition?.operator,
+      alert_threshold: props.triggerCondition?.threshold,
+      alert_period: props.triggerCondition?.period,
+    }));
+
+    // The user's typed context variables ({key} -> value) are real data → live.
+    // Stream field NAMES are known but their runtime values are not, so they
+    // are passed through and the composable keeps them opaque (not faked).
+    const previewExtra = computed(() => ({
+      contextVariables: (variableRows.value || []).reduce(
+        (acc: Record<string, string>, v: Variable) => {
+          if (v.key) acc[v.key] = v.value;
+          return acc;
+        },
+        {},
+      ),
+      streamFields: (props.streamFields || [])
+        .map((c: any) => (typeof c === "string" ? c : c?.value))
+        .filter((name: any): name is string => !!name),
+    }));
+
+    const onApplyTemplate = (name: string) => {
+      form.setFieldValue("template", name);
     };
 
     return {
+      raw,
+      priorityOptions,
+      oncallEnabled,
+      oncallTeamOptions,
       t,
       store,
-      localTemplate,
-      filteredTemplates,
-      filterTemplates,
-      emitTemplateUpdate,
-      localVariables,
-      localDescription,
-      localRowTemplate,
-      localRowTemplateType,
-      rowTemplateTypeOptions,
+      variableRows,
+      templateValue,
+      descriptionValue,
+      rowTemplateValue,
+      rowTemplateTypeValue,
+      formattedTemplates,
       rowTemplatePlaceholder,
       addVariable,
       removeVariable,
-      emitUpdate,
+      helpDrawerOpen,
+      helpTopic,
+      openHelp,
+      previewFacts,
+      previewExtra,
+      onApplyTemplate,
     };
   },
 });
 </script>
-
-<style scoped lang="scss">
-.step-advanced {
-  width: 100%;
-
-  .step-content {
-    border-radius: 8px;
-  }
-
-  &.dark-mode {
-    .step-content { background-color: #212121; border: 1px solid #343434; }
-    .section-header { border-bottom: 1px solid #343434; }
-    .section-header-title { color: #e0e0e0; }
-    .section-header-accent { background: var(--q-primary); }
-    .subsection-label { color: #9ca3af; }
-  }
-
-  &.light-mode {
-    .step-content { background-color: #ffffff; border: 1px solid #e6e6e6; }
-    .section-header { border-bottom: 1px solid #eeeeee; }
-    .section-header-title { color: #374151; }
-    .section-header-accent { background: var(--q-primary); }
-    .subsection-label { color: #6b7280; }
-  }
-}
-
-.section-header {
-  display: flex;
-  align-items: center;
-  padding: 10px 12px;
-}
-.section-header-accent {
-  width: 3px;
-  height: 16px;
-  border-radius: 2px;
-  margin-right: 8px;
-  flex-shrink: 0;
-}
-.section-header-title {
-  font-size: 13px;
-  font-weight: 600;
-}
-.subsection-label {
-  display: flex;
-  align-items: center;
-  font-size: 12px;
-  font-weight: 600;
-}
-
-.inline-condition-select {
-  :deep(.q-field__control) {
-    border: 1px solid var(--o2-border-color, #e0e0e0);
-    border-radius: 0.375rem;
-    padding: 0 8px;
-    min-height: 28px;
-    height: 28px;
-    background-color: transparent;
-  }
-
-  :deep(.q-field__native),
-  :deep(.q-field__input) {
-    font-size: 13px;
-    min-height: 28px;
-    height: 28px;
-    padding: 0 !important;
-  }
-
-  :deep(.q-field__marginal) {
-    height: 28px !important;
-  }
-
-  :deep(.q-field__append) {
-    height: 28px !important;
-    align-items: center;
-  }
-}
-
-// Override fixed height for textarea fields
-.inline-condition-select:has(textarea) {
-  :deep(.q-field__control) {
-    height: auto !important;
-    min-height: 80px !important;
-  }
-  :deep(.q-field__native) {
-    height: auto !important;
-    min-height: 80px !important;
-  }
-}
-</style>

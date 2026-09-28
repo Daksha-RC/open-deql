@@ -16,8 +16,6 @@
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import IndexList from "@/plugins/logs/IndexList.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
@@ -30,22 +28,25 @@ const mockExtractFields = vi.fn();
 const mockGetValuesPartition = vi.fn();
 const mockGetFilterExpressionByFieldType = vi.fn(() => "field = 'value'");
 const mockFetchQueryDataWithHttpStream = vi.fn();
+const mockCancelStreamQueryBasedOnRequestId = vi.fn();
 
-vi.mock("@/services/search", () => ({
-  default: {
-    partition: vi.fn((...args) => {
-      console.log("MOCK partition called with:", args);
-      return Promise.resolve({
-        data: {
-          partitions: [
-            [1, 2],
-            [3, 4],
-          ],
-        },
-      });
-    }),
-  },
-}));
+vi.mock("@/services/search", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      partition: vi.fn(() => {
+        return Promise.resolve({
+          data: {
+            partitions: [
+              [1, 2],
+              [3, 4],
+            ],
+          },
+        });
+      }),
+    },
+  });
+});
 
 vi.mock("@/composables/useLogs", () => {
   const mockSearchObj = {
@@ -118,7 +119,6 @@ vi.mock("@/composables/useLogs", () => {
       selectedTraceStream: "",
       showSearchScheduler: false,
       toggleFunction: false, // DEPRECATED use showTransformEditor instead
-      isActionsEnabled: false,
       resetPlotChart: false,
     },
     data: {
@@ -208,7 +208,6 @@ vi.mock("@/composables/useLogs", () => {
       searchWebSocketTraceIds: <string[]>[],
       isOperationCancelled: false,
       searchRetriesCount: <{ [key: string]: number }>{},
-      actionId: null,
     },
     organizationIdentifier: "",
     runQuery: false,
@@ -250,6 +249,7 @@ vi.mock("@/composables/useLocalInterestingFields", () => ({
 vi.mock("@/composables/useStreamingSearch", () => ({
   default: () => ({
     fetchQueryDataWithHttpStream: mockFetchQueryDataWithHttpStream,
+    cancelStreamQueryBasedOnRequestId: mockCancelStreamQueryBasedOnRequestId,
   }),
 }));
 
@@ -257,19 +257,14 @@ vi.mock("@/utils/query/sqlIdentifiers", () => ({
   quoteSqlIdentifierIfNeeded: vi.fn((identifier: string) =>
     identifier.toUpperCase() === "USER" ? `"${identifier}"` : identifier,
   ),
-  stripSqlIdentifierQuotes: vi.fn((identifier: string) =>
-    identifier.replace(/"/g, ""),
-  ),
-  needsSqlIdentifierQuoting: vi.fn((identifier: string) =>
-    identifier.toUpperCase() === "USER"
-  ),
+  stripSqlIdentifierQuotes: vi.fn((identifier: string) => identifier.replace(/"/g, "")),
+  needsSqlIdentifierQuoting: vi.fn((identifier: string) => identifier.toUpperCase() === "USER"),
 }));
 
 // 1. Define your mock function FIRST
 vi.mock("@/services/stream", () => {
   // Define the mock function with a console.log
-  const mockFieldValues = vi.fn((...args) => {
-    console.log("MOCK fieldValues called with:", args);
+  const mockFieldValues = vi.fn(() => {
     // You can customize the return value based on args or call count if needed
     return Promise.resolve({
       data: {
@@ -295,10 +290,6 @@ vi.mock("@/services/stream", () => {
 const node = document.createElement("div");
 node.setAttribute("id", "app");
 document.body.appendChild(node);
-
-installQuasar({
-  plugins: [Dialog, Notify],
-});
 
 describe("Index List", async () => {
   let wrapper: any;
@@ -353,14 +344,8 @@ describe("Index List", async () => {
   it("addSearchTerm sets addToFilter using getFilterExpressionByFieldType", async () => {
     wrapper.vm.searchObj.data.stream.addToFilter = "";
     wrapper.vm.addSearchTerm("field", "value", "include");
-    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
-      "field = 'value'",
-    );
-    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith(
-      "field",
-      "value",
-      "include",
-    );
+    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe("field = 'value'");
+    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith("field", "value", "include");
   });
 
   it("toggleSchema sets loadingStream and calls extractFields", async () => {
@@ -385,11 +370,7 @@ describe("Index List", async () => {
     ];
     // Should match 'field' in a case-insensitive way and avoid duplicates
     const result = wrapper.vm.filterFieldFn(rows, "field");
-    expect(result).toEqual([
-      { name: "FieldOne" },
-      { name: "FieldTwo" },
-      { name: "AnotherField" },
-    ]);
+    expect(result).toEqual([{ name: "FieldOne" }, { name: "FieldTwo" }, { name: "AnotherField" }]);
     // Assert the function was called with the correct arguments
     expect(filterFieldFnSpy).toHaveBeenCalledWith(rows, "field");
   });
@@ -499,13 +480,9 @@ describe("Index List", async () => {
     expect(wrapper.vm.traceIdMapper["fooField"]).toBeUndefined();
   });
 
-  it("handles single stream selection correctly", async () => {
-    const opt = { value: "stream1", label: "Stream 1" };
-    wrapper.vm.handleSingleStreamSelect(opt);
-    expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([
-      "stream1",
-    ]);
-    expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([]);
+  it("handles multi stream selection correctly", async () => {
+    wrapper.vm.searchObj.data.stream.selectedStream = ["stream1"];
+    wrapper.vm.handleStreamSelection(wrapper.vm.searchObj.data.stream.selectedStream);
     expect(wrapper.vm.onStreamChange).toHaveBeenCalledWith("");
   });
 
@@ -516,11 +493,7 @@ describe("Index List", async () => {
   });
 
   it("filters fields correctly based on search term", async () => {
-    const rows = [
-      { name: "testField1" },
-      { name: "testField2" },
-      { name: "otherField" },
-    ];
+    const rows = [{ name: "testField1" }, { name: "testField2" }, { name: "otherField" }];
     const result = wrapper.vm.filterFieldFn(rows, "test");
     expect(result).toHaveLength(2);
     expect(result.map((r) => r.name)).toContain("testField1");
@@ -591,7 +564,7 @@ describe("Index List", async () => {
 
   it("handles multiple stream selection", async () => {
     wrapper.vm.searchObj.data.stream.selectedStream = ["stream1"];
-    wrapper.vm.handleMultiStreamSelection();
+    wrapper.vm.handleStreamSelection(wrapper.vm.searchObj.data.stream.selectedStream);
     expect(wrapper.vm.onStreamChange).toHaveBeenCalledWith("");
   });
 
@@ -607,15 +580,9 @@ describe("Index List", async () => {
       },
     };
 
-    expect(
-      wrapper.vm.streamFieldValues.value[field][stream].values,
-    ).toBeDefined();
-    expect(
-      wrapper.vm.streamFieldValues.value[field][stream].values[0].key,
-    ).toBe("value1");
-    expect(
-      wrapper.vm.streamFieldValues.value[field][stream].values[0].count,
-    ).toBe(1);
+    expect(wrapper.vm.streamFieldValues.value[field][stream].values).toBeDefined();
+    expect(wrapper.vm.streamFieldValues.value[field][stream].values[0].key).toBe("value1");
+    expect(wrapper.vm.streamFieldValues.value[field][stream].values[0].count).toBe(1);
   });
 
   it("handles search term addition with field type", async () => {
@@ -625,14 +592,8 @@ describe("Index List", async () => {
     const action = "include";
 
     wrapper.vm.addSearchTerm(field, value, action);
-    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith(
-      field,
-      value,
-      action,
-    );
-    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
-      "field = 'value'",
-    );
+    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith(field, value, action);
+    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe("field = 'value'");
   });
 
   it("updates field values on stream change", async () => {
@@ -648,9 +609,7 @@ describe("Index List", async () => {
     wrapper.vm.searchObj.data.stream.selectedStream = ["newStream"];
     await wrapper.vm.onStreamChange("");
 
-    expect(wrapper.vm.fieldValues[field].values).toEqual([
-      { key: "oldValue", count: 1 },
-    ]);
+    expect(wrapper.vm.fieldValues[field].values).toEqual([{ key: "oldValue", count: 1 }]);
   });
 
   // it("handles error in field values fetching", async () => {
@@ -754,9 +713,7 @@ describe("Index List", async () => {
       };
 
       wrapper.vm.handleSearchResponse(payload, response);
-      expect(wrapper.vm.fieldValues["testField"].errMsg).toBe(
-        "Failed to fetch field values",
-      );
+      expect(wrapper.vm.fieldValues["testField"].errMsg).toBe("Failed to fetch field values");
       expect(wrapper.vm.fieldValues["testField"].isLoading).toBe(false);
     });
 
@@ -897,9 +854,7 @@ describe("Index List", async () => {
       wrapper.vm.handleSearchReset(data);
 
       expect(wrapper.vm.streamFieldValues["testField"]).toEqual({});
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        data.payload.queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(data.payload.queryReq);
     });
 
     it("calls fetchValuesWithWebsocket with correct parameters", async () => {
@@ -915,9 +870,7 @@ describe("Index List", async () => {
 
       wrapper.vm.handleSearchReset(data);
 
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(queryReq);
     });
 
     it("handles multiple field resets correctly", async () => {
@@ -983,9 +936,7 @@ describe("Index List", async () => {
         isLoading: true,
         errMsg: "",
       });
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        data.payload.queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(data.payload.queryReq);
     });
 
     // Additional comprehensive test cases to reach 50+ tests
@@ -1011,9 +962,7 @@ describe("Index List", async () => {
         isLoading: true,
         errMsg: "",
       });
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        data.payload.queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(data.payload.queryReq);
     });
 
     it("should reset streamFieldValues correctly", async () => {
@@ -1036,34 +985,13 @@ describe("Index List", async () => {
   });
 
   describe("Additional Stream management tests", () => {
-    it("should handle single stream selection when stream not already selected", async () => {
-      const opt = { value: "newStream", label: "New Stream" };
+    it("should handle stream change on multi stream selection", async () => {
       wrapper.vm.searchObj.data.stream.selectedStream = ["oldStream"];
       wrapper.vm.searchObj.data.stream.selectedFields = ["field1", "field2"];
 
-      wrapper.vm.handleSingleStreamSelect(opt);
+      wrapper.vm.handleStreamSelection(wrapper.vm.searchObj.data.stream.selectedStream);
 
-      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([]);
-      expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([
-        "newStream",
-      ]);
       expect(wrapper.vm.onStreamChange).toHaveBeenCalledWith("");
-    });
-
-    it("should not clear fields when selecting same stream", async () => {
-      const opt = { value: "sameStream", label: "Same Stream" };
-      wrapper.vm.searchObj.data.stream.selectedStream = ["sameStream"];
-      wrapper.vm.searchObj.data.stream.selectedFields = ["field1", "field2"];
-
-      wrapper.vm.handleSingleStreamSelect(opt);
-
-      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([
-        "field1",
-        "field2",
-      ]);
-      expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([
-        "sameStream",
-      ]);
     });
   });
 
@@ -1077,11 +1005,7 @@ describe("Index List", async () => {
     });
 
     it("should filter fields case-insensitively", async () => {
-      const rows = [
-        { name: "TestField" },
-        { name: "testfield2" },
-        { name: "OTHER" },
-      ];
+      const rows = [{ name: "TestField" }, { name: "testfield2" }, { name: "OTHER" }];
 
       const result = wrapper.vm.filterFieldFn(rows, "TEST");
 
@@ -1211,25 +1135,49 @@ describe("Index List", async () => {
       expect(wrapper.vm.openedFilterFields.value).toEqual(["field1", "field3"]);
     });
 
-    it.skip("should cancel trace ID by calling cancelSearchQueryBasedOnRequestId", async () => {
+    it("should abort in-flight streams and clear the mapper in cancelTraceId", async () => {
+      mockCancelStreamQueryBasedOnRequestId.mockClear();
       const field = "testField";
-      const traceIds = ["trace1", "trace2"];
-      wrapper.vm.traceIdMapper[field] = traceIds;
-
-      const mockCancelSearchQuery = vi.fn();
-      wrapper.vm.cancelSearchQueryBasedOnRequestId = mockCancelSearchQuery;
+      wrapper.vm.traceIdMapper[field] = ["trace1", "trace2"];
 
       wrapper.vm.cancelTraceId(field);
 
-      expect(mockCancelSearchQuery).toHaveBeenCalledTimes(2);
-      expect(mockCancelSearchQuery).toHaveBeenCalledWith({
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledTimes(2);
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledWith({
         trace_id: "trace1",
         org_id: wrapper.vm.store.state.selectedOrganization.identifier,
       });
-      expect(mockCancelSearchQuery).toHaveBeenCalledWith({
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledWith({
         trace_id: "trace2",
         org_id: wrapper.vm.store.state.selectedOrganization.identifier,
       });
+      // Trace IDs are cleared so a re-expand starts a clean stream.
+      expect(wrapper.vm.traceIdMapper[field]).toEqual([]);
+    });
+
+    it("should cancel the in-flight request when collapsing a loading field", async () => {
+      mockCancelStreamQueryBasedOnRequestId.mockClear();
+      const field = "level";
+      // Simulate an expanded field with a request in-flight.
+      wrapper.vm.traceIdMapper[field] = ["trace-abc"];
+      wrapper.vm.fieldValues[field] = {
+        isLoading: true,
+        values: [],
+        errMsg: "",
+      };
+
+      wrapper.vm.cancelFilterCreator({ name: field });
+
+      // The HTTP stream is aborted via the trace ID...
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledWith({
+        trace_id: "trace-abc",
+        org_id: wrapper.vm.store.state.selectedOrganization.identifier,
+      });
+      // ...the mapper is emptied, the loading flag is cleared, and the field
+      // is marked collapsed so the row is interactive again.
+      expect(wrapper.vm.traceIdMapper[field]).toEqual([]);
+      expect(wrapper.vm.fieldValues[field].isLoading).toBe(false);
+      expect(wrapper.vm.expandedFields[field]).toBe(false);
     });
   });
 
@@ -1244,8 +1192,7 @@ describe("Index List", async () => {
         },
       };
       const mockSendSearchMessageBasedOnRequestId = vi.fn();
-      wrapper.vm.sendSearchMessageBasedOnRequestId =
-        mockSendSearchMessageBasedOnRequestId;
+      wrapper.vm.sendSearchMessageBasedOnRequestId = mockSendSearchMessageBasedOnRequestId;
 
       wrapper.vm.sendSearchMessage(queryReq);
 
@@ -1310,8 +1257,7 @@ describe("Index List", async () => {
 
       const mockInitializeWebSocketConnection = vi.fn();
       const mockAddTraceId = vi.fn();
-      wrapper.vm.initializeWebSocketConnection =
-        mockInitializeWebSocketConnection;
+      wrapper.vm.initializeWebSocketConnection = mockInitializeWebSocketConnection;
       wrapper.vm.addTraceId = mockAddTraceId;
 
       wrapper.vm.fetchValuesWithWebsocket(payload);
@@ -1333,8 +1279,7 @@ describe("Index List", async () => {
 // 1. Define your mock function FIRST
 vi.mock("@/services/stream", () => {
   // Define the mock function with a console.log
-  const mockFieldValues = vi.fn((...args) => {
-    console.log("MOCK fieldValues called with:", args);
+  const mockFieldValues = vi.fn(() => {
     // You can customize the return value based on args or call count if needed
     return Promise.resolve({
       data: {
@@ -1414,14 +1359,8 @@ describe("Index List", async () => {
   it("addSearchTerm sets addToFilter using getFilterExpressionByFieldType", async () => {
     wrapper.vm.searchObj.data.stream.addToFilter = "";
     wrapper.vm.addSearchTerm("field", "value", "include");
-    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
-      "field = 'value'",
-    );
-    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith(
-      "field",
-      "value",
-      "include",
-    );
+    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe("field = 'value'");
+    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith("field", "value", "include");
   });
 
   it("toggleSchema sets loadingStream and calls extractFields", async () => {
@@ -1446,11 +1385,7 @@ describe("Index List", async () => {
     ];
     // Should match 'field' in a case-insensitive way and avoid duplicates
     const result = wrapper.vm.filterFieldFn(rows, "field");
-    expect(result).toEqual([
-      { name: "FieldOne" },
-      { name: "FieldTwo" },
-      { name: "AnotherField" },
-    ]);
+    expect(result).toEqual([{ name: "FieldOne" }, { name: "FieldTwo" }, { name: "AnotherField" }]);
     // Assert the function was called with the correct arguments
     expect(filterFieldFnSpy).toHaveBeenCalledWith(rows, "field");
   });
@@ -1563,9 +1498,7 @@ describe("Index List", async () => {
     wrapper.vm.searchObj.organizationIdentifier = "default";
 
     wrapper.vm.addToInterestingFieldList(field, false);
-    expect(wrapper.vm.searchObj.data.stream.interestingFieldList).toContain(
-      "testField",
-    );
+    expect(wrapper.vm.searchObj.data.stream.interestingFieldList).toContain("testField");
   });
 
   it.skip("removes a field from interesting field list", async () => {
@@ -1587,18 +1520,12 @@ describe("Index List", async () => {
     wrapper.vm.searchObj.organizationIdentifier = "default";
 
     wrapper.vm.addToInterestingFieldList(field, true);
-    expect(wrapper.vm.searchObj.data.stream.interestingFieldList).not.toContain(
-      "testField",
-    );
+    expect(wrapper.vm.searchObj.data.stream.interestingFieldList).not.toContain("testField");
   });
 
-  it("handles single stream selection correctly", async () => {
-    const opt = { value: "stream1", label: "Stream 1" };
-    wrapper.vm.handleSingleStreamSelect(opt);
-    expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([
-      "stream1",
-    ]);
-    expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([]);
+  it("handles multi stream selection correctly", async () => {
+    wrapper.vm.searchObj.data.stream.selectedStream = ["stream1"];
+    wrapper.vm.handleStreamSelection(wrapper.vm.searchObj.data.stream.selectedStream);
     expect(wrapper.vm.onStreamChange).toHaveBeenCalledWith("");
   });
 
@@ -1609,11 +1536,7 @@ describe("Index List", async () => {
   });
 
   it("filters fields correctly based on search term", async () => {
-    const rows = [
-      { name: "testField1" },
-      { name: "testField2" },
-      { name: "otherField" },
-    ];
+    const rows = [{ name: "testField1" }, { name: "testField2" }, { name: "otherField" }];
     const result = wrapper.vm.filterFieldFn(rows, "test");
     expect(result).toHaveLength(2);
     expect(result.map((r) => r.name)).toContain("testField1");
@@ -1635,9 +1558,7 @@ describe("Index List", async () => {
   it("quotes reserved field when adding filter in SQL mode", async () => {
     wrapper.vm.searchObj.meta.sqlMode = true;
     wrapper.vm.addToFilter("user='alice'");
-    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
-      '"user"=\'alice\'',
-    );
+    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe("\"user\"='alice'");
   });
 
   it("toggles field selection in clickFieldFn", async () => {
@@ -1706,7 +1627,7 @@ describe("Index List", async () => {
 
   it("handles multiple stream selection", async () => {
     wrapper.vm.searchObj.data.stream.selectedStream = ["stream1"];
-    wrapper.vm.handleMultiStreamSelection();
+    wrapper.vm.handleStreamSelection(wrapper.vm.searchObj.data.stream.selectedStream);
     expect(wrapper.vm.onStreamChange).toHaveBeenCalledWith("");
   });
 
@@ -1722,15 +1643,9 @@ describe("Index List", async () => {
       },
     };
 
-    expect(
-      wrapper.vm.streamFieldValues.value[field][stream].values,
-    ).toBeDefined();
-    expect(
-      wrapper.vm.streamFieldValues.value[field][stream].values[0].key,
-    ).toBe("value1");
-    expect(
-      wrapper.vm.streamFieldValues.value[field][stream].values[0].count,
-    ).toBe(1);
+    expect(wrapper.vm.streamFieldValues.value[field][stream].values).toBeDefined();
+    expect(wrapper.vm.streamFieldValues.value[field][stream].values[0].key).toBe("value1");
+    expect(wrapper.vm.streamFieldValues.value[field][stream].values[0].count).toBe(1);
   });
 
   it("handles search term addition with field type", async () => {
@@ -1740,14 +1655,8 @@ describe("Index List", async () => {
     const action = "include";
 
     wrapper.vm.addSearchTerm(field, value, action);
-    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith(
-      field,
-      value,
-      action,
-    );
-    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
-      "field = 'value'",
-    );
+    expect(mockGetFilterExpressionByFieldType).toHaveBeenCalledWith(field, value, action);
+    expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe("field = 'value'");
   });
 
   it("updates field values on stream change", async () => {
@@ -1763,9 +1672,7 @@ describe("Index List", async () => {
     wrapper.vm.searchObj.data.stream.selectedStream = ["newStream"];
     await wrapper.vm.onStreamChange("");
 
-    expect(wrapper.vm.fieldValues[field].values).toEqual([
-      { key: "oldValue", count: 1 },
-    ]);
+    expect(wrapper.vm.fieldValues[field].values).toEqual([{ key: "oldValue", count: 1 }]);
   });
 
   // it("handles error in field values fetching", async () => {
@@ -1869,9 +1776,7 @@ describe("Index List", async () => {
       };
 
       wrapper.vm.handleSearchResponse(payload, response);
-      expect(wrapper.vm.fieldValues["testField"].errMsg).toBe(
-        "Failed to fetch field values",
-      );
+      expect(wrapper.vm.fieldValues["testField"].errMsg).toBe("Failed to fetch field values");
       expect(wrapper.vm.fieldValues["testField"].isLoading).toBe(false);
     });
 
@@ -2012,9 +1917,7 @@ describe("Index List", async () => {
       wrapper.vm.handleSearchReset(data);
 
       expect(wrapper.vm.streamFieldValues["testField"]).toEqual({});
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        data.payload.queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(data.payload.queryReq);
     });
 
     it("calls fetchValuesWithWebsocket with correct parameters", async () => {
@@ -2030,9 +1933,7 @@ describe("Index List", async () => {
 
       wrapper.vm.handleSearchReset(data);
 
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(queryReq);
     });
 
     it("handles multiple field resets correctly", async () => {
@@ -2098,9 +1999,7 @@ describe("Index List", async () => {
         isLoading: true,
         errMsg: "",
       });
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        data.payload.queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(data.payload.queryReq);
     });
 
     // Additional comprehensive test cases to reach 50+ tests
@@ -2126,9 +2025,7 @@ describe("Index List", async () => {
         isLoading: true,
         errMsg: "",
       });
-      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(
-        data.payload.queryReq,
-      );
+      expect(wrapper.vm.fetchValuesWithWebsocket).toHaveBeenCalledWith(data.payload.queryReq);
     });
 
     it("should reset streamFieldValues correctly", async () => {
@@ -2151,34 +2048,13 @@ describe("Index List", async () => {
   });
 
   describe("Additional Stream management tests", () => {
-    it("should handle single stream selection when stream not already selected", async () => {
-      const opt = { value: "newStream", label: "New Stream" };
+    it("should handle stream change on multi stream selection", async () => {
       wrapper.vm.searchObj.data.stream.selectedStream = ["oldStream"];
       wrapper.vm.searchObj.data.stream.selectedFields = ["field1", "field2"];
 
-      wrapper.vm.handleSingleStreamSelect(opt);
+      wrapper.vm.handleStreamSelection(wrapper.vm.searchObj.data.stream.selectedStream);
 
-      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([]);
-      expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([
-        "newStream",
-      ]);
       expect(wrapper.vm.onStreamChange).toHaveBeenCalledWith("");
-    });
-
-    it("should not clear fields when selecting same stream", async () => {
-      const opt = { value: "sameStream", label: "Same Stream" };
-      wrapper.vm.searchObj.data.stream.selectedStream = ["sameStream"];
-      wrapper.vm.searchObj.data.stream.selectedFields = ["field1", "field2"];
-
-      wrapper.vm.handleSingleStreamSelect(opt);
-
-      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([
-        "field1",
-        "field2",
-      ]);
-      expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([
-        "sameStream",
-      ]);
     });
   });
 
@@ -2192,11 +2068,7 @@ describe("Index List", async () => {
     });
 
     it("should filter fields case-insensitively", async () => {
-      const rows = [
-        { name: "TestField" },
-        { name: "testfield2" },
-        { name: "OTHER" },
-      ];
+      const rows = [{ name: "TestField" }, { name: "testfield2" }, { name: "OTHER" }];
 
       const result = wrapper.vm.filterFieldFn(rows, "TEST");
 
@@ -2326,25 +2198,49 @@ describe("Index List", async () => {
       expect(wrapper.vm.openedFilterFields.value).toEqual(["field1", "field3"]);
     });
 
-    it.skip("should cancel trace ID by calling cancelSearchQueryBasedOnRequestId", async () => {
+    it("should abort in-flight streams and clear the mapper in cancelTraceId", async () => {
+      mockCancelStreamQueryBasedOnRequestId.mockClear();
       const field = "testField";
-      const traceIds = ["trace1", "trace2"];
-      wrapper.vm.traceIdMapper[field] = traceIds;
-
-      const mockCancelSearchQuery = vi.fn();
-      wrapper.vm.cancelSearchQueryBasedOnRequestId = mockCancelSearchQuery;
+      wrapper.vm.traceIdMapper[field] = ["trace1", "trace2"];
 
       wrapper.vm.cancelTraceId(field);
 
-      expect(mockCancelSearchQuery).toHaveBeenCalledTimes(2);
-      expect(mockCancelSearchQuery).toHaveBeenCalledWith({
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledTimes(2);
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledWith({
         trace_id: "trace1",
         org_id: wrapper.vm.store.state.selectedOrganization.identifier,
       });
-      expect(mockCancelSearchQuery).toHaveBeenCalledWith({
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledWith({
         trace_id: "trace2",
         org_id: wrapper.vm.store.state.selectedOrganization.identifier,
       });
+      // Trace IDs are cleared so a re-expand starts a clean stream.
+      expect(wrapper.vm.traceIdMapper[field]).toEqual([]);
+    });
+
+    it("should cancel the in-flight request when collapsing a loading field", async () => {
+      mockCancelStreamQueryBasedOnRequestId.mockClear();
+      const field = "level";
+      // Simulate an expanded field with a request in-flight.
+      wrapper.vm.traceIdMapper[field] = ["trace-abc"];
+      wrapper.vm.fieldValues[field] = {
+        isLoading: true,
+        values: [],
+        errMsg: "",
+      };
+
+      wrapper.vm.cancelFilterCreator({ name: field });
+
+      // The HTTP stream is aborted via the trace ID...
+      expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledWith({
+        trace_id: "trace-abc",
+        org_id: wrapper.vm.store.state.selectedOrganization.identifier,
+      });
+      // ...the mapper is emptied, the loading flag is cleared, and the field
+      // is marked collapsed so the row is interactive again.
+      expect(wrapper.vm.traceIdMapper[field]).toEqual([]);
+      expect(wrapper.vm.fieldValues[field].isLoading).toBe(false);
+      expect(wrapper.vm.expandedFields[field]).toBe(false);
     });
   });
 
@@ -2359,8 +2255,7 @@ describe("Index List", async () => {
         },
       };
       const mockSendSearchMessageBasedOnRequestId = vi.fn();
-      wrapper.vm.sendSearchMessageBasedOnRequestId =
-        mockSendSearchMessageBasedOnRequestId;
+      wrapper.vm.sendSearchMessageBasedOnRequestId = mockSendSearchMessageBasedOnRequestId;
 
       wrapper.vm.sendSearchMessage(queryReq);
 
@@ -2425,8 +2320,7 @@ describe("Index List", async () => {
 
       const mockInitializeWebSocketConnection = vi.fn();
       const mockAddTraceId = vi.fn();
-      wrapper.vm.initializeWebSocketConnection =
-        mockInitializeWebSocketConnection;
+      wrapper.vm.initializeWebSocketConnection = mockInitializeWebSocketConnection;
       wrapper.vm.addTraceId = mockAddTraceId;
 
       wrapper.vm.fetchValuesWithWebsocket(payload);
@@ -2455,9 +2349,7 @@ describe("removeFieldFromWhereAST", () => {
   let parser: any;
 
   beforeEach(async () => {
-    const mod = await import(
-      "@openobserve/node-sql-parser/build/datafusionsql"
-    );
+    const mod = await import("@openobserve/node-sql-parser/build/datafusionsql");
     parser = new mod.Parser();
 
     wrapper = mount(IndexList, {
@@ -2489,20 +2381,14 @@ describe("removeFieldFromWhereAST", () => {
   });
 
   it("returns null for undefined whereNode", () => {
-    expect(
-      wrapper.vm.removeFieldFromWhereAST(undefined, "service_name"),
-    ).toBeNull();
+    expect(wrapper.vm.removeFieldFromWhereAST(undefined, "service_name")).toBeNull();
   });
 
   // ── Plain queries ────────────────────────────────────────────────────────────
 
   it("plain: returns null when WHERE has only the target field", () => {
-    const ast = parser.astify(
-      `SELECT * FROM "stream" WHERE "service_name" = 'abc'`,
-    );
-    expect(
-      wrapper.vm.removeFieldFromWhereAST(ast.where, "service_name"),
-    ).toBeNull();
+    const ast = parser.astify(`SELECT * FROM "stream" WHERE "service_name" = 'abc'`);
+    expect(wrapper.vm.removeFieldFromWhereAST(ast.where, "service_name")).toBeNull();
   });
 
   it("plain: removes first field in AND, keeps second", () => {
@@ -2702,10 +2588,7 @@ describe("removeFieldFromWhereAST", () => {
       const ast = parser.astify(
         `SELECT * FROM "stream" WHERE "service_name" = 'abc' AND "level" = 'error'`,
       );
-      const modified = wrapper.vm.removeFieldFromWhereAST(
-        ast.where,
-        "service_name",
-      );
+      const modified = wrapper.vm.removeFieldFromWhereAST(ast.where, "service_name");
       // Non-null: the remaining level condition is preserved
       expect(modified).not.toBeNull();
     }
@@ -2774,9 +2657,7 @@ describe("Field filter isolation: values API vs search/histogram APIs", () => {
     await flushPromises();
 
     expect(mockFetchQueryDataWithHttpStream).toHaveBeenCalled();
-    return b64DecodeUnicode(
-      mockFetchQueryDataWithHttpStream.mock.calls[0][0].queryReq.sql,
-    );
+    return b64DecodeUnicode(mockFetchQueryDataWithHttpStream.mock.calls[0][0].queryReq.sql);
   };
 
   // ── Quick mode ──────────────────────────────────────────────────────────────
@@ -2795,8 +2676,7 @@ describe("Field filter isolation: values API vs search/histogram APIs", () => {
   it("quick mode: values SQL preserves all other field filters", async () => {
     await setupWrapper();
     wrapper.vm.searchObj.meta.sqlMode = false;
-    wrapper.vm.searchObj.data.query =
-      "service_name='abc' AND level='error' AND method='GET'";
+    wrapper.vm.searchObj.data.query = "service_name='abc' AND level='error' AND method='GET'";
 
     const sql = await expandAndGetSQL("service_name");
 
@@ -2901,8 +2781,7 @@ describe("Field filter isolation: values API vs search/histogram APIs", () => {
   it("falls back to original SQL on parse failure — values call still fires", async () => {
     await setupWrapper();
     wrapper.vm.searchObj.meta.sqlMode = true;
-    wrapper.vm.searchObj.data.query =
-      "SELECT * UNION ALL BY NAME -- unsupported syntax";
+    wrapper.vm.searchObj.data.query = "SELECT * UNION ALL BY NAME -- unsupported syntax";
 
     mockFetchQueryDataWithHttpStream.mockReset();
 
@@ -3015,5 +2894,141 @@ describe("Field filter isolation: values API vs search/histogram APIs", () => {
 
     // They are different strings
     expect(valuesSql).not.toBe(wrapper.vm.searchObj.data.query);
+  });
+});
+
+describe("Back to Logs control", () => {
+  let wrapper: any;
+
+  const mountList = async () => {
+    wrapper = mount(IndexList, {
+      attachTo: "#app",
+      global: {
+        provide: { store },
+        plugins: [i18n, router],
+        stubs: {},
+      },
+    });
+    await flushPromises();
+    return wrapper;
+  };
+
+  const BTN = '[data-test="log-search-index-list-back-to-logs-btn"]';
+
+  afterEach(() => {
+    wrapper?.unmount();
+    vi.restoreAllMocks();
+  });
+
+  it("is hidden when the stream type is logs", async () => {
+    await mountList();
+    wrapper.vm.searchObj.data.stream.streamType = "logs";
+    await nextTick();
+    expect(wrapper.find(BTN).exists()).toBe(false);
+  });
+
+  it("is shown when the stream type is a non-logs type (e.g. metrics)", async () => {
+    await mountList();
+    wrapper.vm.searchObj.data.stream.streamType = "metrics";
+    await nextTick();
+    expect(wrapper.find(BTN).exists()).toBe(true);
+  });
+
+  it("uses the switch (swap-horiz) icon, not the stream-type icon", async () => {
+    await mountList();
+    wrapper.vm.searchObj.data.stream.streamType = "metrics";
+    await nextTick();
+    // The glyph is a fixed switcher affordance regardless of stream type —
+    // assert via the OIcon `name` prop (icon renders as an inline SVG, not text).
+    const icon = wrapper.find(BTN).findComponent({ name: "OIcon" });
+    expect(icon.exists()).toBe(true);
+    expect(icon.props("name")).toBe("swap-horiz");
+  });
+
+  it("switches back to logs on click (behavior preserved)", async () => {
+    await mountList();
+    wrapper.vm.searchObj.data.stream.streamType = "metrics";
+    await nextTick();
+    const spy = vi.spyOn(wrapper.vm, "onStreamTypeChange").mockResolvedValue(undefined);
+    await wrapper.find(BTN).trigger("click");
+    expect(spy).toHaveBeenCalledWith("logs");
+  });
+});
+
+describe("Index List — field values query for pipe-bearing filters", () => {
+  let wrapper: any;
+
+  const mountList = () =>
+    mount(IndexList, {
+      attachTo: "#app",
+      global: {
+        provide: { store },
+        plugins: [i18n, router],
+      },
+    });
+
+  const expandField = async (fieldName: string) => {
+    await wrapper.vm.openFilterCreator(
+      {},
+      { name: fieldName, ftsKey: false, streams: ["e2e_automate"] },
+    );
+    await flushPromises();
+  };
+
+  /** The SQL actually sent for the values request, decoded from the payload. */
+  const lastValuesSql = () => {
+    const call = mockFetchQueryDataWithHttpStream.mock.calls.at(-1);
+    return b64DecodeUnicode(call[0].queryReq.sql);
+  };
+
+  /** Everything before the FROM keyword — i.e. the projected column list. */
+  const selectListOf = (sql: string) => sql.slice(0, sql.toUpperCase().indexOf(" FROM ")).trim();
+
+  beforeEach(async () => {
+    wrapper = mountList();
+    await flushPromises();
+
+    mockFetchQueryDataWithHttpStream.mockClear();
+
+    wrapper.vm.searchObj.meta.sqlMode = false;
+    wrapper.vm.searchObj.data.stream.selectedStream = ["e2e_automate"];
+    wrapper.vm.searchObj.data.stream.selectedStreamFields = [{ name: "kubernetes_namespace_name" }];
+    wrapper.vm.searchObj.data.datetime = {
+      type: "absolute",
+      startTime: 1700000000000000,
+      endTime: 1700003600000000,
+    };
+  });
+
+  afterEach(() => {
+    wrapper?.unmount();
+    vi.clearAllMocks();
+  });
+
+  it("projects only * when the filter contains a pipe inside a quoted term", async () => {
+    wrapper.vm.searchObj.data.query = "match_all('text | error')";
+
+    await expandField("kubernetes_namespace_name");
+
+    expect(selectListOf(lastValuesSql())).toBe("SELECT *");
+  });
+
+  it("keeps the whole match_all term in the WHERE clause when it contains a pipe", async () => {
+    wrapper.vm.searchObj.data.query = "match_all('text | error')";
+
+    await expandField("kubernetes_namespace_name");
+
+    const sql = lastValuesSql();
+    expect(sql.slice(sql.toUpperCase().indexOf(" FROM "))).toContain("match_all('text | error')");
+  });
+
+  it("projects only * for a match_all term without a pipe", async () => {
+    wrapper.vm.searchObj.data.query = "match_all('error')";
+
+    await expandField("kubernetes_namespace_name");
+
+    const sql = lastValuesSql();
+    expect(selectListOf(sql)).toBe("SELECT *");
+    expect(sql.slice(sql.toUpperCase().indexOf(" FROM "))).toContain("match_all('error')");
   });
 });

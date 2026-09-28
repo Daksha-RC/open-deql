@@ -31,7 +31,7 @@ pub struct StreamInfo {
     /// Stream name
     pub stream_name: String,
 
-    /// Stream type (logs, metrics, traces)
+    /// Stream type (logs, metrics, traces, profiles)
     ///
     /// This field explicitly identifies the stream type, enabling UIs to:
     /// 1. Query the correct API endpoint (logs/_search vs metrics/_search)
@@ -44,6 +44,12 @@ pub struct StreamInfo {
     /// Example: {"namespace": "production", "cluster": "us-east-1"}
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub filters: HashMap<String, String>,
+
+    /// Identity dimensions that could not be resolved to a queryable field on
+    /// this stream's schema and were therefore omitted from `filters`.
+    /// Consumers should warn: queries on this stream are wider than the chips imply.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_dimensions: Vec<String>,
 }
 
 impl std::hash::Hash for StreamInfo {
@@ -67,6 +73,7 @@ impl StreamInfo {
             stream_name,
             stream_type: StreamType::default(),
             filters: HashMap::new(),
+            dropped_dimensions: Vec::new(),
         }
     }
 
@@ -76,6 +83,7 @@ impl StreamInfo {
             stream_name,
             stream_type,
             filters: HashMap::new(),
+            dropped_dimensions: Vec::new(),
         }
     }
 
@@ -85,6 +93,7 @@ impl StreamInfo {
             stream_name,
             stream_type: StreamType::default(),
             filters,
+            dropped_dimensions: Vec::new(),
         }
     }
 
@@ -98,6 +107,7 @@ impl StreamInfo {
             stream_name,
             stream_type,
             filters,
+            dropped_dimensions: Vec::new(),
         }
     }
 
@@ -132,6 +142,23 @@ pub struct CorrelationResponse {
     /// `None` if the feature is not enabled or the set was not determined.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matched_set_id: Option<String>,
+    /// Echo of the request's source stream, so consumers never have to re-derive
+    /// which stream the correlation started from (F27).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_stream: Option<String>,
+    /// Echo of the request's source stream type (logs/traces/metrics/profiles) (F27).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /// Whether `service_name` is the name of the stream this service was
+    /// discovered in rather than anything about the service.
+    ///
+    /// Discovery falls back to the stream name when a record carries neither a
+    /// `service` dimension nor any tracked one, so `node_cpu_seconds` is a
+    /// perfectly ordinary entry in the registry. That is fine for a list of
+    /// streams and wrong for anything that acts on it: on-call routing would be
+    /// routing on a table name. Consumers that need a real service check this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub service_name_from_stream: bool,
 }
 
 impl CorrelationResponse {
@@ -163,6 +190,13 @@ impl CorrelationResponse {
             all.push(s);
         }
 
+        // Add profiles with explicit type
+        for stream in &self.related_streams.profiles {
+            let mut s = stream.clone();
+            s.stream_type = StreamType::Profiles;
+            all.push(s);
+        }
+
         self.all_streams = all;
     }
 
@@ -180,6 +214,9 @@ impl CorrelationResponse {
             related_streams,
             all_streams: Vec::new(),
             matched_set_id: None,
+            source_stream: None,
+            source_type: None,
+            service_name_from_stream: false,
         };
         response.build_all_streams();
         response
@@ -192,6 +229,7 @@ pub struct RelatedStreams {
     pub logs: Vec<StreamInfo>,
     pub traces: Vec<StreamInfo>,
     pub metrics: Vec<StreamInfo>,
+    pub profiles: Vec<StreamInfo>,
 }
 
 /// Dimension analytics summary for an organization
@@ -256,6 +294,11 @@ pub struct FoundGroup {
     pub unique_values: Option<usize>,
     /// Cardinality class derived from unique_values (None if no data yet)
     pub cardinality_class: Option<CardinalityClass>,
+    /// Category this group belongs to (e.g., "AWS", "Kubernetes", "Azure", "GCP", "Common").
+    /// Sourced from the underlying `FieldAlias.group`. When `None`, the frontend falls
+    /// back to inferring the category from `group_id` prefix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// Dimension analytics tracking
@@ -392,6 +435,10 @@ pub struct ServiceStreams {
     /// Metric stream names
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metrics: Vec<String>,
+
+    /// Profile stream names
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]
@@ -446,6 +493,24 @@ impl CardinalityClass {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_stream_info_dropped_dimensions_serde() {
+        // Old payloads without the field must deserialize (default = empty)
+        let old: StreamInfo =
+            serde_json::from_str(r#"{"stream_name":"s1","stream_type":"logs"}"#).unwrap();
+        assert!(old.dropped_dimensions.is_empty());
+
+        // Empty vec must be skipped on serialization (backward-compatible wire format)
+        let ser = serde_json::to_string(&old).unwrap();
+        assert!(!ser.contains("dropped_dimensions"));
+
+        // Populated vec round-trips
+        let mut s = StreamInfo::new("s2".to_string());
+        s.dropped_dimensions = vec!["k8s-cluster".to_string()];
+        let round: StreamInfo = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round.dropped_dimensions, vec!["k8s-cluster".to_string()]);
+    }
 
     #[test]
     fn test_stream_info_with_type() {
@@ -509,6 +574,7 @@ mod tests {
                 logs: vec![logs_stream],
                 traces: vec![traces_stream],
                 metrics: vec![metrics_stream],
+                profiles: vec![],
             },
         );
 
@@ -732,9 +798,13 @@ mod tests {
                 logs: vec![],
                 traces: vec![],
                 metrics: vec![],
+                profiles: vec![],
             },
             all_streams: vec![],
             matched_set_id: None,
+            source_stream: None,
+            source_type: None,
+            service_name_from_stream: false,
         };
         let json = serde_json::to_value(&r).unwrap();
         let obj = json.as_object().unwrap();
@@ -752,9 +822,13 @@ mod tests {
                 logs: vec![],
                 traces: vec![],
                 metrics: vec![],
+                profiles: vec![],
             },
             all_streams: vec![StreamInfo::with_type("x".to_string(), StreamType::Logs)],
             matched_set_id: Some("set1".to_string()),
+            source_stream: None,
+            source_type: None,
+            service_name_from_stream: false,
         };
         let json = serde_json::to_value(&r).unwrap();
         let obj = json.as_object().unwrap();
@@ -780,6 +854,7 @@ mod tests {
         assert!(!obj.contains_key("logs"));
         assert!(!obj.contains_key("traces"));
         assert!(!obj.contains_key("metrics"));
+        assert!(!obj.contains_key("profiles"));
     }
 
     #[test]
@@ -788,11 +863,13 @@ mod tests {
             logs: vec!["l".to_string()],
             traces: vec!["t".to_string()],
             metrics: vec!["m".to_string()],
+            profiles: vec!["p".to_string()],
         };
         let json = serde_json::to_value(&s).unwrap();
         let obj = json.as_object().unwrap();
         assert!(obj.contains_key("logs"));
         assert!(obj.contains_key("traces"));
         assert!(obj.contains_key("metrics"));
+        assert!(obj.contains_key("profiles"));
     }
 }

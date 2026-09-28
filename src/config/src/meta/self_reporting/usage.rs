@@ -25,21 +25,168 @@ use crate::{
 };
 
 pub const USAGE_STREAM: &str = "usage";
+/// Duplicates the enterprise auditor's private stream name; the two are compared by value.
+pub const AUDIT_STREAM: &str = "audit";
 pub const STATS_STREAM: &str = "stats";
 pub const TRIGGERS_STREAM: &str = "triggers";
 pub const ERROR_STREAM: &str = "errors";
 pub const DATA_RETENTION_USAGE_STREAM: &str = "data_retention_usage";
 
+/// The `_o2_` rollup streams and `_agent_signals` are written only by internal jobs, so user writes
+/// are rejected. OTLP has no guard: collectors write `_o2_dbm_server` there.
+pub fn is_internal_rollup_stream(stream_name: &str) -> bool {
+    stream_name.starts_with("_o2_") || stream_name == "_agent_signals"
+}
+
+/// Outcome of a single scheduled evaluation — "did it fire?".
+///
+/// Part III of `alerts.md`. Replaces the former `TriggerDataStatus`, whose
+/// `Completed` variant collided by name with `TriggerStatus::Completed` (the
+/// job-queue state) while meaning something entirely different.
+///
+/// Condition-bearing modules (alerts, derived streams, anomaly detection) use
+/// [`RunOutcome::Firing`] / [`RunOutcome::Normal`]; modules with no condition
+/// (reports, workflows, synthetics) use [`RunOutcome::Succeeded`].
+///
+/// The legacy vocabulary is accepted on **read** via serde aliases so that
+/// `TriggerData` records written by an older build — which are read back as a
+/// typed struct from the on-disk self-reporting queue — do not panic the ingest
+/// task after an upgrade. Legacy values are never written. Because `completed`
+/// was module-dependent it aliases to the neutral `Succeeded` and is corrected
+/// by [`TriggerData::normalize_legacy_outcome`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum TriggerDataStatus {
-    #[serde(rename = "completed")]
-    Completed,
-    #[serde(rename = "failed")]
-    Failed,
-    #[serde(rename = "condition_not_satisfied")]
-    ConditionNotSatisfied,
+pub enum RunOutcome {
+    /// Condition matched — the alert triggered and the notification was sent.
+    #[serde(rename = "firing")]
+    Firing,
+    /// Evaluated cleanly; nothing to alert on.
+    #[serde(rename = "normal", alias = "condition_not_satisfied")]
+    Normal,
+    /// Non-condition modules: report sent, derived stream written.
+    #[serde(rename = "succeeded", alias = "completed")]
+    Succeeded,
+    /// The evaluation itself failed (query error, timeout).
+    #[serde(rename = "error", alias = "failed")]
+    Error,
+    /// Never evaluated — silenced, paused, org deleting.
     #[serde(rename = "skipped")]
     Skipped,
+    /// Condition matched but delivery failed. Still a firing state: without
+    /// this, a webhook outage silently undercounts firings.
+    #[serde(rename = "notify_failed")]
+    NotifyFailed,
+    /// alert is in pending state, will wait for configured time before
+    /// transitioning to firing
+    #[serde(rename = "pending")]
+    Pending,
+}
+
+impl RunOutcome {
+    /// True when the alert actually triggered. `NotifyFailed` counts — the
+    /// condition matched, only delivery failed.
+    pub fn is_firing(&self) -> bool {
+        matches!(self, Self::Firing | Self::NotifyFailed)
+    }
+
+    /// Durable integer form, stored in `alert_states.last_outcome` (Part IV).
+    ///
+    /// These values are persisted — never reorder or reuse them.
+    pub fn to_i32(&self) -> i32 {
+        match self {
+            Self::Firing => 0,
+            Self::Normal => 1,
+            Self::Succeeded => 2,
+            Self::Error => 3,
+            Self::Skipped => 4,
+            Self::NotifyFailed => 5,
+            Self::Pending => 6,
+        }
+    }
+
+    pub fn from_i32(v: i32) -> Option<Self> {
+        match v {
+            0 => Some(Self::Firing),
+            1 => Some(Self::Normal),
+            2 => Some(Self::Succeeded),
+            3 => Some(Self::Error),
+            4 => Some(Self::Skipped),
+            5 => Some(Self::NotifyFailed),
+            6 => Some(Self::Pending),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Firing => "firing",
+            Self::Normal => "normal",
+            Self::Succeeded => "succeeded",
+            Self::Error => "error",
+            Self::Skipped => "skipped",
+            Self::NotifyFailed => "notify_failed",
+            Self::Pending => "pending",
+        }
+    }
+}
+
+impl std::fmt::Display for RunOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Parse `anomalies_found` out of an anomaly run's `success_response` JSON.
+/// A missing or unparseable payload counts as zero — never as firing.
+fn anomalies_found(success_response: Option<&str>) -> i64 {
+    success_response
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+        .and_then(|v| v["anomalies_found"].as_i64())
+        .unwrap_or(0)
+}
+
+/// Map a raw `status` string from the `triggers` stream onto a [`RunOutcome`].
+///
+/// Handles both vocabularies, so it works across the retention window in which
+/// pre- and post-cutover rows coexist. Returns `None` for values that belong to
+/// neither.
+///
+/// This is the read-side migration described in Part III of `alerts.md`. It is
+/// temporary: once legacy rows age out of the triggers stream's retention
+/// window, only the passthrough branch is reachable and the rest can be deleted.
+pub fn normalize_outcome(
+    raw: &str,
+    module: &TriggerDataType,
+    success_response: Option<&str>,
+) -> Option<RunOutcome> {
+    match raw.to_lowercase().as_str() {
+        // ── current vocabulary ──
+        "firing" => Some(RunOutcome::Firing),
+        "normal" => Some(RunOutcome::Normal),
+        "succeeded" => Some(RunOutcome::Succeeded),
+        "error" => Some(RunOutcome::Error),
+        "skipped" => Some(RunOutcome::Skipped),
+        "notify_failed" => Some(RunOutcome::NotifyFailed),
+        "pending" => Some(RunOutcome::Pending),
+
+        // ── legacy vocabulary ──
+        "condition_not_satisfied" => Some(RunOutcome::Normal),
+        "failed" => Some(RunOutcome::Error),
+        "completed" => Some(match module {
+            // Anomaly rows stored `completed` whenever detection RAN, even with
+            // zero anomalies — the count lives in `success_response`.
+            TriggerDataType::AnomalyDetection => {
+                if anomalies_found(success_response) > 0 {
+                    RunOutcome::Firing
+                } else {
+                    RunOutcome::Normal
+                }
+            }
+            m if m.is_condition_bearing() => RunOutcome::Firing,
+            _ => RunOutcome::Succeeded,
+        }),
+
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -58,6 +205,27 @@ pub enum TriggerDataType {
     AnomalyDetection,
     #[serde(rename = "anomaly_detection_training")]
     AnomalyDetectionTraining,
+    #[serde(rename = "workflow")]
+    Workflow,
+    #[serde(rename = "synthetics")]
+    Synthetics,
+    #[serde(rename = "slo")]
+    Slo,
+    #[serde(rename = "slo_backfill")]
+    SloBackfill,
+    #[serde(rename = "composite")]
+    CompositeAlert,
+}
+
+impl TriggerDataType {
+    /// Whether this module evaluates a condition, and so can meaningfully be
+    /// "firing". Modules without one report [`RunOutcome::Succeeded`] instead.
+    pub fn is_condition_bearing(&self) -> bool {
+        matches!(
+            self,
+            Self::Alert | Self::DerivedStream | Self::AnomalyDetection | Self::CompositeAlert
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -70,7 +238,7 @@ pub struct TriggerData {
     pub next_run_at: i64,
     pub is_realtime: bool,
     pub is_silenced: bool,
-    pub status: TriggerDataStatus,
+    pub status: RunOutcome,
     pub start_time: i64,
     pub end_time: i64,
     pub retries: i32,
@@ -96,6 +264,40 @@ pub struct TriggerData {
     pub grouped: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_size: Option<i32>,
+    // ── Value context (T-9, alerts_2.md §7.5) ───────────────────────────────
+    // Lets history answer "fired at 112 against threshold 100" from the stream
+    // alone. `#[serde(default)]` is load-bearing: records written before these
+    // fields existed must still deserialize.
+    /// Observed value: row count for count alerts, `alert_agg_value` for
+    /// aggregation alerts. For count alerts this is a LOWER BOUND once the
+    /// search cap is reached.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actual_value: Option<f64>,
+    /// The threshold that matched. `None` on `normal` rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_value: Option<f64>,
+    /// Operator, so the record reads standalone ("112 >= 100").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold_operator: Option<String>,
+    /// Computed `AlertLevel` as i32 — `Ok` on normal rows, never absent for a
+    /// level-bearing evaluation. `None` for non-condition modules and
+    /// error/skipped runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<i32>,
+    /// Which group produced `actual_value` (worst group; D8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_label: Option<String>,
+    /// True when `actual_value` is a LOWER BOUND (legacy SingleQuery count
+    /// fetch hit its cap, §7.5) — history renders "≥ N". Absent = exact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_is_lower_bound: Option<bool>,
+    /// Which failure produced this row. The three synthetics failure paths share
+    /// one stream and one `status`, so only this separates them for an alert rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetics_error_source: Option<String>,
+    /// The venue the failed synthetics slot was scheduled for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub synthetics_location: Option<String>,
 }
 
 impl Default for TriggerData {
@@ -108,7 +310,7 @@ impl Default for TriggerData {
             next_run_at: 0,
             is_realtime: false,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 0,
             end_time: 0,
             retries: 0,
@@ -127,6 +329,14 @@ impl Default for TriggerData {
             dedup_count: None,
             grouped: None,
             group_size: None,
+            actual_value: None,
+            threshold_value: None,
+            threshold_operator: None,
+            level: None,
+            group_label: None,
+            value_is_lower_bound: None,
+            synthetics_error_source: None,
+            synthetics_location: None,
         }
     }
 }
@@ -149,7 +359,7 @@ impl TriggerData {
             next_run_at: 0,
             is_realtime: false,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 0,
             end_time: 0,
             retries: 0,
@@ -169,7 +379,38 @@ impl TriggerData {
             dedup_count: Some(0),
             grouped: Some(false),
             group_size: Some(0),
+            actual_value: Some(0.0),
+            threshold_value: Some(0.0),
+            threshold_operator: Some(String::new()),
+            level: Some(0),
+            group_label: Some(String::new()),
+            value_is_lower_bound: Some(false),
+            synthetics_error_source: Some(String::new()),
+            synthetics_location: Some(String::new()),
         }
+    }
+
+    /// Correct a legacy `completed` outcome that was read in through the
+    /// [`RunOutcome::Succeeded`] serde alias.
+    ///
+    /// Call this after deserializing a `TriggerData` that may have been written
+    /// by an older build (see `self_reporting::persistence`). Safe and
+    /// idempotent: current code never writes `Succeeded` for a condition-bearing
+    /// module, so a `Succeeded` on one of those can only be a legacy record.
+    pub fn normalize_legacy_outcome(&mut self) {
+        if self.status != RunOutcome::Succeeded || !self.module.is_condition_bearing() {
+            return;
+        }
+        self.status = match self.module {
+            TriggerDataType::AnomalyDetection => {
+                if anomalies_found(self.success_response.as_deref()) > 0 {
+                    RunOutcome::Firing
+                } else {
+                    RunOutcome::Normal
+                }
+            }
+            _ => RunOutcome::Firing,
+        };
     }
 
     /// Returns all field names for TriggerData struct by introspecting a sample instance.
@@ -240,6 +481,10 @@ pub struct UsageData {
     pub work_group: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
+    /// Region the usage was produced in. Absent on rows written before this
+    /// field existed, and on deployments that never set it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub dashboard_info: Option<DashboardInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,6 +534,7 @@ impl UsageData {
             is_partial: false,
             work_group: Some(String::new()),
             node_name: Some(String::new()),
+            region: Some(String::new()),
             dashboard_info: Some(DashboardInfo {
                 run_id: String::new(),
                 panel_id: String::new(),
@@ -301,6 +547,21 @@ impl UsageData {
     }
 }
 
+/// The bucket key `ingest_usages` (openobserve-core `self_reporting::ingestion`)
+/// aggregates `UsageData` rows by, per org/hour/event.
+///
+/// On a bucket collision only three fields are touched, and only two truly sum:
+///
+/// | field | behaviour |
+/// |---|---|
+/// | `size` | **sums** — the only reliable summation channel |
+/// | `num_records` | **sums** |
+/// | `response_time` | summed then divided by `count` ⇒ an AVERAGE, not a sum |
+///
+/// Every other field — `request_body` included — is taken from the FIRST row
+/// inserted into the bucket and the rest are discarded. `dropped_records` is
+/// likewise not summed: it keeps the first row's value and so under-counts
+/// (pre-existing behaviour, left alone deliberately).
 #[derive(Hash, PartialEq, Eq)]
 pub struct GroupKey {
     pub stream_name: String,
@@ -344,6 +605,32 @@ pub enum UsageEvent {
     AiChat,
     AiCredits,
     AiFreeCredits,
+    /// Browser-check steps EXECUTED across every attempt, excluding skipped.
+    /// `size` carries the step count. **Billed, at the browser rate** — SPEC §4.2.
+    SyntheticsBrowserSteps,
+    /// Protocol-check steps EXECUTED across every attempt, excluding skipped.
+    /// `size` carries the step count. **Billed, at the protocol rate** — SPEC §4.2.
+    /// Separate from the browser event because only `event` is part of
+    /// [`GroupKey`]: a shared event with a type field would be first-row-wins.
+    SyntheticsProtocolSteps,
+    /// Steps the journey DEFINES (`configured × combos`). `size` carries that
+    /// product. Reported, never billed — the leading `_` is the non-billable
+    /// marker, matching `MeteringEventName::_AiChat` and friends. Separate event
+    /// because only `size` survives bucket summation — see [`GroupKey`].
+    _SyntheticsStepsDefined,
+    /// Browser run duration in milliseconds — the v2 duration hedge. `size`
+    /// carries `browser_ms`. Reported, never billed.
+    _SyntheticsBrowserMs,
+    /// Also the landing place for an `event` string this binary does not know.
+    ///
+    /// A node reads `_meta."usage"` rows written by every other node, including
+    /// newer ones. Without this, a variant added in a later release makes
+    /// `UsageResult` fail to deserialize, and the metering loop's
+    /// `collect::<Result<_, _>>` turns that one row into a `return Err` that
+    /// abandons the cycle for EVERY org, not just the one that wrote it.
+    /// `Other` is not billable, so an unknown event is skipped rather than
+    /// charged.
+    #[serde(other)]
     Other,
 }
 
@@ -360,6 +647,10 @@ impl std::fmt::Display for UsageEvent {
             UsageEvent::AiChat => write!(f, "AiChat"),
             UsageEvent::AiCredits => write!(f, "AiCredits"),
             UsageEvent::AiFreeCredits => write!(f, "AiFreeCredits"),
+            UsageEvent::SyntheticsBrowserSteps => write!(f, "SyntheticsBrowserSteps"),
+            UsageEvent::SyntheticsProtocolSteps => write!(f, "SyntheticsProtocolSteps"),
+            UsageEvent::_SyntheticsStepsDefined => write!(f, "_SyntheticsStepsDefined"),
+            UsageEvent::_SyntheticsBrowserMs => write!(f, "_SyntheticsBrowserMs"),
             UsageEvent::Other => write!(f, "Other"),
         }
     }
@@ -409,6 +700,8 @@ pub enum UsageType {
     Traces,
     #[serde(rename = "/otlp/v1/metrics")]
     Metrics,
+    #[serde(rename = "/otlp/v1/profiles")]
+    Profiles,
     #[serde(rename = "/prometheus/v1/write")]
     PrometheusRemoteWrite,
     #[serde(rename = "/metrics/_json")]
@@ -468,6 +761,7 @@ impl UsageType {
                 | UsageType::Logs
                 | UsageType::Traces
                 | UsageType::Metrics
+                | UsageType::Profiles
                 | UsageType::PrometheusRemoteWrite
                 | UsageType::JsonMetrics
                 | UsageType::RUM
@@ -506,6 +800,7 @@ impl std::fmt::Display for UsageType {
             UsageType::Logs => write!(f, "/otlp/v1/logs"),
             UsageType::Traces => write!(f, "/otlp/v1/traces"),
             UsageType::Metrics => write!(f, "/otlp/v1/metrics"),
+            UsageType::Profiles => write!(f, "/otlp/v1/profiles"),
             UsageType::PrometheusRemoteWrite => write!(f, "/prometheus/v1/write"),
             UsageType::JsonMetrics => write!(f, "/metrics/_json"),
             UsageType::RUM => write!(f, "/v1/rum"),
@@ -630,6 +925,518 @@ impl From<FileMeta> for RequestStats {
 }
 
 #[cfg(test)]
+mod run_outcome_tests {
+    use super::*;
+
+    // ── Serialization: the wire vocabulary ──────────────────────────────────
+
+    #[test]
+    fn test_run_outcome_serialization() {
+        assert_eq!(
+            serde_json::to_string(&RunOutcome::Firing).unwrap(),
+            "\"firing\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RunOutcome::Normal).unwrap(),
+            "\"normal\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RunOutcome::Succeeded).unwrap(),
+            "\"succeeded\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RunOutcome::Error).unwrap(),
+            "\"error\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RunOutcome::Skipped).unwrap(),
+            "\"skipped\""
+        );
+        assert_eq!(
+            serde_json::to_string(&RunOutcome::NotifyFailed).unwrap(),
+            "\"notify_failed\""
+        );
+    }
+
+    #[test]
+    fn test_run_outcome_deserialization_roundtrip() {
+        for outcome in [
+            RunOutcome::Firing,
+            RunOutcome::Normal,
+            RunOutcome::Succeeded,
+            RunOutcome::Error,
+            RunOutcome::Skipped,
+            RunOutcome::NotifyFailed,
+        ] {
+            let s = serde_json::to_string(&outcome).unwrap();
+            let back: RunOutcome = serde_json::from_str(&s).unwrap();
+            assert_eq!(outcome, back, "roundtrip failed for {outcome:?}");
+        }
+    }
+
+    /// The old vocabulary MUST still deserialize. `TriggerData` is read back as a
+    /// typed struct from the on-disk self-reporting queue
+    /// (`persistence.rs:121`, an `.unwrap()`), so records written by a previous
+    /// build must not panic the ingest task after an upgrade.
+    #[test]
+    fn test_run_outcome_accepts_legacy_values_leniently() {
+        assert_eq!(
+            serde_json::from_str::<RunOutcome>("\"condition_not_satisfied\"").unwrap(),
+            RunOutcome::Normal
+        );
+        assert_eq!(
+            serde_json::from_str::<RunOutcome>("\"failed\"").unwrap(),
+            RunOutcome::Error
+        );
+        // `completed` is module-dependent, so it lands on the neutral variant and
+        // is corrected by `TriggerData::normalize_legacy_outcome`.
+        assert_eq!(
+            serde_json::from_str::<RunOutcome>("\"completed\"").unwrap(),
+            RunOutcome::Succeeded
+        );
+    }
+
+    /// Legacy values must never be *written* — aliases are read-only.
+    #[test]
+    fn test_run_outcome_never_serializes_legacy_values() {
+        for outcome in [RunOutcome::Normal, RunOutcome::Error, RunOutcome::Succeeded] {
+            let s = serde_json::to_string(&outcome).unwrap();
+            assert!(
+                !["\"completed\"", "\"failed\"", "\"condition_not_satisfied\""]
+                    .contains(&s.as_str()),
+                "{outcome:?} must not serialize to a legacy value, got {s}"
+            );
+        }
+    }
+
+    /// A full legacy `TriggerData` payload must survive the round trip that
+    /// `persistence.rs` performs, and land on the right outcome per module.
+    #[test]
+    fn test_trigger_data_normalize_legacy_outcome() {
+        // Condition-bearing module: legacy `completed` really meant "fired".
+        let mut td = TriggerData {
+            module: TriggerDataType::Alert,
+            status: serde_json::from_str("\"completed\"").unwrap(),
+            ..Default::default()
+        };
+        td.normalize_legacy_outcome();
+        assert_eq!(td.status, RunOutcome::Firing);
+
+        // Anomaly with no anomalies found is NOT firing.
+        let mut td = TriggerData {
+            module: TriggerDataType::AnomalyDetection,
+            status: serde_json::from_str("\"completed\"").unwrap(),
+            success_response: Some(r#"{"anomalies_found":0}"#.to_string()),
+            ..Default::default()
+        };
+        td.normalize_legacy_outcome();
+        assert_eq!(td.status, RunOutcome::Normal);
+
+        let mut td = TriggerData {
+            module: TriggerDataType::AnomalyDetection,
+            status: serde_json::from_str("\"completed\"").unwrap(),
+            success_response: Some(r#"{"anomalies_found":7}"#.to_string()),
+            ..Default::default()
+        };
+        td.normalize_legacy_outcome();
+        assert_eq!(td.status, RunOutcome::Firing);
+
+        // Non-condition module: `succeeded` is correct and must be left alone.
+        let mut td = TriggerData {
+            module: TriggerDataType::Report,
+            status: serde_json::from_str("\"completed\"").unwrap(),
+            ..Default::default()
+        };
+        td.normalize_legacy_outcome();
+        assert_eq!(td.status, RunOutcome::Succeeded);
+    }
+
+    /// The fixup must be idempotent and must not corrupt new-vocabulary records.
+    #[test]
+    fn test_normalize_legacy_outcome_is_idempotent_and_safe() {
+        for outcome in [
+            RunOutcome::Firing,
+            RunOutcome::Normal,
+            RunOutcome::Error,
+            RunOutcome::Skipped,
+            RunOutcome::NotifyFailed,
+        ] {
+            let mut td = TriggerData {
+                module: TriggerDataType::Alert,
+                status: outcome.clone(),
+                ..Default::default()
+            };
+            td.normalize_legacy_outcome();
+            assert_eq!(td.status, outcome, "fixup must not alter {outcome:?}");
+            td.normalize_legacy_outcome();
+            assert_eq!(td.status, outcome, "fixup must be idempotent");
+        }
+    }
+
+    // ── is_firing: the defect fix from Part III ─────────────────────────────
+
+    #[test]
+    fn test_is_firing() {
+        assert!(RunOutcome::Firing.is_firing());
+        // The whole point of `notify_failed`: the alert DID fire, delivery did
+        // not. It must still count toward firing totals.
+        assert!(RunOutcome::NotifyFailed.is_firing());
+
+        assert!(!RunOutcome::Normal.is_firing());
+        assert!(!RunOutcome::Succeeded.is_firing());
+        assert!(!RunOutcome::Error.is_firing());
+        assert!(!RunOutcome::Skipped.is_firing());
+    }
+
+    // ── Integer mapping: needed for the Part IV `last_outcome INT` column ────
+
+    /// These integers are DURABLE — they are what lands in the Part IV
+    /// `last_outcome INT` column. Pin the literal values: a roundtrip-only test
+    /// still passes if the variants are reordered, at which point every stored
+    /// row silently changes meaning.
+    #[test]
+    fn test_run_outcome_i32_values_are_pinned() {
+        assert_eq!(RunOutcome::Firing.to_i32(), 0);
+        assert_eq!(RunOutcome::Normal.to_i32(), 1);
+        assert_eq!(RunOutcome::Succeeded.to_i32(), 2);
+        assert_eq!(RunOutcome::Error.to_i32(), 3);
+        assert_eq!(RunOutcome::Skipped.to_i32(), 4);
+        assert_eq!(RunOutcome::NotifyFailed.to_i32(), 5);
+
+        assert_eq!(RunOutcome::from_i32(0), Some(RunOutcome::Firing));
+        assert_eq!(RunOutcome::from_i32(1), Some(RunOutcome::Normal));
+        assert_eq!(RunOutcome::from_i32(2), Some(RunOutcome::Succeeded));
+        assert_eq!(RunOutcome::from_i32(3), Some(RunOutcome::Error));
+        assert_eq!(RunOutcome::from_i32(4), Some(RunOutcome::Skipped));
+        assert_eq!(RunOutcome::from_i32(5), Some(RunOutcome::NotifyFailed));
+    }
+
+    #[test]
+    fn test_run_outcome_i32_roundtrip() {
+        for outcome in [
+            RunOutcome::Firing,
+            RunOutcome::Normal,
+            RunOutcome::Succeeded,
+            RunOutcome::Error,
+            RunOutcome::Skipped,
+            RunOutcome::NotifyFailed,
+        ] {
+            let n = outcome.to_i32();
+            assert_eq!(
+                RunOutcome::from_i32(n),
+                Some(outcome.clone()),
+                "i32 roundtrip failed for {outcome:?} (got {n})"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_outcome_from_i32_rejects_unknown() {
+        assert_eq!(RunOutcome::from_i32(-1), None);
+        assert_eq!(RunOutcome::from_i32(99), None);
+    }
+
+    // ── Condition-bearing modules ───────────────────────────────────────────
+
+    #[test]
+    fn test_is_condition_bearing() {
+        assert!(TriggerDataType::Alert.is_condition_bearing());
+        assert!(TriggerDataType::DerivedStream.is_condition_bearing());
+        assert!(TriggerDataType::AnomalyDetection.is_condition_bearing());
+
+        assert!(!TriggerDataType::Report.is_condition_bearing());
+        assert!(!TriggerDataType::CachedReport.is_condition_bearing());
+        assert!(!TriggerDataType::Workflow.is_condition_bearing());
+        assert!(!TriggerDataType::Synthetics.is_condition_bearing());
+        assert!(!TriggerDataType::Backfill.is_condition_bearing());
+        assert!(!TriggerDataType::AnomalyDetectionTraining.is_condition_bearing());
+    }
+
+    // ── normalize_outcome: the read-side migration (Part III) ───────────────
+
+    #[test]
+    fn test_normalize_legacy_completed_alert_is_firing() {
+        assert_eq!(
+            normalize_outcome("completed", &TriggerDataType::Alert, None),
+            Some(RunOutcome::Firing)
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_completed_derived_stream_is_firing() {
+        assert_eq!(
+            normalize_outcome("completed", &TriggerDataType::DerivedStream, None),
+            Some(RunOutcome::Firing)
+        );
+    }
+
+    /// Anomaly rows store `completed` whenever detection RAN, even with zero
+    /// anomalies (`handlers.rs:198`). The count lives in `success_response`, so
+    /// the normalizer must parse it — mirroring `history.rs:362`.
+    #[test]
+    fn test_normalize_legacy_completed_anomaly_with_anomalies_is_firing() {
+        assert_eq!(
+            normalize_outcome(
+                "completed",
+                &TriggerDataType::AnomalyDetection,
+                Some(r#"{"anomalies_found":3}"#),
+            ),
+            Some(RunOutcome::Firing)
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_completed_anomaly_without_anomalies_is_normal() {
+        assert_eq!(
+            normalize_outcome(
+                "completed",
+                &TriggerDataType::AnomalyDetection,
+                Some(r#"{"anomalies_found":0}"#),
+            ),
+            Some(RunOutcome::Normal)
+        );
+    }
+
+    /// A missing or unparseable `success_response` must not be read as firing.
+    #[test]
+    fn test_normalize_legacy_completed_anomaly_missing_response_is_normal() {
+        assert_eq!(
+            normalize_outcome("completed", &TriggerDataType::AnomalyDetection, None),
+            Some(RunOutcome::Normal)
+        );
+        assert_eq!(
+            normalize_outcome(
+                "completed",
+                &TriggerDataType::AnomalyDetection,
+                Some("not json"),
+            ),
+            Some(RunOutcome::Normal)
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_completed_non_condition_module_is_succeeded() {
+        assert_eq!(
+            normalize_outcome("completed", &TriggerDataType::Report, None),
+            Some(RunOutcome::Succeeded)
+        );
+        assert_eq!(
+            normalize_outcome("completed", &TriggerDataType::Workflow, None),
+            Some(RunOutcome::Succeeded)
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_condition_not_satisfied_is_normal() {
+        assert_eq!(
+            normalize_outcome("condition_not_satisfied", &TriggerDataType::Alert, None),
+            Some(RunOutcome::Normal)
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_failed_is_error() {
+        assert_eq!(
+            normalize_outcome("failed", &TriggerDataType::Alert, None),
+            Some(RunOutcome::Error)
+        );
+    }
+
+    #[test]
+    fn test_normalize_legacy_skipped_unchanged() {
+        assert_eq!(
+            normalize_outcome("skipped", &TriggerDataType::Alert, None),
+            Some(RunOutcome::Skipped)
+        );
+    }
+
+    /// Post-cutover rows already carry the new vocabulary and must pass through.
+    #[test]
+    fn test_normalize_new_vocabulary_passthrough() {
+        for (raw, expected) in [
+            ("firing", RunOutcome::Firing),
+            ("normal", RunOutcome::Normal),
+            ("succeeded", RunOutcome::Succeeded),
+            ("error", RunOutcome::Error),
+            ("skipped", RunOutcome::Skipped),
+            ("notify_failed", RunOutcome::NotifyFailed),
+        ] {
+            assert_eq!(
+                normalize_outcome(raw, &TriggerDataType::Alert, None),
+                Some(expected),
+                "passthrough failed for {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_normalize_is_case_insensitive() {
+        assert_eq!(
+            normalize_outcome("COMPLETED", &TriggerDataType::Alert, None),
+            Some(RunOutcome::Firing)
+        );
+        assert_eq!(
+            normalize_outcome("Firing", &TriggerDataType::Alert, None),
+            Some(RunOutcome::Firing)
+        );
+    }
+
+    #[test]
+    fn test_normalize_unknown_returns_none() {
+        assert_eq!(normalize_outcome("", &TriggerDataType::Alert, None), None);
+        assert_eq!(
+            normalize_outcome("banana", &TriggerDataType::Alert, None),
+            None
+        );
+    }
+
+    // ── TriggerData still serializes its outcome under `status` ─────────────
+
+    /// Part III deliberately keeps the stream FIELD name `status` and changes
+    /// only the values — no schema change. Guard that.
+    #[test]
+    fn test_trigger_data_field_is_still_named_status() {
+        let td = TriggerData {
+            status: RunOutcome::Firing,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&td).unwrap();
+        assert_eq!(v.get("status").and_then(|s| s.as_str()), Some("firing"));
+        assert!(
+            v.get("outcome").is_none(),
+            "must NOT introduce an `outcome` field on the triggers stream"
+        );
+    }
+
+    #[test]
+    fn test_reflection_sample_still_exposes_status_field() {
+        let names = TriggerData::get_field_names();
+        assert!(names.contains(&"status".to_string()));
+        assert!(!names.contains(&"outcome".to_string()));
+    }
+
+    // ── T-9: value context on the trigger record (alerts_2.md §7.5) ─────────
+    // "Fired at 112 against threshold 100" must be reconstructable from the
+    // triggers stream alone. Today both values exist only as notification
+    // template variables and never reach the stream.
+
+    #[test]
+    fn test_trigger_data_records_actual_and_threshold() {
+        let td = TriggerData {
+            module: TriggerDataType::Alert,
+            status: RunOutcome::Firing,
+            actual_value: Some(112.0),
+            threshold_value: Some(100.0),
+            threshold_operator: Some(">=".to_string()),
+            level: Some(2), // AlertLevel::Critical
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&td).unwrap();
+
+        assert_eq!(v.get("actual_value").and_then(|x| x.as_f64()), Some(112.0));
+        assert_eq!(
+            v.get("threshold_value").and_then(|x| x.as_f64()),
+            Some(100.0)
+        );
+        assert_eq!(
+            v.get("threshold_operator").and_then(|x| x.as_str()),
+            Some(">=")
+        );
+        assert_eq!(v.get("level").and_then(|x| x.as_i64()), Some(2));
+    }
+
+    /// A healthy run must still record what it observed — that is what makes
+    /// "how close did we get?" answerable from history. Per T-10 (as revised):
+    /// normal rows display actual value + Ok; only firing/warning rows display
+    /// a threshold.
+    #[test]
+    fn test_normal_runs_record_actual_value_and_level_ok() {
+        let td = TriggerData {
+            module: TriggerDataType::Alert,
+            status: RunOutcome::Normal,
+            actual_value: Some(12.0),
+            threshold_value: None,
+            // Level is the COMPUTED level: Ok (0) for a level-bearing normal
+            // run — never absent. `None` is reserved for non-condition modules
+            // and error/skipped runs (alerts_2.md §7.5).
+            level: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(td.actual_value, Some(12.0));
+        assert_eq!(
+            td.threshold_value, None,
+            "no threshold matched, so none is recorded (T-10: rendered without one)"
+        );
+        assert_eq!(td.level, Some(0), "normal rows carry level = Ok, not None");
+    }
+
+    #[test]
+    fn test_value_fields_are_optional_and_omitted_when_unset() {
+        // Non-condition modules (reports, workflows) have no values to record;
+        // the fields must not bloat every record.
+        let td = TriggerData {
+            module: TriggerDataType::Report,
+            status: RunOutcome::Succeeded,
+            ..Default::default()
+        };
+        let v = serde_json::to_value(&td).unwrap();
+        assert!(v.get("actual_value").is_none());
+        assert!(v.get("threshold_value").is_none());
+        assert!(v.get("level").is_none());
+    }
+
+    /// The stream schema is generated by reflection, so new fields must appear
+    /// in the reflection sample or fresh orgs get a schema without them.
+    #[test]
+    fn test_reflection_sample_includes_the_value_context_fields() {
+        let names = TriggerData::get_field_names();
+        for f in [
+            "actual_value",
+            "threshold_value",
+            "threshold_operator",
+            "level",
+            "group_label",
+        ] {
+            assert!(
+                names.contains(&f.to_string()),
+                "reflection sample must include `{f}` or new orgs get a schema without it"
+            );
+        }
+    }
+
+    /// D8: one record per evaluation, carrying the worst group's context.
+    #[test]
+    fn test_group_label_identifies_which_group_produced_the_value() {
+        let td = TriggerData {
+            module: TriggerDataType::Alert,
+            status: RunOutcome::Firing,
+            actual_value: Some(500.0),
+            threshold_value: Some(100.0),
+            group_label: Some("host=b".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(td.group_label.as_deref(), Some("host=b"));
+    }
+
+    #[test]
+    fn test_legacy_records_without_value_context_still_deserialize() {
+        // Rows written before T-9 have none of these fields.
+        let legacy = r#"{
+            "_timestamp": 0, "org": "o", "module": "alert", "key": "k",
+            "next_run_at": 0, "is_realtime": false, "is_silenced": false,
+            "status": "firing", "start_time": 0, "end_time": 0, "retries": 0,
+            "error": null, "success_response": null, "is_partial": null,
+            "delay_in_secs": null, "evaluation_took_in_secs": null,
+            "source_node": null, "query_took": null, "scheduler_trace_id": null,
+            "time_in_queue_ms": null
+        }"#;
+        let td: TriggerData = serde_json::from_str(legacy).unwrap();
+        assert_eq!(td.actual_value, None);
+        assert_eq!(td.level, None);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::meta::{
@@ -647,12 +1454,32 @@ mod tests {
     }
 
     #[test]
+    fn test_is_internal_rollup_stream() {
+        // The whole _o2_ prefix family — existing rollup streams and any
+        // future sibling — plus the pre-prefix-era _agent_signals.
+        assert!(is_internal_rollup_stream("_o2_service_graph"));
+        assert!(is_internal_rollup_stream("_o2_db_stats"));
+        assert!(is_internal_rollup_stream("_o2_dep_stats"));
+        assert!(is_internal_rollup_stream("_agent_signals"));
+
+        // Ordinary user streams are not — including underscore-prefixed names
+        // that don't use the internal prefix, and near-misses.
+        assert!(!is_internal_rollup_stream("default"));
+        assert!(!is_internal_rollup_stream("o2_stuff"));
+        assert!(!is_internal_rollup_stream("_other"));
+        assert!(!is_internal_rollup_stream("_o2"));
+        assert!(!is_internal_rollup_stream("_agent_signals_backup"));
+        assert!(!is_internal_rollup_stream(""));
+    }
+
+    #[test]
     fn test_usage_event_from_usage_type() {
         assert_eq!(UsageEvent::from(UsageType::Bulk), UsageEvent::Ingestion);
         assert_eq!(UsageEvent::from(UsageType::Json), UsageEvent::Ingestion);
         assert_eq!(UsageEvent::from(UsageType::Logs), UsageEvent::Ingestion);
         assert_eq!(UsageEvent::from(UsageType::Traces), UsageEvent::Ingestion);
         assert_eq!(UsageEvent::from(UsageType::Metrics), UsageEvent::Ingestion);
+        assert_eq!(UsageEvent::from(UsageType::Profiles), UsageEvent::Ingestion);
         assert_eq!(UsageEvent::from(UsageType::Search), UsageEvent::Search);
         assert_eq!(
             UsageEvent::from(UsageType::MetricSearch),
@@ -684,6 +1511,7 @@ mod tests {
         assert_eq!(format!("{}", UsageType::Logs), "/otlp/v1/logs");
         assert_eq!(format!("{}", UsageType::Traces), "/otlp/v1/traces");
         assert_eq!(format!("{}", UsageType::Metrics), "/otlp/v1/metrics");
+        assert_eq!(format!("{}", UsageType::Profiles), "/otlp/v1/profiles");
         assert_eq!(
             format!("{}", UsageType::PrometheusRemoteWrite),
             "/prometheus/v1/write"
@@ -730,6 +1558,7 @@ mod tests {
         assert!(UsageType::Logs.is_ingestion());
         assert!(UsageType::Traces.is_ingestion());
         assert!(UsageType::Metrics.is_ingestion());
+        assert!(UsageType::Profiles.is_ingestion());
         assert!(UsageType::PrometheusRemoteWrite.is_ingestion());
         assert!(UsageType::JsonMetrics.is_ingestion());
         assert!(UsageType::RUM.is_ingestion());
@@ -751,45 +1580,9 @@ mod tests {
         assert!(!UsageType::Retention.is_function());
     }
 
-    #[test]
-    fn test_trigger_data_status_serialization() {
-        assert_eq!(
-            serde_json::to_string(&TriggerDataStatus::Completed).unwrap(),
-            "\"completed\""
-        );
-        assert_eq!(
-            serde_json::to_string(&TriggerDataStatus::Failed).unwrap(),
-            "\"failed\""
-        );
-        assert_eq!(
-            serde_json::to_string(&TriggerDataStatus::ConditionNotSatisfied).unwrap(),
-            "\"condition_not_satisfied\""
-        );
-        assert_eq!(
-            serde_json::to_string(&TriggerDataStatus::Skipped).unwrap(),
-            "\"skipped\""
-        );
-    }
-
-    #[test]
-    fn test_trigger_data_status_deserialization() {
-        assert_eq!(
-            serde_json::from_str::<TriggerDataStatus>("\"completed\"").unwrap(),
-            TriggerDataStatus::Completed
-        );
-        assert_eq!(
-            serde_json::from_str::<TriggerDataStatus>("\"failed\"").unwrap(),
-            TriggerDataStatus::Failed
-        );
-        assert_eq!(
-            serde_json::from_str::<TriggerDataStatus>("\"condition_not_satisfied\"").unwrap(),
-            TriggerDataStatus::ConditionNotSatisfied
-        );
-        assert_eq!(
-            serde_json::from_str::<TriggerDataStatus>("\"skipped\"").unwrap(),
-            TriggerDataStatus::Skipped
-        );
-    }
+    // NOTE: `TriggerDataStatus` serialization/deserialization tests were replaced
+    // by the `run_outcome_tests` module above when the enum became `RunOutcome`
+    // (Part III of alerts.md).
 
     #[test]
     fn test_trigger_data_type_serialization() {
@@ -841,7 +1634,7 @@ mod tests {
             next_run_at: 1234567890,
             is_realtime: true,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 1234567890,
             end_time: 1234567890,
             retries: 0,
@@ -860,6 +1653,14 @@ mod tests {
             dedup_count: None,
             grouped: None,
             group_size: None,
+            actual_value: None,
+            threshold_value: None,
+            threshold_operator: None,
+            level: None,
+            group_label: None,
+            value_is_lower_bound: None,
+            synthetics_error_source: None,
+            synthetics_location: None,
         };
 
         let json = serde_json::to_string(&trigger_data).unwrap();
@@ -910,6 +1711,7 @@ mod tests {
                 tab_name: "test_tab_name".to_string(),
             }),
             peak_memory_usage: Some(1024000.0),
+            region: None,
         };
 
         let json = serde_json::to_string(&usage_data).unwrap();
@@ -954,6 +1756,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         let json = serde_json::to_string(&usage_data).unwrap();
@@ -1007,6 +1810,8 @@ mod tests {
             compressed_size: 1024 * 1024,   // 1MB
             flattened: false,
             index_size: 0,
+            mindex_size: 0,
+            bloom_ver: 0,
         };
 
         let stats = RequestStats::from(file_meta);
@@ -1093,6 +1898,7 @@ mod tests {
         assert_eq!(stats.max_ts, 0);
         assert!(stats.compressed_size.is_none());
         assert!(stats.index_size.is_none());
+        assert!(stats.mindex_size.is_none());
     }
 
     #[test]
@@ -1108,6 +1914,7 @@ mod tests {
             max_ts: 1234567999,
             compressed_size: Some(1.25),
             index_size: Some(0.75),
+            mindex_size: Some(0.0),
         };
 
         let json = serde_json::to_string(&stats).unwrap();
@@ -1225,6 +2032,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         let aggregated = AggregatedData {
@@ -1357,6 +2165,7 @@ mod tests {
         assert!(obj.contains_key("function"));
         assert!(obj.contains_key("work_group"));
         assert!(obj.contains_key("node_name"));
+        assert!(obj.contains_key("region"));
         assert!(obj.contains_key("dashboard_info"));
         assert!(obj.contains_key("peak_memory_usage"));
     }
@@ -1397,6 +2206,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
         let json = serde_json::to_value(&data).unwrap();
         let obj = json.as_object().unwrap();
@@ -1412,6 +2222,7 @@ mod tests {
         assert!(!obj.contains_key("function"));
         assert!(!obj.contains_key("work_group"));
         assert!(!obj.contains_key("node_name"));
+        assert!(!obj.contains_key("region"));
         assert!(!obj.contains_key("dashboard_info"));
         assert!(!obj.contains_key("peak_memory_usage"));
     }
@@ -1513,6 +2324,299 @@ mod tests {
         assert!(obj.contains_key("node_name"));
         assert!(obj.contains_key("peak_memory_usage"));
     }
+
+    /// Absent `region` must serialize to nothing, not a JSON `null`: the `_usage`
+    /// stream's schema is inferred by reflection over the rows written to it, so
+    /// a null would put an untyped column into the schema.
+    #[test]
+    fn test_usage_data_region_round_trip() {
+        let mut data = UsageData::init_for_reflection();
+
+        data.region = Some("us-west-2".to_string());
+        let json = serde_json::to_value(&data).unwrap();
+        assert_eq!(
+            json.as_object().unwrap().get("region"),
+            Some(&serde_json::Value::String("us-west-2".to_string()))
+        );
+        let back: UsageData = serde_json::from_value(json).unwrap();
+        assert_eq!(back.region.as_deref(), Some("us-west-2"));
+        assert_eq!(back, data);
+
+        data.region = None;
+        let json = serde_json::to_value(&data).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("region"),
+            "absent region must be omitted, not written as null"
+        );
+        assert!(!json.to_string().contains("region"));
+        let back: UsageData = serde_json::from_value(json).unwrap();
+        assert_eq!(back.region, None);
+        assert_eq!(back, data);
+
+        // A row written before `region` existed still decodes as `None`.
+        let mut legacy = serde_json::to_value(UsageData::init_for_reflection()).unwrap();
+        assert!(legacy.as_object_mut().unwrap().remove("region").is_some());
+        let decoded: UsageData = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded.region, None);
+    }
+
+    #[test]
+    fn test_usage_event_display_synthetics() {
+        assert_eq!(
+            UsageEvent::SyntheticsBrowserSteps.to_string(),
+            "SyntheticsBrowserSteps"
+        );
+        assert_eq!(
+            UsageEvent::SyntheticsProtocolSteps.to_string(),
+            "SyntheticsProtocolSteps"
+        );
+        assert_eq!(
+            UsageEvent::_SyntheticsStepsDefined.to_string(),
+            "_SyntheticsStepsDefined"
+        );
+        assert_eq!(
+            UsageEvent::_SyntheticsBrowserMs.to_string(),
+            "_SyntheticsBrowserMs"
+        );
+    }
+
+    #[test]
+    fn test_usage_event_synthetics_serde_roundtrip() {
+        for (event, wire) in [
+            (
+                UsageEvent::SyntheticsBrowserSteps,
+                "\"SyntheticsBrowserSteps\"",
+            ),
+            (
+                UsageEvent::SyntheticsProtocolSteps,
+                "\"SyntheticsProtocolSteps\"",
+            ),
+            (
+                UsageEvent::_SyntheticsStepsDefined,
+                "\"_SyntheticsStepsDefined\"",
+            ),
+            (UsageEvent::_SyntheticsBrowserMs, "\"_SyntheticsBrowserMs\""),
+        ] {
+            assert_eq!(serde_json::to_string(&event).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<UsageEvent>(wire).unwrap(), event);
+        }
+    }
+
+    /// The `Display` string and the serde string are the same wire format, for
+    /// every variant. A rename on one side without the other silently splits
+    /// what is written into `_usage` from what the metering loop can read back.
+    #[test]
+    fn test_usage_event_display_matches_serde_wire_string() {
+        for event in [
+            UsageEvent::Ingestion,
+            UsageEvent::Search,
+            UsageEvent::Functions,
+            UsageEvent::Pipeline,
+            UsageEvent::RemotePipeline,
+            UsageEvent::NewIncident,
+            UsageEvent::IncidentReAnalysis,
+            UsageEvent::AiChat,
+            UsageEvent::AiCredits,
+            UsageEvent::AiFreeCredits,
+            UsageEvent::SyntheticsBrowserSteps,
+            UsageEvent::SyntheticsProtocolSteps,
+            UsageEvent::_SyntheticsStepsDefined,
+            UsageEvent::_SyntheticsBrowserMs,
+            UsageEvent::Other,
+        ] {
+            let serialized = serde_json::to_string(&event).unwrap();
+            assert_eq!(
+                serialized,
+                format!("\"{event}\""),
+                "Display/serde drift for {event:?}"
+            );
+            assert_eq!(
+                serde_json::from_str::<UsageEvent>(&serialized).unwrap(),
+                event
+            );
+        }
+    }
+
+    /// Nothing decides free from billable now, so an old row naming one must land on `Other`.
+    #[test]
+    fn usage_event_has_no_free_synthetics_variants() {
+        for wire in ["SyntheticsFreeBrowserSteps", "SyntheticsFreeProtocolSteps"] {
+            let decoded: UsageEvent = serde_json::from_str(&format!("\"{wire}\""))
+                .unwrap_or_else(|e| panic!("a row written before this deploy must decode: {e}"));
+            assert_eq!(
+                decoded,
+                UsageEvent::Other,
+                "`{wire}` must read back as the non-billable Other"
+            );
+            assert_eq!(decoded.to_string(), "Other");
+        }
+    }
+
+    /// o2-enterprise (`MeteringEventName::is_billable`) keys off the naming
+    /// convention this side owns: a leading `_` marks reported-but-never-billed.
+    #[test]
+    fn test_synthetics_event_naming_convention_marks_non_billable() {
+        for event in [
+            UsageEvent::SyntheticsBrowserSteps,
+            UsageEvent::SyntheticsProtocolSteps,
+        ] {
+            let billable = event.to_string();
+            assert!(
+                !billable.starts_with('_'),
+                "billable `{billable}` must not carry the `_` non-billable marker"
+            );
+        }
+
+        for event in [
+            UsageEvent::_SyntheticsStepsDefined,
+            UsageEvent::_SyntheticsBrowserMs,
+        ] {
+            let name = event.to_string();
+            assert!(
+                name.starts_with('_'),
+                "non-billable `{name}` must carry the `_` marker"
+            );
+        }
+    }
+
+    /// Each synthetics count is its OWN event rather than a field on one event:
+    /// `GroupKey` buckets by `event`, and only `size` survives summation (see
+    /// [`GroupKey`]), so four events key four distinct buckets that never merge.
+    #[test]
+    fn test_synthetics_events_bucket_separately_in_group_key() {
+        use std::collections::HashSet;
+
+        let key_for = |event: UsageEvent| GroupKey {
+            stream_name: "synthetics".to_string(),
+            org_id: "org_a".to_string(),
+            stream_type: StreamType::Logs,
+            day: 25,
+            hour: 13,
+            event,
+            email: "u@example.com".to_string(),
+            node: "node-1".to_string(),
+        };
+
+        let keys: HashSet<GroupKey> = [
+            UsageEvent::SyntheticsBrowserSteps,
+            UsageEvent::SyntheticsProtocolSteps,
+            UsageEvent::_SyntheticsStepsDefined,
+            UsageEvent::_SyntheticsBrowserMs,
+        ]
+        .into_iter()
+        .map(key_for)
+        .collect();
+
+        assert_eq!(
+            keys.len(),
+            4,
+            "each synthetics event must aggregate into its own bucket"
+        );
+        // Same event => one bucket. (`GroupKey` has no `Debug`, so `assert!`
+        // rather than `assert_eq!`.)
+        assert!(
+            key_for(UsageEvent::SyntheticsBrowserSteps)
+                == key_for(UsageEvent::SyntheticsBrowserSteps),
+            "repeated browser-step acks must share one bucket"
+        );
+    }
+
+    /// SPEC §11 F2, now mitigated — this test is the regression guard.
+    ///
+    /// A node reads `_meta."usage"` rows written by every other node, newer ones
+    /// included. The metering loop decodes each org's rows with a strict collect:
+    ///
+    /// ```text
+    /// let usages = usage_data.into_iter()
+    ///     .map(json::from_value::<UsageResult>)
+    ///     .collect::<Result<Vec<_>, _>>();
+    /// // on Err: return Err(..) — out of handle_metering_event entirely
+    /// ```
+    ///
+    /// That `return` leaves the whole function, so before `#[serde(other)]` ONE
+    /// row naming a variant this binary lacked aborted the metering cycle for
+    /// every remaining org — which a rolling upgrade produces by construction.
+    /// The unknown event now decodes as `Other`, which is not billable, so it is
+    /// skipped rather than charged.
+    #[test]
+    fn test_unknown_usage_event_decodes_as_other_and_does_not_poison_the_batch() {
+        /// Mirror of o2-enterprise `metering::common::UsageResult`.
+        #[derive(Debug, Deserialize)]
+        #[allow(dead_code)]
+        struct UsageResult {
+            org_id: String,
+            event: UsageEvent,
+            value: f64,
+        }
+
+        const UNKNOWN_TO_THIS_BUILD: &str = "SyntheticsFutureEventFromANewerNode";
+
+        let decoded: UsageResult = serde_json::from_value(
+            serde_json::json!({"org_id": "org_b", "event": UNKNOWN_TO_THIS_BUILD, "value": 7.0}),
+        )
+        .expect("an unknown event string must decode, not error");
+        assert_eq!(
+            decoded.event,
+            UsageEvent::Other,
+            "unknown events must land on the non-billable Other"
+        );
+
+        // The metering loop's exact collect: the batch survives intact.
+        let rows = vec![
+            serde_json::json!({"org_id": "org_a", "event": "Ingestion", "value": 10.0}),
+            serde_json::json!({"org_id": "org_a", "event": "SyntheticsBrowserSteps", "value": 84.0}),
+            serde_json::json!({"org_id": "org_b", "event": UNKNOWN_TO_THIS_BUILD, "value": 7.0}),
+            serde_json::json!({"org_id": "org_c", "event": "Pipeline", "value": 3.0}),
+        ];
+        let collected = rows
+            .into_iter()
+            .map(serde_json::from_value::<UsageResult>)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("one unknown row must not abort the cycle for every other org");
+        assert_eq!(collected.len(), 4);
+    }
+
+    /// Every `TriggerData` writer shares one inferred schema, so an unset field must stay ABSENT.
+    #[test]
+    fn trigger_data_synthetics_fields_round_trip_and_omit_when_none() {
+        let bare = TriggerData::default();
+        assert_eq!(bare.synthetics_error_source, None);
+        assert_eq!(bare.synthetics_location, None);
+
+        let json = serde_json::to_value(&bare).expect("TriggerData must serialize");
+        assert!(json.get("synthetics_error_source").is_none());
+        assert!(json.get("synthetics_location").is_none());
+
+        let tagged = TriggerData {
+            synthetics_error_source: Some("quota".to_string()),
+            synthetics_location: Some("aws-us-east-1".to_string()),
+            ..TriggerData::default()
+        };
+        let json = serde_json::to_value(&tagged).expect("TriggerData must serialize");
+        assert_eq!(json["synthetics_error_source"], "quota");
+        assert_eq!(json["synthetics_location"], "aws-us-east-1");
+
+        let back: TriggerData =
+            serde_json::from_value(json).expect("a tagged row must read back unchanged");
+        assert_eq!(back, tagged);
+
+        let untagged: TriggerData = serde_json::from_value(
+            serde_json::to_value(&bare).expect("TriggerData must serialize"),
+        )
+        .expect("a row written before these fields existed must still deserialize");
+        assert_eq!(untagged.synthetics_error_source, None);
+        assert_eq!(untagged.synthetics_location, None);
+
+        let names = TriggerData::get_field_names();
+        for field in ["synthetics_error_source", "synthetics_location"] {
+            assert!(
+                names.contains(&field.to_string()),
+                "`skip_serializing_if` keeps `{field}` out of the reflection sample unless \
+                 `init_for_reflection` sets it, and a `triggers` schema without the column is a \
+                 column the quota alert rule can never fire on"
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -1532,4 +2636,6 @@ pub struct Stats {
     pub compressed_size: Option<f64>,
     #[serde(default)]
     pub index_size: Option<f64>,
+    #[serde(default)]
+    pub mindex_size: Option<f64>,
 }

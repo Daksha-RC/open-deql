@@ -23,32 +23,39 @@ import {
   nextTick,
   type Ref,
 } from "vue";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped, raw } from "@/types/i18n";
 import { useStore } from "vuex";
-import { useQuasar, debounce } from "quasar";
 import { useRouter } from "vue-router";
-import { cloneDeep } from "lodash-es";
+import { cloneDeep, debounce } from "lodash-es";
 
 import alertsService from "@/services/alerts";
 import searchService from "@/services/search";
 import anomalyDetectionService from "@/services/anomaly_detection";
+import {
+  saveAnomalyConfigMutation,
+  triggerAnomalyTrainingMutation,
+} from "@/services/anomaly_detection.queries";
+import { useMutation } from "@tanstack/vue-query";
+import { useOrgId } from "@/composables/query";
 import segment from "@/services/segment_analytics";
 import { useReo } from "@/services/reodotdev_analytics";
 
 import useStreams from "@/composables/useStreams";
 import useFunctions from "@/composables/useFunctions";
 import useQuery from "@/composables/useQuery";
+import type { BadgeVariant } from "@/lib/core/Badge/OBadge.types";
 
 import {
   getUUID,
   getTimezoneOffset,
-  b64DecodeUnicode,
   smartDecodeVrlFunction,
   isValidResourceName,
   getTimezonesByOffset,
+  resolveBrowserTimezone,
 } from "@/utils/zincutils";
 import { convertDateToTimestamp } from "@/utils/date";
 import { generateSqlQuery } from "@/utils/alerts/alertQueryBuilder";
+import { isUnaryOperator } from "@/utils/alerts/conditionsFormatter";
 import {
   validateInputs as validateInputsUtil,
   validateSqlQuery as validateSqlQueryUtil,
@@ -56,12 +63,18 @@ import {
   type ValidationContext,
   type JsonValidationContext,
 } from "@/utils/alerts/alertValidation";
+import { type SqlErrorRange } from "@/utils/query/sqlDiagnostics";
+import { maxParenDepth, SQL_PARSE_MAX_DEPTH } from "@/utils/query/sqlComplexity";
 import {
   getAlertPayload as getAlertPayloadUtil,
   prepareAndSaveAlert as prepareAndSaveAlertUtil,
+  stripFormExtras,
   type PayloadContext,
+  type PayloadFormData,
   type SaveAlertContext,
 } from "@/utils/alerts/alertPayload";
+// Pure cron helpers — used by the cron save gate in runImperativeQueryChecks.
+import { getCronIntervalDifferenceInSeconds, isAboveMinRefreshInterval } from "@/utils/queryUtils";
 import {
   getParser as getParserUtil,
   addHavingClauseToQuery,
@@ -80,24 +93,40 @@ import {
   type TransformContext,
 } from "@/utils/alerts/alertDataTransforms";
 import { AlertFocusManager } from "@/utils/alerts/focusManager";
-import {
-  createAlertsContextProvider,
-  contextRegistry,
-} from "@/composables/contextProviders";
+import { readAlertPrefill } from "@/utils/alerts/alertPrefillStorage";
+import { getAlertSource } from "@/utils/alerts/alertSourceRegistry";
+import type { AlertPrefillWarning } from "@/ts/interfaces/alertPrefill";
+import { createAlertsContextProvider, contextRegistry } from "@/composables/contextProviders";
+import { toast } from "@/lib/feedback/Toast/useToast";
 import {
   buildAnomalyFilterExpression,
   operatorNeedsValue,
 } from "@/utils/alerts/anomalyFilterOperators";
-import { outlinedInfo } from "@quasar/extras/material-icons-outlined";
+import { toDetectionFunctionSql } from "@/utils/alerts/anomalySqlBuilder";
+import config from "@/aws-exports";
+import { useOForm } from "@/lib/forms/Form/useOForm";
+import { makeAddAlertSchema, defaultAddAlertMeta } from "@/components/alerts/AddAlert.schema";
+import {
+  anomalyBudgetPerDay,
+  anomalyIntervalSeconds,
+  type AnomalyIntervalUnit,
+  type AnomalyStoredIntervals,
+} from "@/components/anomaly_detection/steps/AnomalyDetectionConfig.schema";
 
 // ─── Default Values ─────────────────────────────────────────────────────────
 
 export const defaultAlertValue: any = () => {
   return {
     name: "",
-    stream_type: "",
+    stream_type: "logs",
     stream_name: "",
     is_real_time: "false",
+    composite_condition: {
+      expression: "",
+      warning_counts_as_firing: true,
+      stale_child_policy: "use_last_state",
+    },
+    children: [],
     query_condition: {
       conditions: {
         filterType: "group",
@@ -118,6 +147,14 @@ export const defaultAlertValue: any = () => {
         },
       },
       promql_condition: null,
+      // Per-SERIES alerting for PromQL (M-9). PromQL's counterpart to
+      // aggregation.multi_alert — a PromQL alert has no aggregation, so the
+      // flag cannot live there.
+      promql_multi_alert: false,
+      // Feature 5 (§6b.6). `null` until the SLO query mode is chosen: the
+      // backend enforces `query_type == slo` IFF this is present, so an empty
+      // object here would make every ordinary alert fail validation.
+      slo_condition: null,
       vrl_function: null,
       multi_time_range: [],
     },
@@ -131,7 +168,14 @@ export const defaultAlertValue: any = () => {
       frequency_type: "minutes",
       timezone: "UTC",
     },
+    // Minutes while the form is open — the CANONICAL stored value (mirrors
+    // trigger_condition.frequency); `_ui.pendingPeriod` is the DISPLAY value,
+    // which may be in hours. getAlertPayload converts to seconds on save.
+    // 0 = fire immediately.
+    pending_period_sec: 0,
     destinations: [],
+    // Enterprise-only: workflows linked to this alert (run when it fires).
+    workflows: [],
     template: "",
     context_attributes: [],
     enabled: true,
@@ -145,7 +189,78 @@ export const defaultAlertValue: any = () => {
     lastEditedBy: "",
     folder_id: "",
     creates_incident: false,
+    // Feature 2 (PT-1/PT-6). `null` (not 0) is unset — 0 is not a valid
+    // priority id, and the payload layer drops null so pre-Feature-2 alerts
+    // serialize unchanged.
+    priority: null,
+    tags: [],
+    // Empty means "route from the identity dimensions"; the payload layer
+    // drops the key so alerts that never set a team serialize unchanged.
+    oncall_team: "",
   };
+};
+
+// Anchored so "90s" is ninety SECONDS — the old parser read any non-"h" suffix as minutes.
+const ANOMALY_INTERVAL_RE = /^(\d+)(s|m|h|d)$/;
+
+/** Parses a stored interval string on the one s/m/h/d grammar; `parsed: false` falls back to the given default. */
+export const parseAnomalyInterval = (
+  raw: unknown,
+  defaultValue: number,
+  defaultUnit: AnomalyIntervalUnit,
+): { value: number; unit: AnomalyIntervalUnit; parsed: boolean } => {
+  const match = typeof raw === "string" ? ANOMALY_INTERVAL_RE.exec(raw.trim()) : null;
+  if (!match || Number(match[1]) <= 0)
+    return { value: defaultValue, unit: defaultUnit, parsed: false };
+  return { value: Number(match[1]), unit: match[2] as AnomalyIntervalUnit, parsed: true };
+};
+
+/** Largest s/m/h/d unit that renders the seconds count losslessly — the dirty check compares these values. */
+export const anomalyWindowSecondsToParts = (
+  secs: number,
+): { value: number; unit: AnomalyIntervalUnit } => {
+  if (secs % 86400 === 0) return { value: secs / 86400, unit: "d" };
+  if (secs % 3600 === 0) return { value: secs / 3600, unit: "h" };
+  if (secs % 60 === 0) return { value: secs / 60, unit: "m" };
+  return { value: secs, unit: "s" };
+};
+
+/** The three governing payload fields; an untouched stored field round-trips its raw wire value VERBATIM (N11). */
+export const anomalyIntervalPayload = (
+  c: {
+    histogram_interval_value: number | string;
+    histogram_interval_unit: string;
+    schedule_interval_value: number | string;
+    schedule_interval_unit: string;
+    detection_window_value: number | string;
+    detection_window_unit: string;
+  },
+  stored: AnomalyStoredIntervals | null,
+): { histogram_interval: string; schedule_interval: string; detection_window_seconds: number } => {
+  const untouched = (f: { value: number; unit: string }, v: unknown, u: unknown) =>
+    Number(v) === f.value && u === f.unit;
+  const histogram_interval =
+    stored !== null &&
+    typeof stored.histogram.raw === "string" &&
+    untouched(stored.histogram, c.histogram_interval_value, c.histogram_interval_unit)
+      ? stored.histogram.raw
+      : `${c.histogram_interval_value}${c.histogram_interval_unit}`;
+  const schedule_interval =
+    stored !== null &&
+    typeof stored.schedule.raw === "string" &&
+    untouched(stored.schedule, c.schedule_interval_value, c.schedule_interval_unit)
+      ? stored.schedule.raw
+      : `${c.schedule_interval_value}${c.schedule_interval_unit}`;
+  const detection_window_seconds =
+    stored !== null &&
+    typeof stored.window.raw === "number" &&
+    untouched(stored.window, c.detection_window_value, c.detection_window_unit)
+      ? stored.window.raw
+      : (anomalyIntervalSeconds(
+          Number(c.detection_window_value),
+          String(c.detection_window_unit),
+        ) ?? 0);
+  return { histogram_interval, schedule_interval, detection_window_seconds };
 };
 
 export const defaultAnomalyConfig = () => ({
@@ -159,14 +274,17 @@ export const defaultAnomalyConfig = () => ({
   detection_function: "count",
   detection_function_field: "",
   histogram_interval_value: 5,
-  histogram_interval_unit: "m" as "m" | "h",
+  histogram_interval_unit: "m" as AnomalyIntervalUnit,
   schedule_interval_value: 1,
-  schedule_interval_unit: "h" as "m" | "h",
-  detection_window_value: 1,
-  detection_window_unit: "h" as "m" | "h",
+  schedule_interval_unit: "h" as AnomalyIntervalUnit,
+  // 3h is the smallest round window meeting §4.3's recommendation (2×(1h+5m) + the absence allowance).
+  detection_window_value: 3,
+  detection_window_unit: "h" as AnomalyIntervalUnit,
   training_window_days: 14,
   retrain_interval_days: 7,
-  threshold: 100,
+  threshold: 97,
+  // Set only when the backend stored a budget; undefined/null = percentile mode.
+  alert_budget_per_day: undefined as number | undefined,
   alert_enabled: true,
   alert_destination_ids: [] as string[],
   folder_id: "default",
@@ -174,8 +292,14 @@ export const defaultAnomalyConfig = () => ({
   is_trained: false,
   enabled: true,
   last_error: undefined as string | undefined,
+  // Set only by the config API (§4.8); the UI keys the health badge on it, never on error-string prefixes.
+  notice_class: null as "window_floor" | "window_skip" | "hybrid_fallback" | "retrain" | null,
   last_detection_run: undefined as number | undefined,
   next_run_at: undefined as number | undefined,
+  // Feature 2: anomaly configs carry the same triage metadata as alerts.
+  // `null` (not 0) is unset — 0 is not a valid priority id.
+  priority: null as number | null,
+  tags: [] as string[],
 });
 
 // ─── Composable ─────────────────────────────────────────────────────────────
@@ -185,6 +309,7 @@ export interface AlertFormProps {
   isUpdated: boolean;
   destinations: any[];
   templates?: any[];
+  folderId?: string;
 }
 
 export interface AlertFormEmit {
@@ -194,14 +319,23 @@ export interface AlertFormEmit {
   (e: "refresh:templates"): void;
 }
 
+// The full value set held by the ONE OForm: the alert payload shape plus the
+// form-only extras seeded by withFormExtras (logGroupBy / _ui / _meta). Typing
+// the form generic with this makes `form.state.values.*` reads (the synchronous
+// source of truth) typed instead of `unknown`.
+export type AlertFormValues = PayloadFormData & {
+  logGroupBy: string[];
+  _ui: Record<string, unknown>;
+  _meta: Record<string, unknown>;
+} & Record<string, unknown>;
+
 export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const store: any = useStore();
-  const { t } = useI18n();
-  const q = useQuasar();
+  const { t } = useI18nTyped();
   const router = useRouter();
   const { track } = useReo();
   const { getAllFunctions } = useFunctions();
-  const { getStreams, getStream } = useStreams();
+  const { getStreams, getStream } = useStreams(t);
   const { buildQueryPayload } = useQuery();
 
   // ── Core State ──────────────────────────────────────────────────────────
@@ -209,7 +343,132 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const beingUpdated = ref(false);
   const addAlertForm: any = ref(null);
   const disableColor: any = ref("");
-  const formData: any = ref(defaultAlertValue());
+
+  // ── Headless OForm ────────────────────────────────────────────────────────
+  // AddAlert OWNS the ONE form for the whole wizard (topbar scalars + the
+  // descendant steps QueryConfig/AlertSettings bind their fields by nested
+  // `name=` into it). `formData` is a READ-VIEW of the form's values
+  // (form.useStore) — the SINGLE source of truth, no mirror. Every write goes
+  // through setF / resetForm; NEVER mutate the read-view directly (that bypasses
+  // TanStack).
+  /** The org's min evaluation frequency, in SECONDS (0 when unset — the schema
+   *  then skips the floor rule rather than inventing one). */
+  const minAutoRefreshInterval = (): number =>
+    Number(store.state?.zoConfig?.min_auto_refresh_interval) || 0;
+
+  /** Split an alert's STORED frequency (always MINUTES) into the display unit +
+   *  the number the user actually sees. Mirrors QueryConfig's
+   *  `initialFrequencyMode` / sync-watch rule: >= 60 and a whole number of hours
+   *  shows as hours. The display value lives under `_ui` (display-only, stripped
+   *  from the payload); the stored minutes stay in trigger_condition.frequency. */
+  const frequencyDisplay = (
+    obj: any,
+  ): { mode: "minutes" | "hours" | "cron"; checkEvery: number } => {
+    const mins = Number(obj?.trigger_condition?.frequency ?? 10);
+    if (obj?.trigger_condition?.frequency_type === "cron")
+      return { mode: "cron", checkEvery: mins };
+    const isHours = mins >= 60 && mins % 60 === 0;
+    return {
+      mode: isHours ? "hours" : "minutes",
+      checkEvery: isHours ? mins / 60 : mins,
+    };
+  };
+
+  /** Split the alert's STORED pending period (always MINUTES, mirroring
+   *  `frequencyDisplay`) into the display unit + the number the user actually
+   *  sees. AlertSettings.vue derives its own initial unit the same way — see
+   *  its `initialPendingPeriodMode`, kept in sync by rule, not shared code
+   *  (matching how `frequencyMode` and this helper stay independent). */
+  const pendingPeriodDisplay = (obj: any): { mode: "minutes" | "hours"; value: number } => {
+    const mins = Number(obj?.pending_period_sec ?? 0);
+    const isHours = mins >= 60 && mins % 60 === 0;
+    return {
+      mode: isHours ? "hours" : "minutes",
+      value: isHours ? mins / 60 : mins,
+    };
+  };
+
+  const buildDefaultForm = (): any => {
+    const base = defaultAlertValue();
+    return {
+      ...base,
+      logGroupBy: [] as string[],
+      _ui: {
+        checkEvery: frequencyDisplay(base).checkEvery,
+        pendingPeriod: pendingPeriodDisplay(base).value,
+      },
+      _meta: defaultAddAlertMeta({
+        frequencyMode: frequencyDisplay(base).mode,
+        minAutoRefreshInterval: minAutoRefreshInterval(),
+      }),
+    };
+  };
+
+  // Add the form-only extras (logGroupBy for logs measure group-by; `_ui` the
+  // display-only state; `_meta` the QueryConfig discriminator block) to a plain
+  // alert object so `form.reset(...)` always seeds a schema-complete value set.
+  // QueryConfig then keeps `_meta` fresh via its own syncMeta watcher, and
+  // re-seeds `_ui.checkEvery` from the stored frequency at setup.
+  const withFormExtras = (obj: any): any => {
+    const groupBy: string[] = Array.isArray(obj?.query_condition?.aggregation?.group_by)
+      ? obj.query_condition.aggregation.group_by.filter((g: string) => g)
+      : [];
+    const freq = frequencyDisplay(obj);
+    return {
+      ...obj,
+      logGroupBy: groupBy,
+      _ui: obj?._ui ?? {
+        checkEvery: freq.checkEvery,
+        pendingPeriod: pendingPeriodDisplay(obj).value,
+      },
+      _meta:
+        obj?._meta ??
+        defaultAddAlertMeta({
+          tab: obj?.query_condition?.type || "custom",
+          isRealTime: String(obj?.is_real_time ?? "false"),
+          isEventBased: (obj?.stream_type ?? "logs") !== "metrics",
+          aggregationEnabled: !!obj?.query_condition?.aggregation,
+          hasGroupBy: groupBy.length > 0,
+          hasConditions: !!obj?.query_condition?.conditions?.conditions?.length,
+          frequencyMode: freq.mode,
+          minAutoRefreshInterval: minAutoRefreshInterval(),
+        }),
+    };
+  };
+
+  // i18n-driven validation schema (messages resolve via `t` — see AddAlert.schema).
+  // Workflows are enterprise/cloud-only; where they exist an alert may be
+  // delivered to a destination OR a workflow, which relaxes "destinations ≥ 1"
+  // into "at least one of the two". In OSS this stays false and the rule (and
+  // its message) is byte-identical to before.
+  // Also respects the backend /config flag: on an enterprise build with
+  // workflows switched OFF the picker has no Workflows group, so relaxing the
+  // rule would surface "destination or workflow required" for a choice the user
+  // cannot make. Falls back to the strict "destination required" rule, which is
+  // the same rule OSS gets. (Built once in setup — if /config has not landed
+  // yet this is the stricter of the two, which is the safe direction.)
+  const addAlertSchema = makeAddAlertSchema(
+    t,
+    (config.isEnterprise === "true" || config.isCloud === "true") &&
+      store.state.zoConfig?.workflows_enabled === true,
+  );
+  const form = useOForm<AlertFormValues>({
+    defaultValues: buildDefaultForm() as AlertFormValues,
+    schema: addAlertSchema,
+    onSubmit: async () => {
+      await performSave();
+    },
+  });
+
+  // READ-VIEW of the single form. Reactive; replaced immutably on every change.
+  const formData: any = form.useStore((s: any) => s.values);
+
+  /** Write a single (possibly nested, dot/bracket-path) field into the ONE form. */
+  const setF = (path: string, value: any): void => form.setFieldValue(path as any, value);
+
+  /** Reset the whole form (edit-prefill / post-save reset) to a complete alert
+   *  object, re-seeding the form-only extras (logGroupBy / _meta). */
+  const resetForm = (obj: any): void => form.reset(withFormExtras(obj));
   const indexOptions = ref([]);
   const schemaList = ref([]);
   const streams: any = ref({});
@@ -219,6 +478,11 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   let editorobj: any = null;
   const sqlAST: any = ref(null);
   const selectedRelativeValue = ref("1");
+  // NOT i18n: "Minutes" here is DATA, not a label. It is the period *identifier*
+  // that loadPanelData compares against ("Hours"/"Days"/"Weeks") to convert a
+  // panel's relative range into minutes, and utils/date.ts keys off the very same
+  // literal (`periodLabel === "Minutes"`) when building the `period` URL param.
+  // Translating it would silently break that conversion.
   const selectedRelativePeriod = ref("Minutes");
   const relativePeriods: any = ref(["Minutes"]);
   const triggerCols: any = ref([]);
@@ -230,22 +494,35 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   // ── Anomaly Detection State ─────────────────────────────────────────────
 
   const anomalyConfig = ref(defaultAnomalyConfig());
+  // Captured ONCE from the edit-fetch response — never from anomalyConfig, which the form live-mutates (D4).
+  const anomalyStoredIntervals = ref<AnomalyStoredIntervals | null>(null);
   const anomalyStep2Ref = ref<any>(null);
   const showAnomalySummary = ref(true);
   const anomalyEditMode = ref(false);
   const anomalyRetraining = ref(false);
   const anomalySaving = ref(false);
 
-  const anomalyStatusColor = computed(() => {
+  const anomalyOrgId = useOrgId();
+  const saveAnomalyConfig = useMutation(() =>
+    saveAnomalyConfigMutation(
+      anomalyOrgId.value,
+      () => router.currentRoute.value.params.anomaly_id as string | undefined,
+    ),
+  );
+  const triggerAnomalyTraining = useMutation(() =>
+    triggerAnomalyTrainingMutation(anomalyOrgId.value),
+  );
+
+  const anomalyStatusVariant = computed<BadgeVariant>(() => {
     switch (anomalyConfig.value.status) {
       case "active":
-        return "positive";
+        return "success";
       case "training":
-        return "info";
+        return "primary";
       case "failed":
-        return "negative";
+        return "error";
       default:
-        return "grey";
+        return "default";
     }
   });
 
@@ -256,71 +533,49 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const anomalyTriggerRetrain = async () => {
-    const anomalyId = router.currentRoute.value.params.anomaly_id as
-      | string
-      | undefined;
+    const anomalyId = router.currentRoute.value.params.anomaly_id as string | undefined;
     if (!anomalyId) return;
     anomalyRetraining.value = true;
     try {
-      await anomalyDetectionService.triggerTraining(
-        store.state.selectedOrganization.identifier,
-        anomalyId,
-      );
-      q.notify({ type: "positive", message: "Training triggered." });
+      await triggerAnomalyTraining.mutateAsync(anomalyId);
+      toast({
+        variant: "success",
+        message: t("alerts.messages.trainingTriggered"),
+      });
     } catch {
-      q.notify({
-        type: "negative",
-        message: "Failed to trigger training.",
+      toast({
+        variant: "error",
+        message: t("alerts.messages.trainingTriggerFailed"),
       });
     } finally {
       anomalyRetraining.value = false;
     }
   };
 
-  const isAnomalyMode = computed(
-    () => formData.value.is_real_time === "anomaly",
-  );
+  const isAnomalyMode = computed(() => formData.value.is_real_time === "anomaly");
 
   const anomalyHistogramInterval = computed(
     () =>
       `${anomalyConfig.value.histogram_interval_value}${anomalyConfig.value.histogram_interval_unit}`,
   );
-  const anomalyScheduleInterval = computed(
-    () =>
-      `${anomalyConfig.value.schedule_interval_value}${anomalyConfig.value.schedule_interval_unit}`,
-  );
-  const anomalyDetectionWindowSeconds = computed(() => {
-    const mult =
-      anomalyConfig.value.detection_window_unit === "h" ? 3600 : 60;
-    return anomalyConfig.value.detection_window_value * mult;
-  });
-
   const anomalyPreviewSql = computed(() => {
     const c = anomalyConfig.value;
     if (c.query_mode === "custom_sql") {
-      return c.custom_sql || "-- Enter your SQL in Detection Config step";
+      return c.custom_sql || t("alerts.messages.sqlPreviewPlaceholder");
     }
     const stream = c.stream_name || "<stream>";
     const interval = anomalyHistogramInterval.value || "5m";
-    const fn =
-      c.detection_function === "count"
-        ? "count(*)"
-        : `${c.detection_function}(${c.detection_function_field || "<field>"})`;
+    const fn = toDetectionFunctionSql(
+      c.detection_function,
+      c.detection_function_field || "<field>",
+    );
     const filterLines = (c.filters || [])
-      .filter(
-        (f: any) =>
-          f.field && (operatorNeedsValue(f.operator) ? f.value : true),
-      )
-      .map(
-        (f: any) =>
-          `  AND ${buildAnomalyFilterExpression(f.field, f.operator, f.value)}`,
-      );
+      .filter((f: any) => f.field && (operatorNeedsValue(f.operator) ? f.value : true))
+      .map((f: any) => `  AND ${buildAnomalyFilterExpression(f.field, f.operator, f.value)}`);
     const where = filterLines.length
       ? [
           "WHERE",
-          ...filterLines.map((l: string, i: number) =>
-            i === 0 ? l.replace(/^\s+AND /, "  ") : l,
-          ),
+          ...filterLines.map((l: string, i: number) => (i === 0 ? l.replace(/^\s+AND /, "  ") : l)),
         ].join("\n")
       : "";
     const autoSeasonality = c.training_window_days >= 7 ? "week" : "day";
@@ -328,8 +583,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       autoSeasonality === "week"
         ? ",\n       date_part('hour', to_timestamp(_timestamp / 1000000)) AS hour,\n       date_part('dow', to_timestamp(_timestamp / 1000000)) AS dow"
         : ",\n       date_part('hour', to_timestamp(_timestamp / 1000000)) AS hour";
-    const seasonalGroup =
-      autoSeasonality === "week" ? ", hour, dow" : ", hour";
+    const seasonalGroup = autoSeasonality === "week" ? ", hour, dow" : ", hour";
     return [
       `SELECT histogram(_timestamp, '${interval}') AS time_bucket,`,
       `       ${fn} AS value${seasonalSelect}`,
@@ -344,7 +598,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
   const anomalySummarySectionStyle = computed(() => {
     if (!showAnomalySummary.value) return { flex: "0 0 auto" };
-    return { flex: "1", minHeight: "150px" };
+    return { flex: "1", minHeight: "9.375rem" };
   });
 
   // ── Expand / UI State ───────────────────────────────────────────────────
@@ -358,22 +612,16 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     multiWindowSelection: false,
   });
 
-  const triggerOperators: any = ref([
-    "=",
-    "!=",
-    ">=",
-    "<=",
-    ">",
-    "<",
-    "Contains",
-    "NotContains",
-  ]);
+  const triggerOperators: any = ref(["=", "!=", ">=", "<=", ">", "<", "Contains", "NotContains"]);
   const showVrlFunction = ref(false);
   const isFetchingStreams = ref(false);
   const streamTypes = ["logs", "metrics", "traces"];
+  // `value` is LOAD-BEARING data ("String" / "Json" are the values persisted in
+  // `row_template_type` and compared against below) — only `label` is display
+  // text, so only `label` is translated.
   const rowTemplateTypeOptions = [
-    { label: "String", value: "String" },
-    { label: "JSON", value: "Json" },
+    { label: t("alerts.advanced.templateTypeString"), value: "String" },
+    { label: t("alerts.advanced.templateTypeJson"), value: "Json" },
   ];
 
   const focusManager = new AlertFocusManager();
@@ -383,6 +631,19 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const previewQuery = ref("");
   const isUsingBackendSql = ref(false);
   const sqlQueryErrorMsg = ref("");
+  // Editor squiggle ranges for server SQL-validation errors (shared with editors
+  // via provide/inject from AddAlert.vue).
+  const sqlErrorRanges = ref<SqlErrorRange[]>([]);
+  // SQL tab's Multi Alert value-column dropdown options — the query's own
+  // resolved output columns. Populated by PreviewAlert's `schema-updated`
+  // emit (AddAlert.vue's handleSqlSchemaUpdated), which reuses the
+  // /result_schema call PreviewAlert already makes every time the preview
+  // query itself fires (sql_simple_multi_alert_fe_prd.md §11.2/§11.3).
+  const sqlAggColumnOptions = ref<string[]>([]);
+  // Whether the user's own SQL carries a HAVING clause — same emit as above.
+  // Drives the QueryConfig warning that it runs before the Multi Alert's own
+  // "Alert if [column]" condition.
+  const sqlQueryHasHaving = ref(false);
   const validateSqlQueryPromise = ref<Promise<unknown>>();
   const addAlertFormRef = ref(null);
   const viewSqlEditorDialog = ref(false);
@@ -393,14 +654,18 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const showTimezoneWarning = ref(false);
   const showJsonEditorDialog = ref(false);
   const validationErrors = ref([]);
-  const isLoadingPanelData = ref(false);
+  const isLoadingPrefill = ref(false);
+  /** Lossy transforms the source adapter performed, surfaced in the form. */
+  const prefillWarnings = ref<AlertPrefillWarning[]>([]);
 
-  const activeFolderId = ref(
-    router.currentRoute.value.query.folder || "default",
+  const folderQuery = router.currentRoute.value.query.folder;
+  // Prefer the folder the caller (AlertList) hands us over the URL query: the
+  // folder tab's v-model is the authoritative current folder, while the URL
+  // query can be stale when the "New alert" dialog is opened from a tab.
+  const activeFolderId = ref<string>(
+    props.folderId || (Array.isArray(folderQuery) ? folderQuery[0] : folderQuery) || "default",
   );
-  const alertType = ref(
-    router.currentRoute.value.query.alert_type || "all",
-  );
+  const alertType = ref(router.currentRoute.value.query.alert_type || "all");
 
   // ── Wizard State (kept for anomaly flow) ────────────────────────────────
 
@@ -412,13 +677,10 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const step4Ref = ref(null);
   const lastValidStep = ref(1);
 
-  // Topbar field refs + error states for stream type / stream name
+  // Topbar field refs (for focus-on-error only).
   const streamTypeRef = ref<any>(null);
   const streamNameRef = ref<any>(null);
   const anomalyNameRef = ref<any>(null);
-  const alertNameError = ref(false);
-  const streamTypeError = ref(false);
-  const streamNameError = ref(false);
 
   // ── V3 Tab State (for standard alerts) ──────────────────────────────────
 
@@ -436,6 +698,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const previewDateTimeValue = ref({
     tab: "relative",
     relative: {
+      // NOT i18n: utils/date.ts reads `period.label` back as an identifier
+      // (`periodLabel === "Minutes"` → unit "m") when turning this object into
+      // query params, so the label is load-bearing data here, not display text.
       period: { label: "Minutes", value: "Minutes" },
       value: 15,
     },
@@ -467,10 +732,14 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     return formData.value.stream_type && formData.value.stream_name;
   });
 
+  // The `{name}` / `{timestamp}` braces are LITERAL template syntax shown to the
+  // user, so the locale values escape them for vue-i18n (`{'{'}` … `{'}'}`) and
+  // render byte-identical to the pre-i18n literals. Same keys as Advanced.vue,
+  // which owns the rendered placeholder.
   const rowTemplatePlaceholder = computed(() => {
     return formData.value.row_template_type === "Json"
-      ? 'e.g - {"user": "{name}", "timestamp": "{timestamp}"}'
-      : "e.g - Alert was triggered at {timestamp}";
+      ? t("alerts.advanced.rowTemplatePlaceholderJson")
+      : t("alerts.advanced.rowTemplatePlaceholderString");
   });
 
   const decodedVrlFunction = computed(() => {
@@ -503,23 +772,6 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     return wizardStep.value === 6;
   });
 
-  const canSaveAlert = computed(() => {
-    if (formData.value.is_real_time === "anomaly") {
-      if (!anomalyConfig.value.name?.trim()) {
-        return false;
-      }
-      if (
-        anomalyConfig.value.alert_enabled &&
-        anomalyConfig.value.alert_destination_ids.length === 0
-      ) {
-        return false;
-      }
-      return true;
-    }
-    // For V3 layout, always allow save (validation happens on save)
-    return true;
-  });
-
   const getFormattedDestinations = computed(() => {
     return props.destinations.map((destination: any) => {
       return destination.name;
@@ -533,7 +785,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       data: [
         {
           yAxis: formData.value.trigger_condition.threshold,
-          label: { formatter: "Threshold" },
+          label: { formatter: t("alerts.messages.thresholdMarkLine") },
         },
       ],
       lineStyle: { color: "#ff4444", type: "dashed", width: 2 },
@@ -553,6 +805,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     const sqlUtilsContext: SqlUtilsContext = {
       parser,
       sqlQueryErrorMsg,
+      t,
     };
     return getParserUtil(sqlQuery, sqlUtilsContext);
   };
@@ -564,12 +817,8 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     if (!stream_name) return;
 
     if (editorData.value) {
-      editorData.value = editorData.value
-        .replace(prefixCode.value, "")
-        .trim();
-      editorData.value = editorData.value
-        .replace(suffixCode.value, "")
-        .trim();
+      editorData.value = editorData.value.replace(prefixCode.value, "").trim();
+      editorData.value = editorData.value.replace(suffixCode.value, "").trim();
     }
 
     if (!props.isUpdated) {
@@ -577,11 +826,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       suffixCode.value = "'" + formData.value.stream_name + "'";
     }
 
-    const selected_stream: any = await getStream(
-      stream_name,
-      formData.value.stream_type,
-      true,
-    );
+    const selected_stream: any = await getStream(stream_name, formData.value.stream_type, true);
     selected_stream.schema.forEach(function (item: any) {
       triggerCols.value.push(item.name);
     });
@@ -590,11 +835,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const updateStreamFields = async (stream_name: any) => {
     let streamCols: any = [];
 
-    const streamsData: any = await getStream(
-      stream_name,
-      formData.value.stream_type,
-      true,
-    );
+    const streamsData: any = await getStream(stream_name, formData.value.stream_type, true);
 
     if (streamsData && Array.isArray(streamsData.schema)) {
       streamCols = streamsData.schema.map((column: any) => ({
@@ -610,8 +851,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       streamsData.settings.defined_schema_fields.length > 0
     ) {
       const definedFields = streamsData.settings.defined_schema_fields;
-      const timestampColumn =
-        store.state.zoConfig?.timestamp_column || "_timestamp";
+      const timestampColumn = store.state.zoConfig?.timestamp_column || "_timestamp";
       const allFieldsName = store.state.zoConfig?.all_fields_name;
 
       streamCols = streamCols.filter((col: any) => {
@@ -625,34 +865,81 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     originalStreamFields.value = [...streamCols];
     filteredColumns.value = [...streamCols];
 
+    // In SQL mode, generate a starter query when the editor is still empty
+    if (
+      formData.value.query_condition.type === "sql" &&
+      !formData.value.query_condition.sql?.trim()
+    ) {
+      setF("query_condition.sql", `SELECT * FROM "${stream_name}"`);
+    }
+
     onInputUpdate("stream_name", stream_name);
   };
 
+  // ── SQL → stream-name sync ──────────────────────────────────────────────
+  // When the user edits the SQL query and changes the stream name inside the
+  // FROM clause, update the stream-name dropdown to match.
+  // Guard flag prevents the auto-SQL-generation inside updateStreamFields from
+  // firing while we are already syncing (SQL is not empty at that point, so
+  // the guard in updateStreamFields would already prevent it, but this is an
+  // extra safety layer).
+  const isSyncingStreamFromSql = ref(false);
+
+  const debouncedSyncStreamFromSql = debounce(async (sql: string) => {
+    if (!sql || !parser || isSyncingStreamFromSql.value) return;
+    // parse() is exponential in paren nesting depth — skip a pathologically
+    // nested query rather than freeze the tab. Losing this convenience sync
+    // is fine; the user can still pick the stream from the dropdown.
+    if (maxParenDepth(sql) > SQL_PARSE_MAX_DEPTH) return;
+    try {
+      const parsed = parser.parse(sql);
+      const fromStream = parsed?.ast?.from?.[0]?.table as string | undefined;
+      if (fromStream && fromStream !== formData.value.stream_name) {
+        isSyncingStreamFromSql.value = true;
+        setF("stream_name", fromStream);
+        await updateStreamFields(fromStream);
+        isSyncingStreamFromSql.value = false;
+      }
+    } catch {
+      // ignore parse errors while user is mid-typing
+    }
+  }, 600);
+
+  watch(
+    () => formData.value.query_condition.sql,
+    (sql) => {
+      if (formData.value.query_condition.type === "sql" && !isSyncingStreamFromSql.value) {
+        debouncedSyncStreamFromSql(sql || "");
+      }
+    },
+  );
+
   const updateStreams = (resetStream = true) => {
-    if (resetStream) formData.value.stream_name = "";
-    if (streams.value[formData.value.stream_type]) {
-      schemaList.value = streams.value[formData.value.stream_type];
-      indexOptions.value = streams.value[formData.value.stream_type].map(
-        (data: any) => {
-          return data.name;
-        },
-      );
+    if (resetStream) setF("stream_name", "");
+    // Read the synchronous source of truth (not the reactive read-view, which
+    // can lag one tick behind a setF from the OFormSelect change handler).
+    const streamType = form.state.values.stream_type;
+    const streamName = form.state.values.stream_name;
+    if (streams.value[streamType]) {
+      schemaList.value = streams.value[streamType];
+      indexOptions.value = streams.value[streamType].map((data: any) => {
+        return data.name;
+      });
       return;
     }
 
-    if (!formData.value.stream_type) return Promise.resolve();
+    if (!streamType) return Promise.resolve();
 
     isFetchingStreams.value = true;
-    return getStreams(formData.value.stream_type, false)
+    return getStreams(streamType, false)
       .then(async (res: any) => {
-        streams.value[formData.value.stream_type] = res.list;
+        streams.value[streamType] = res.list;
         schemaList.value = res.list;
         indexOptions.value = res.list.map((data: any) => {
           return data.name;
         });
 
-        if (formData.value.stream_name)
-          await updateStreamFields(formData.value.stream_name);
+        if (streamName) await updateStreamFields(streamName);
         return Promise.resolve();
       })
       .catch(() => Promise.reject())
@@ -669,9 +956,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     }
     update(() => {
       const value = val.toLowerCase();
-      filteredOptions = options.filter(
-        (column: any) => column.toLowerCase().indexOf(value) > -1,
-      );
+      filteredOptions = options.filter((column: any) => column.toLowerCase().indexOf(value) > -1);
     });
     return filteredOptions;
   };
@@ -700,17 +985,12 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     if (conditions.filterType === "condition") {
       return !!(
         conditions.column &&
-        conditions.value !== undefined &&
-        conditions.value !== ""
+        (isUnaryOperator(conditions.operator) ||
+          (conditions.value !== undefined && conditions.value !== ""))
       );
     }
-    if (
-      conditions.filterType === "group" &&
-      Array.isArray(conditions.conditions)
-    ) {
-      return conditions.conditions.every((cond: any) =>
-        allConditionsValid(cond),
-      );
+    if (conditions.filterType === "group" && Array.isArray(conditions.conditions)) {
+      return conditions.conditions.every((cond: any) => allConditionsValid(cond));
     }
     return false;
   };
@@ -750,8 +1030,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         formData.value.query_condition?.conditions &&
         Object.keys(formData.value.query_condition.conditions).length > 0;
       const conditionsValid =
-        hasConditions &&
-        allConditionsValid(formData.value.query_condition.conditions);
+        hasConditions && allConditionsValid(formData.value.query_condition.conditions);
       const aggregationValid = isAggregationValid();
 
       // If conditions are incomplete/missing, fall back to local SQL so the
@@ -778,15 +1057,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         },
       };
 
-      if (
-        isAggregationEnabled.value &&
-        formData.value.query_condition.aggregation
-      ) {
-        const groupBy =
-          formData.value.query_condition.aggregation.group_by || [];
-        const filteredGroupBy = groupBy.filter(
-          (field: string) => field && field.trim() !== "",
-        );
+      if (isAggregationEnabled.value && formData.value.query_condition.aggregation) {
+        const groupBy = formData.value.query_condition.aggregation.group_by || [];
+        const filteredGroupBy = groupBy.filter((field: string) => field && field.trim() !== "");
         payload.query_condition.aggregation = {
           ...formData.value.query_condition.aggregation,
           group_by: filteredGroupBy,
@@ -845,7 +1118,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
   const debouncedPreviewAlert = debounce(previewAlert, 500);
 
-  const onInputUpdate = async (name: string, value: any) => {
+  const onInputUpdate = async (_name: string, _value: any) => {
     if (formData.value.query_condition.type === "custom") {
       debouncedGenerateSql();
     } else if (showPreview.value) {
@@ -862,13 +1135,50 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       getSelectedTab,
       beingUpdated: beingUpdated.value,
     };
-    return getAlertPayloadUtil(formData.value, payloadContext);
+    // Read the synchronous source of truth (the form store), not the reactive
+    // read-view, so a value written by setF immediately before save is included.
+    if (form.state.values.is_real_time === "composite") {
+      const source = cloneDeep(form.state.values) as any;
+      const contextAttributes = Object.fromEntries(
+        (Array.isArray(source.context_attributes) ? source.context_attributes : [])
+          .filter((attribute: any) => attribute.key?.trim() && attribute.value?.trim())
+          .map((attribute: any) => [attribute.key, attribute.value]),
+      );
+      return {
+        ...(source.id ? { id: source.id } : {}),
+        alert_type: "composite",
+        name: source.name,
+        description: raw(String(source.description ?? "").trim()),
+        enabled: source.enabled,
+        destinations: source.destinations ?? [],
+        template: source.template,
+        context_attributes: contextAttributes,
+        trigger_condition: {
+          silence: Number(source.trigger_condition?.silence ?? 0),
+        },
+        // Stored and evaluated for composite alerts server-side (see
+        // handle_composite_alert_trigger). Note the detail GET response
+        // doesn't return it yet on edit — see the fallback comment on the
+        // edit-prefill conversion above.
+        pending_period_sec: Math.round((Number(source.pending_period_sec) || 0) * 60),
+        owner: source.owner || undefined,
+        creates_incident: source.creates_incident ?? false,
+        workflows: source.workflows ?? [],
+        priority: source.priority ?? null,
+        tags: source.tags ?? [],
+        composite_condition: source.composite_condition,
+      };
+    }
+    const payload = getAlertPayloadUtil(form.state.values, payloadContext);
+    delete payload.composite_condition;
+    delete payload.children;
+    return payload;
   };
 
   const validateInputs = (input: any, notify: boolean = true) => {
     const validationContext: ValidationContext = {
-      q,
       store,
+      t,
       validateSqlQueryPromise,
       sqlQueryErrorMsg,
       vrlFunctionError,
@@ -880,10 +1190,11 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
   const validateSqlQuery = async () => {
     const validationContext: ValidationContext = {
-      q,
       store,
+      t,
       validateSqlQueryPromise,
       sqlQueryErrorMsg,
+      sqlErrorRanges,
       vrlFunctionError,
       buildQueryPayload,
       getParser,
@@ -892,6 +1203,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const validateConditionsAgainstUDS = () => {
+    if (formData.value.is_real_time === "composite") {
+      return { isValid: true, invalidFields: [] };
+    }
     if (
       !formData.value.stream_name ||
       !formData.value.stream_type ||
@@ -902,17 +1216,14 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     }
 
     const isRealTime =
-      formData.value.is_real_time === "true" ||
-      formData.value.is_real_time === true;
+      formData.value.is_real_time === "true" || formData.value.is_real_time === true;
     const queryType = formData.value.query_condition?.type;
 
     if (!isRealTime && (queryType === "sql" || queryType === "promql")) {
       return { isValid: true, invalidFields: [] };
     }
 
-    const allowedFieldNames = new Set(
-      originalStreamFields.value.map((field: any) => field.value),
-    );
+    const allowedFieldNames = new Set(originalStreamFields.value.map((field: any) => field.value));
 
     const invalidFields: string[] = [];
 
@@ -949,10 +1260,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         checkConditionFields(formData.value.query_condition.conditions);
       }
     } else {
-      if (
-        formData.value.query_condition?.conditions &&
-        queryType === "custom"
-      ) {
+      if (formData.value.query_condition?.conditions && queryType === "custom") {
         checkConditionFields(formData.value.query_condition.conditions);
       }
 
@@ -961,13 +1269,8 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         queryType === "custom" &&
         formData.value.query_condition?.aggregation?.having?.column
       ) {
-        const havingColumn =
-          formData.value.query_condition.aggregation.having.column;
-        if (
-          havingColumn &&
-          havingColumn !== "" &&
-          !allowedFieldNames.has(havingColumn)
-        ) {
+        const havingColumn = formData.value.query_condition.aggregation.having.column;
+        if (havingColumn && havingColumn !== "" && !allowedFieldNames.has(havingColumn)) {
           if (!invalidFields.includes(havingColumn)) {
             invalidFields.push(havingColumn);
           }
@@ -980,15 +1283,13 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         formData.value.query_condition?.aggregation?.group_by &&
         Array.isArray(formData.value.query_condition.aggregation.group_by)
       ) {
-        formData.value.query_condition.aggregation.group_by.forEach(
-          (field: string) => {
-            if (field && field !== "" && !allowedFieldNames.has(field)) {
-              if (!invalidFields.includes(field)) {
-                invalidFields.push(field);
-              }
+        formData.value.query_condition.aggregation.group_by.forEach((field: string) => {
+          if (field && field !== "" && !allowedFieldNames.has(field)) {
+            if (!invalidFields.includes(field)) {
+              invalidFields.push(field);
             }
-          },
-        );
+          }
+        });
       }
     }
 
@@ -998,71 +1299,14 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     };
   };
 
-  // Validate a specific step (used by wizard navigation and save)
-  const validateStep = async (stepNumber: number) => {
-    if (stepNumber === 1) {
-      if (step1Ref.value && (step1Ref.value as any).validate) {
-        const isValid = await (step1Ref.value as any).validate();
-        if (!isValid) {
-          focusOnFirstError();
-          return false;
-        }
-      }
-    }
-
-    if (stepNumber === 2) {
-      if (step2Ref.value && (step2Ref.value as any).validate) {
-        const validationResult = (step2Ref.value as any).validate();
-        const isValid =
-          validationResult instanceof Promise
-            ? await validationResult
-            : validationResult;
-
-        if (!isValid) {
-          const queryType = formData.value.query_condition.type || "custom";
-          if (queryType === "sql") {
-            let errorMsg = "";
-            if (sqlQueryErrorMsg.value) {
-              errorMsg = `SQL validation error: ${sqlQueryErrorMsg.value}`;
-            } else {
-              errorMsg = "Please provide a valid SQL query.";
-            }
-            q.notify({
-              type: "negative",
-              message: errorMsg,
-              timeout: 2000,
-            });
-          }
-          return false;
-        }
-      }
-    }
-
-    if (stepNumber === 4) {
-      if (step4Ref.value && (step4Ref.value as any).validate) {
-        const validationResult = (step4Ref.value as any).validate();
-        const result =
-          validationResult instanceof Promise
-            ? await validationResult
-            : validationResult;
-
-        const isValid = typeof result === "boolean" ? result : result.valid;
-        const errorMessage =
-          typeof result === "object" ? result.message : null;
-
-        if (!isValid) {
-          if (errorMessage) {
-            q.notify({
-              type: "negative",
-              message: errorMessage,
-              timeout: 1500,
-            });
-          }
-          return false;
-        }
-      }
-    }
-
+  // Validate a specific step (used by wizard navigation).
+  // Always true by design: every step (topbar name/stream, QueryConfig,
+  // AlertSettings) is a DESCENDANT of the ONE AddAlert form, so their field
+  // rules run through the composed schema (AddAlert.schema.ts) on the real save
+  // path (handleSave → form.handleSubmit), and the non-schema query-text gates
+  // live in runImperativeQueryChecks. Kept as a function so wizard navigation
+  // keeps its gate seam.
+  const validateStep = async (_stepNumber: number) => {
     return true;
   };
 
@@ -1070,89 +1314,128 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     return await validateStep(wizardStep.value);
   };
 
-  const focusOnFirstError = () => {
-    nextTick(() => {
-      const errorField = document.querySelector(
-        ".q-field--error input, .q-field--error .q-select__dropdown-icon",
-      );
-      if (errorField) {
-        (errorField as HTMLElement).focus();
-        errorField.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Focus the first field showing a validation message. This used to query
+  // a legacy error class — one with no producer left in the app after the
+  // OForm migration, so it silently matched nothing and the "fix the highlighted
+  // fields" toast pointed at a field we never actually focused. OInput/OSelect
+  // render their message as [role="alert"] inside the field wrapper, so walk up
+  // from the message to the nearest ancestor holding the control.
+  //
+  // Scoped to the <form>: toasts are also role="alert" and would otherwise win.
+  // Invisible messages are skipped — a v-show'd tab has no offsetParent, and
+  // focusing a display:none control does nothing.
+  const focusVisibleError = (form: HTMLElement): boolean => {
+    const messages = Array.from(form.querySelectorAll<HTMLElement>('[role="alert"]')).filter(
+      (el) => el.offsetParent !== null && el.textContent?.trim(),
+    );
+
+    for (const message of messages) {
+      let node: HTMLElement | null = message.parentElement;
+      while (node && node !== form) {
+        // [data-inline-edit-trigger] is OInlineEdit's display-mode button: an
+        // inline-edited field has NO input in the DOM until it is opened, so
+        // without this the header name field would never be reachable here.
+        const control = node.querySelector<HTMLElement>(
+          'input:not([type="hidden"]), textarea, [role="combobox"], button[aria-haspopup], [data-inline-edit-trigger]',
+        );
+        if (control) {
+          control.focus();
+          control.scrollIntoView({ behavior: "smooth", block: "center" });
+          return true;
+        }
+        node = node.parentElement;
       }
+    }
+    return false;
+  };
+
+  const focusOnFirstError = () => {
+    nextTick(async () => {
+      const form = document.querySelector("form");
+      if (!form) return;
+
+      // The offending field is on the tab the user is already looking at.
+      if (focusVisibleError(form)) return;
+
+      // Nothing VISIBLE is erroring, but the form is still invalid — so the
+      // offending field lives on a tab the user isn't looking at. That pane is
+      // v-show'd off, so every message inside it has a null offsetParent and the
+      // scan above skips it: the toast fires, points at nothing, and the user is
+      // told to fix a field they cannot see. Bring the owning tab forward first,
+      // then focus for real (this is what the pre-migration save gate did by
+      // hardcoding `activeTab = "condition"` before focusing).
+      // Only hop to a tab that is REACHABLE in the current mode. Every pane stays
+      // in the DOM in both modes (v-show, not v-if) while `alertTabs` swaps the
+      // headers wholesale between anomaly and alert — so a stale message on a
+      // pane whose header isn't rendered would strand the user on a tab the
+      // toggle group cannot show or leave.
+      const stranded = Array.from(form.querySelectorAll<HTMLElement>('[role="alert"]')).find(
+        (el) => {
+          if (!el.textContent?.trim()) return false;
+          const key = el.closest<HTMLElement>("[data-tab-pane]")?.dataset.tabPane;
+          return !!key && !!form.querySelector(`[data-test="add-alert-tab-${key}"]`);
+        },
+      );
+      const pane = stranded?.closest<HTMLElement>("[data-tab-pane]");
+      const tab = pane?.dataset.tabPane;
+      if (!tab || tab === activeTab.value) return;
+
+      activeTab.value = tab;
+      await nextTick();
+      // Re-scan with the visibility filter intact: now that the pane is shown,
+      // its messages have an offsetParent. Anything still hidden (a collapsed
+      // section) is correctly skipped rather than focused into the void.
+      focusVisibleError(form);
     });
   };
 
-  // Focus a topbar q-select/q-input by its Vue component ref
+  // Focus a topbar select/input by its Vue component ref. A component that
+  // exposes its own focus() owns the decision (OInlineEdit has no input in the
+  // DOM until it opens, so "focus me" means "open the editor"); everything else
+  // falls back to the first input inside its root.
   const focusTopbarField = (fieldRef: any) => {
     nextTick(() => {
       const el = fieldRef?.value?.$el as HTMLElement | null;
-      if (el) {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        const input = el.querySelector("input") as HTMLElement | null;
-        input?.focus();
+      el?.scrollIntoView({ behavior: "smooth", block: "center" });
+      if (typeof fieldRef?.value?.focus === "function") {
+        fieldRef.value.focus();
+        return;
       }
+      const input = el?.querySelector("input") as HTMLElement | null;
+      input?.focus();
     });
   };
 
-  // Sequential top-to-bottom validation with auto-focus for V3 layout
+  // Schema-driven validity predicate (validation ONLY — never triggers the save;
+  // the real save path is handleSave → form.handleSubmit). The ONE composed
+  // schema owns name/stream + the step field rules, so this just runs the
+  // imperative query-text gates (re-homed from the descendant QueryConfig) and
+  // parses the current form values against the schema. Kept exported for
+  // programmatic callers (Rule ④ — same name/stream/§4 gating as before, now via
+  // the schema).
   const validateAndFocus = async (): Promise<boolean> => {
-    // 1. Alert name
-    if (!formData.value.name?.trim()) {
-      alertNameError.value = true;
-      q.notify({ type: "negative", message: "Alert name is required.", timeout: 2000 });
-      focusTopbarField(step1Ref);
-      return false;
-    }
-    alertNameError.value = false;
-
-    // 2. Stream Type
-    if (!formData.value.stream_type) {
-      streamTypeError.value = true;
-      q.notify({ type: "negative", message: "Stream type is required.", timeout: 2000 });
-      focusTopbarField(streamTypeRef);
-      return false;
-    }
-    streamTypeError.value = false;
-
-    // 3. Stream Name
-    if (!formData.value.stream_name) {
-      streamNameError.value = true;
-      q.notify({ type: "negative", message: "Stream name is required.", timeout: 2000 });
-      focusTopbarField(streamNameRef);
-      return false;
-    }
-    streamNameError.value = false;
-
-    // 4. Query + Conditions (QueryConfig validates SQL/PromQL content + custom conditions)
-    if (step2Ref.value && (step2Ref.value as any).validate) {
-      activeTab.value = "condition";
-      await nextTick();
-      const isValid = await (step2Ref.value as any).validate();
-      if (!isValid) {
-        // QueryConfig.validate() focuses its own editor/fields on failure
+    if (isAnomalyMode.value) {
+      if (!anomalyConfig.value.name?.trim()) {
+        toast({
+          variant: "error",
+          message: t("alerts.messages.anomalyDetectionNameRequired"),
+        });
+        // One inline-edit control now serves both alert and anomaly names, so
+        // step1Ref is the anomaly name field too.
+        focusTopbarField(step1Ref);
         return false;
       }
+      return true;
     }
-
-    // 5. Alert Settings (trigger conditions, destinations)
-    if (step4Ref.value && (step4Ref.value as any).validate) {
-      const result = await (step4Ref.value as any).validate();
-      const isValid = typeof result === "boolean" ? result : result?.valid;
-      const message = typeof result === "object" ? result?.message : null;
-      const shouldFocusDestination = typeof result === "object" ? result?.focusDestination : false;
-      if (!isValid) {
-        activeTab.value = "condition";
-        await nextTick();
-        if (message) q.notify({ type: "negative", message, timeout: 2000 });
-        if (shouldFocusDestination && (step4Ref.value as any).focusDestination) {
-          (step4Ref.value as any).focusDestination();
-        } else {
-          focusOnFirstError();
-        }
-        return false;
-      }
+    if (!runImperativeQueryChecks()) return false;
+    const parsed = addAlertSchema.safeParse(form.state.values);
+    if (!parsed.success) {
+      // No hardcoded tab switch: focusOnFirstError now walks to the pane that
+      // actually owns the first error, so a topbar error (name/stream) no longer
+      // yanks the user onto the condition tab to look at a field that isn't there.
+      focusOnFirstError();
+      return false;
     }
-
     return true;
   };
 
@@ -1170,44 +1453,50 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       advanced: false,
     };
 
-    // Validate top bar (name, stream)
-    if (step1Ref.value && (step1Ref.value as any).validate) {
-      const isValid = await (step1Ref.value as any).validate();
-      if (!isValid) {
-        return { valid: false, firstErrorTab: null }; // Error is in top bar, not a tab
-      }
-    }
-
-    // Validate condition tab
-    const condValid = await validateStep(2);
-    if (!condValid) {
-      tabErrors.value.condition = true;
-      return { valid: false, firstErrorTab: "condition" };
-    }
-
-    // Validate alert settings (now part of condition tab)
-    const rulesValid = await validateStep(4);
-    if (!rulesValid) {
-      tabErrors.value.condition = true;
-      return { valid: false, firstErrorTab: "condition" };
-    }
+    // The per-step validate() calls that used to run here (condition tab /
+    // alert settings) are gone — those steps bind into the ONE form and the
+    // composed schema validates them on save (handleSave → form.handleSubmit).
 
     return { valid: true, firstErrorTab: null };
   };
 
   // ── Condition Transforms ────────────────────────────────────────────────
 
+  // Build a mutable {query_condition:{conditions}} context off a CLONE of the
+  // form's current conditions tree. The transform utils mutate context.formData
+  // in place, so it must NOT be the readonly form read-view (formData.value) —
+  // writing to that silently fails (the form store values are readonly).
+  const conditionsTransformContext = (): TransformContext => ({
+    formData: {
+      query_condition: {
+        conditions: cloneDeep(
+          form.state.values.query_condition?.conditions ?? {
+            filterType: "group",
+            logicalOperator: "AND",
+            groupId: "",
+            conditions: [],
+          },
+        ),
+      },
+    },
+  });
+
   const updateGroup = (updatedGroup: any) => {
-    const transformContext: TransformContext = { formData: formData.value };
-    updateGroupUtil(updatedGroup, transformContext);
+    const ctx = conditionsTransformContext();
+    updateGroupUtil(updatedGroup, ctx);
+    setF(
+      "query_condition.conditions",
+      JSON.parse(JSON.stringify(ctx.formData.query_condition.conditions)),
+    );
   };
 
-  const removeConditionGroup = (
-    targetGroupId: string,
-    currentGroup?: any,
-  ) => {
-    const transformContext: TransformContext = { formData: formData.value };
-    removeConditionGroupUtil(targetGroupId, currentGroup, transformContext);
+  const removeConditionGroup = (targetGroupId: string, currentGroup?: any) => {
+    const ctx = conditionsTransformContext();
+    removeConditionGroupUtil(targetGroupId, currentGroup, ctx);
+    setF(
+      "query_condition.conditions",
+      JSON.parse(JSON.stringify(ctx.formData.query_condition.conditions)),
+    );
   };
 
   const transformFEToBE = (node: any) => {
@@ -1225,18 +1514,19 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const addVariable = () => {
-    formData.value.context_attributes.push({
-      name: "",
-      value: "",
-      id: getUUID(),
-    });
+    setF("context_attributes", [
+      ...(formData.value.context_attributes ?? []),
+      { name: "", value: "", id: getUUID() },
+    ]);
   };
 
   const removeVariable = (variable: any) => {
-    formData.value.context_attributes =
-      formData.value.context_attributes.filter(
+    setF(
+      "context_attributes",
+      (formData.value.context_attributes ?? []).filter(
         (_variable: any) => _variable.id !== variable.id,
-      );
+      ),
+    );
   };
 
   const updateFunctionVisibility = () => {
@@ -1248,13 +1538,13 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
   const updateMultiTimeRange = (value: any) => {
     if (value) {
-      formData.value.query_condition.multi_time_range = value;
+      setF("query_condition.multi_time_range", value);
     }
   };
 
   const updateSilence = (value: any) => {
     if (value) {
-      formData.value.trigger_condition.silence = value;
+      setF("trigger_condition.silence", value);
     }
   };
 
@@ -1271,15 +1561,39 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const updateDestinations = (destinations: any[]) => {
-    formData.value.destinations = destinations;
+    setF("destinations", destinations);
+  };
+
+  const updateWorkflows = (workflows: any[]) => {
+    setF("workflows", workflows);
   };
 
   const updateTab = (tab: string) => {
-    formData.value.query_condition.type = tab;
+    setF("query_condition.type", tab);
   };
 
+  // ── @update bridges from steps into the ONE form (Rule ② / ③) ─────────────
+  // The already-migrated descendants (QueryConfig/AlertSettings) bind their
+  // scalars directly by nested `name=`, so their update:* emits no-op in
+  // descendant mode; these handlers still route the out-of-form widget values
+  // (SQL/PromQL/VRL editors) and the bare wizard steps B (Advanced /
+  // CompareWithPast / Deduplication) into the form via setFieldValue.
+  const updateSqlQuery = (value: any) => setF("query_condition.sql", value);
+  const updatePromqlQuery = (value: any) => setF("query_condition.promql", value);
+  const updateVrlFunction = (value: any) => setF("query_condition.vrl_function", value);
+  const updateAggregation = (value: any) => setF("query_condition.aggregation", value);
+  const updatePromqlCondition = (value: any) => setF("query_condition.promql_condition", value);
+  const updateSloCondition = (value: any) => setF("query_condition.slo_condition", value);
+  const updateTriggerCondition = (value: any) => setF("trigger_condition", value);
+  const updateTemplate = (value: any) => setF("template", value);
+  const updateContextAttributes = (value: any) => setF("context_attributes", value);
+  const updateDescription = (value: any) => setF("description", value);
+  const updateRowTemplate = (value: any) => setF("row_template", value);
+  const updateRowTemplateType = (value: any) => setF("row_template_type", value);
+  const updateDeduplication = (value: any) => setF("deduplication", value);
+
   const handleGoToSqlEditor = () => {
-    formData.value.query_condition.type = "sql";
+    setF("query_condition.type", "sql");
     if (isAnomalyMode.value) {
       activeTab.value = "anomaly-config";
     } else {
@@ -1288,7 +1602,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const clearMultiWindows = () => {
-    formData.value.query_condition.multi_time_range = [];
+    setF("query_condition.multi_time_range", []);
   };
 
   const handleEditorStateChanged = (isOpen: boolean) => {
@@ -1296,23 +1610,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const handleEditorClosed = () => {
-    if (
-      previewAlertRef.value &&
-      typeof previewAlertRef.value.refreshData === "function"
-    ) {
+    if (previewAlertRef.value && typeof previewAlertRef.value.refreshData === "function") {
       previewAlertRef.value.refreshData();
     }
-  };
-
-  const routeToCreateDestination = () => {
-    const url = router.resolve({
-      name: "alertDestinations",
-      query: {
-        action: "add",
-        org_identifier: store.state.selectedOrganization.identifier,
-      },
-    }).href;
-    window.open(url, "_blank");
   };
 
   const openEditorDialog = () => {
@@ -1324,7 +1624,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   };
 
   const editorUpdate = (e: any) => {
-    formData.value.sql = e.target.value;
+    setF("sql", e.target.value);
   };
 
   // ── Error Handling ──────────────────────────────────────────────────────
@@ -1332,330 +1632,205 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   const HTTP_FORBIDDEN = 403;
   const handleAlertError = (err: any) => {
     if (err.response?.status !== HTTP_FORBIDDEN) {
-      q.notify({
-        type: "negative",
-        message:
-          err.response?.data?.message ||
-          err.response?.data?.error ||
-          err.response?.data,
+      toast({
+        variant: "error",
+        message: err.response?.data?.message || err.response?.data?.error || err.response?.data,
       });
-    }
-  };
-
-  const validateFormAndNavigateToErrorField = async (formRef: any) => {
-    const isValid = await formRef.validate().then(async (valid: any) => {
-      return valid;
-    });
-    if (!isValid) {
-      navigateToErrorField(formRef);
-      return false;
-    }
-    return true;
-  };
-
-  const navigateToErrorField = (formRef: any) => {
-    const errorField = formRef.$el.querySelector(".q-field--error");
-    if (errorField) {
-      errorField.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   };
 
   // ── JSON Editor Save ────────────────────────────────────────────────────
 
+  /** What the JSON editor DISPLAYS. `formData` is the whole form value set, so
+   *  it carries the form-only keys (_ui/_meta/logGroupBy); pre-migration
+   *  formData had none of them, so strip them to show the alert resource the
+   *  user actually edits (Rule ④). cloneDeep first — formData is a readonly
+   *  read-view and stripFormExtras mutates. */
+  const jsonEditorData = computed(() => stripFormExtras(cloneDeep(formData.value)));
+
   const saveAlertJson = async (json: any) => {
     const saveContext: SaveAlertContext = {
-      q,
       store,
+      t,
       props,
       emit,
       router,
       isAggregationEnabled,
       activeFolderId: {
-        value: Array.isArray(activeFolderId.value)
-          ? activeFolderId.value[0]
-          : activeFolderId.value,
+        value: Array.isArray(activeFolderId.value) ? activeFolderId.value[0] : activeFolderId.value,
       },
       handleAlertError,
     };
 
-    const prepareAndSaveAlertFunction = (data: any) =>
-      prepareAndSaveAlertUtil(data, saveContext);
+    const prepareAndSaveAlertFunction = (data: any) => prepareAndSaveAlertUtil(data, saveContext);
 
     const jsonValidationContext: JsonValidationContext = {
-      q,
       store,
+      t,
       streams,
       getStreams,
       getParser,
-      buildQueryPayload,
+      // Bound here so the validation module keeps its 1-arg buildQueryPayload contract.
+      buildQueryPayload: (options: any) => buildQueryPayload(options, t),
       prepareAndSaveAlert: prepareAndSaveAlertFunction,
     };
 
+    // Seed the ONE form with the edited JSON (Rule ③ — `formData` is a readonly
+    // read-view, so the old `formData.value = payload` was a silent no-op).
+    // Matters on server-side rejection: the drawer is already closed, so without
+    // this the user's JSON edits are lost and can't be retried.
     await saveAlertJsonUtil(
       json,
       props,
       validationErrors,
       showJsonEditorDialog,
-      formData,
+      resetForm,
       jsonValidationContext,
     );
   };
 
-  // ── Panel Data Import ───────────────────────────────────────────────────
+  // ── Prefill Import (any source surface) ─────────────────────────────────
 
-  const loadPanelDataIfPresent = async () => {
+  /**
+   * Apply a prefill handed over by ANY surface — a dashboard panel, a logs
+   * search, a pattern set, or something added later. The shaping work already
+   * happened in the source's pure adapter (utils/alerts/prefill/*), so this
+   * only has to seed the form.
+   *
+   * Replaces the old `loadPanelDataIfPresent`, which read a JSON blob out of the
+   * URL and understood the panel shape only.
+   */
+  const applyAlertPrefill = async () => {
     const route = router.currentRoute.value;
+    if (!route.query.prefill) return;
 
-    if (route.query.fromPanel === "true" && route.query.panelData) {
-      isLoadingPanelData.value = true;
-      try {
-        const panelData = JSON.parse(
-          decodeURIComponent(route.query.panelData as string),
-        );
+    const prefill = readAlertPrefill();
+    if (!prefill) return;
 
-        if (panelData.queries && panelData.queries.length > 0) {
-          const query = panelData.queries[0];
+    isLoadingPrefill.value = true;
+    try {
+      // Mutate a LOCAL working copy, then seed the ONE form with a single
+      // resetForm (Rule ③ — `formData` is a readonly read-view).
+      const data: any = cloneDeep(formData.value);
 
-          const sanitizePanelTitle = (title: string | undefined): string => {
-            if (!title || title.trim() === "") {
-              return "panel";
-            }
-            let sanitized = title.replace(/[:#?&%'"\s]+/g, "_");
-            sanitized = sanitized.replace(/_+/g, "_");
-            sanitized = sanitized.replace(/^_+|_+$/g, "");
-            if (sanitized === "") {
-              return "panel";
-            }
-            const maxLength = 200;
-            if (sanitized.length > maxLength) {
-              sanitized = sanitized.substring(0, maxLength);
-              sanitized = sanitized.replace(/_+$/, "");
-            }
-            return sanitized;
-          };
+      if (prefill.name) data.name = prefill.name;
 
-          formData.value.name = `Alert_from_${sanitizePanelTitle(panelData.panelTitle)}`;
+      data.stream_type = prefill.streamType || data.stream_type;
+      data.stream_name = prefill.streamName;
 
-          q.notify({
-            type: "positive",
-            message: t("alerts.importedFromPanel", {
-              panelTitle: panelData.panelTitle,
-            }),
-            timeout: 3000,
-          });
-
-          if (query.fields?.stream_type) {
-            formData.value.stream_type = query.fields.stream_type;
-          }
-
-          if (query.fields?.stream) {
-            formData.value.stream_name = query.fields.stream;
-            await updateStreams(false);
-          }
-
-          if (panelData.queryType === "sql") {
-            formData.value.query_condition.type = "sql";
-            const sourceQuery = panelData.executedQuery || query.query;
-            if (sourceQuery) {
-              let sqlQuery = sourceQuery;
-
-              if (
-                panelData.threshold !== undefined &&
-                panelData.condition &&
-                panelData.yAxisColumn
-              ) {
-                const threshold = panelData.threshold;
-                const operator =
-                  panelData.condition === "above" ? ">=" : "<=";
-                const yAxisColumn = panelData.yAxisColumn;
-
-                if (!parser) {
-                  await importSqlParser();
-                }
-                sqlQuery = addHavingClauseToQuery(
-                  sqlQuery,
-                  yAxisColumn,
-                  operator,
-                  threshold,
-                  parser,
-                );
-              }
-
-              formData.value.query_condition.sql = sqlQuery;
-            }
-          } else if (panelData.queryType === "promql") {
-            formData.value.query_condition.type = "promql";
-            const sourceQuery = panelData.executedQuery || query.query;
-            if (sourceQuery) {
-              formData.value.query_condition.promql = sourceQuery;
-            }
-          } else {
-            formData.value.query_condition.type = "sql";
-          }
-
-          if (
-            panelData.queryType === "sql" &&
-            query.customQuery === false &&
-            query.fields
-          ) {
-            isAggregationEnabled.value = true;
-
-            if (query.fields.x && query.fields.x.length > 0) {
-              if (!formData.value.query_condition.aggregation) {
-                formData.value.query_condition.aggregation = {
-                  group_by: [],
-                  function: "count",
-                  having: {
-                    column: "",
-                    operator: ">=",
-                    value: 1,
-                  },
-                };
-              }
-              formData.value.query_condition.aggregation.group_by =
-                query.fields.x.map((x: any) => x.alias || x.column);
-            }
-
-            if (query.fields.y && query.fields.y.length > 0) {
-              const yField = query.fields.y[0];
-              if (yField.aggregationFunction) {
-                if (!formData.value.query_condition.aggregation) {
-                  formData.value.query_condition.aggregation = {
-                    group_by: [""],
-                    function: "count",
-                    having: {
-                      column: "",
-                      operator: ">=",
-                      value: 1,
-                    },
-                  };
-                }
-                formData.value.query_condition.aggregation.function =
-                  yField.aggregationFunction.toLowerCase();
-                formData.value.query_condition.aggregation.having.column =
-                  yField.alias || yField.column;
-              }
-            }
-
-            if (query.fields.filter && query.fields.filter.length > 0) {
-              const conditions: any[] = [];
-              query.fields.filter.forEach((filter: any) => {
-                if (
-                  filter.type === "list" &&
-                  filter.values &&
-                  filter.values.length > 0
-                ) {
-                  conditions.push({
-                    filterType: "condition",
-                    column: filter.column,
-                    operator: "=",
-                    value: filter.values[0],
-                    values: [],
-                    logicalOperator: "AND",
-                    id: getUUID(),
-                  });
-                }
-              });
-
-              if (conditions.length > 0) {
-                formData.value.query_condition.conditions = {
-                  filterType: "group",
-                  logicalOperator: "AND",
-                  groupId: getUUID(),
-                  conditions: conditions,
-                };
-              }
-            }
-          }
-
-          if (query.vrlFunctionQuery) {
-            showVrlFunction.value = true;
-            formData.value.query_condition.vrl_function =
-              query.vrlFunctionQuery;
-          }
-
-          if (panelData.timeRange?.value_type === "relative") {
-            const relativeValue = panelData.timeRange.relative_value || 15;
-            const relativePeriodVal =
-              panelData.timeRange.relative_period || "Minutes";
-
-            let periodInMinutes = relativeValue;
-            if (relativePeriodVal === "Hours") {
-              periodInMinutes = relativeValue * 60;
-            } else if (relativePeriodVal === "Days") {
-              periodInMinutes = relativeValue * 60 * 24;
-            } else if (relativePeriodVal === "Weeks") {
-              periodInMinutes = relativeValue * 60 * 24 * 7;
-            }
-
-            formData.value.trigger_condition.period = periodInMinutes;
-          }
-
-          if (panelData.threshold !== undefined && panelData.condition) {
-            if (panelData.queryType === "promql") {
-              if (!formData.value.query_condition.promql_condition) {
-                formData.value.query_condition.promql_condition = {
-                  column: "value",
-                  operator: ">=",
-                  value: 1,
-                };
-              }
-              formData.value.query_condition.promql_condition.value =
-                panelData.threshold;
-              formData.value.query_condition.promql_condition.operator =
-                panelData.condition === "above" ? ">=" : "<=";
-            } else {
-              if (
-                isAggregationEnabled.value &&
-                formData.value.query_condition.aggregation
-              ) {
-                if (!formData.value.query_condition.aggregation.having) {
-                  formData.value.query_condition.aggregation.having = {
-                    column: "",
-                    operator: ">=",
-                    value: 1,
-                  };
-                }
-                formData.value.query_condition.aggregation.having.value =
-                  panelData.threshold;
-                formData.value.query_condition.aggregation.having.operator =
-                  panelData.condition === "above" ? ">=" : "<=";
-              }
-            }
-
-            formData.value.trigger_condition.threshold = 1;
-            formData.value.trigger_condition.operator = ">=";
-          }
-        }
-
-        await nextTick();
-        if (previewAlertRef.value?.refreshData) {
-          previewAlertRef.value.refreshData();
-        }
-      } catch (error) {
-        console.error("Error loading panel data:", error);
-        q.notify({
-          type: "negative",
-          message: "Failed to load panel data",
-          timeout: 2000,
-        });
-      } finally {
-        isLoadingPanelData.value = false;
+      if (prefill.streamName) {
+        // Seed the form's stream fields first so updateStreams fetches the right
+        // schema (it reads them off the form); resetForm below re-seeds anyway.
+        setF("stream_type", data.stream_type);
+        setF("stream_name", data.stream_name);
+        await updateStreams(false);
       }
+
+      if (prefill.queryType === "promql") {
+        data.query_condition.type = "promql";
+        data.query_condition.promql = prefill.promql ?? "";
+        if (prefill.promqlCondition) {
+          data.query_condition.promql_condition = { ...prefill.promqlCondition };
+        }
+      } else if (prefill.queryType === "custom" && prefill.conditions) {
+        data.query_condition.type = "custom";
+        data.query_condition.conditions = cloneDeep(prefill.conditions);
+      } else {
+        data.query_condition.type = "sql";
+        let sql = prefill.sql ?? "";
+
+        // A raw-SQL threshold arrives as meta.sqlHaving because injecting it
+        // needs the SQL parser, which is async and lives here rather than in the
+        // (pure, synchronous) adapters.
+        const sqlHaving = prefill.meta?.sqlHaving as
+          { column: string; operator: string; value: number } | undefined;
+        if (sql && sqlHaving?.column) {
+          if (!parser) await importSqlParser();
+          sql = addHavingClauseToQuery(
+            sql,
+            sqlHaving.column,
+            sqlHaving.operator,
+            sqlHaving.value,
+            parser,
+          );
+        }
+
+        data.query_condition.sql = sql;
+      }
+
+      if (prefill.aggregation) {
+        isAggregationEnabled.value = true;
+        data.query_condition.aggregation = cloneDeep(prefill.aggregation);
+      }
+
+      if (prefill.vrlFunction) {
+        showVrlFunction.value = true;
+        data.query_condition.vrl_function = prefill.vrlFunction;
+      }
+
+      if (prefill.periodMinutes) {
+        data.trigger_condition.period = prefill.periodMinutes;
+      }
+      if (prefill.frequencyMinutes) {
+        // The source's own schedule wins. The only floor is the org's minimum
+        // evaluation frequency, which is the rule the schema enforces on save;
+        // clamping to the form's DEFAULT instead (as this used to) silently
+        // overrode a curated alert that runs every minute with "every ten".
+        const floorMinutes = Math.max(1, Math.ceil(minAutoRefreshInterval() / 60));
+        data.trigger_condition.frequency = Math.max(floorMinutes, prefill.frequencyMinutes);
+      }
+      if (prefill.silenceMinutes !== undefined) {
+        data.trigger_condition.silence = prefill.silenceMinutes;
+      }
+      if (prefill.timezone) {
+        data.trigger_condition.timezone = prefill.timezone;
+      }
+
+      // A source that carries a real trigger says so explicitly, and is believed.
+      // Otherwise: with a threshold expressed inside the query (HAVING / promql
+      // condition), the trigger itself only needs "at least one row came back".
+      const hasQueryThreshold =
+        !!prefill.promqlCondition || !!prefill.meta?.sqlHaving || !!prefill.aggregation;
+      if (prefill.triggerThreshold !== undefined) {
+        data.trigger_condition.threshold = prefill.triggerThreshold;
+        if (prefill.triggerOperator) {
+          data.trigger_condition.operator = prefill.triggerOperator;
+        }
+      } else if (hasQueryThreshold) {
+        data.trigger_condition.threshold = 1;
+        data.trigger_condition.operator = ">=";
+      }
+
+      resetForm(data);
+
+      prefillWarnings.value = prefill.warnings ?? [];
+
+      toast({
+        variant: "success",
+        message: t(getAlertSource(prefill.source).toastKey, {
+          sourceLabel: prefill.sourceLabel,
+        }),
+      });
+
+      await nextTick();
+      if (previewAlertRef.value?.refreshData) {
+        previewAlertRef.value.refreshData();
+      }
+    } catch (error) {
+      console.error("Error applying alert prefill:", error);
+      toast({
+        variant: "error",
+        message: t("alerts.messages.failedToLoadPanelData"),
+      });
+    } finally {
+      isLoadingPrefill.value = false;
     }
   };
 
   // ── Wizard Navigation (kept for anomaly) ────────────────────────────────
 
   const goToStep2 = async () => {
-    if (step1Ref.value && typeof (step1Ref.value as any).validate === "function") {
-      const isValid = await (step1Ref.value as any).validate();
-      if (isValid) {
-        wizardStep.value = 2;
-      }
-    } else {
-      wizardStep.value = 2;
-    }
+    wizardStep.value = 2;
   };
 
   const goToNextStep = async () => {
@@ -1717,18 +1892,27 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
   const saveAnomalyDetection = async () => {
     if (!anomalyConfig.value.name?.trim()) {
-      q.notify({
-        type: "negative",
-        message: "Anomaly name is required.",
-        timeout: 2000,
+      toast({
+        variant: "error",
+        message: t("alerts.messages.anomalyNameRequired"),
       });
       return;
     }
 
+    // These two gates must move the user to the tab holding the offending field.
+    // They used to set `wizardStep`, which the V2 stepper navigated by — the V3
+    // single-pane layout navigates by `activeTab` and passes a hardcoded
+    // wizard-step to the summary, so setting it here steered nothing and Save &
+    // Train just appeared dead. Toast as well: the invalid field is on a tab the
+    // user isn't looking at, so the highlight alone is invisible.
     if (anomalyStep2Ref.value) {
       const step2Valid = await anomalyStep2Ref.value.validate();
       if (!step2Valid) {
-        wizardStep.value = 2;
+        activeTab.value = "anomaly-config";
+        toast({
+          variant: "error",
+          message: t("alerts.messages.fixHighlightedFields"),
+        });
         return;
       }
     }
@@ -1737,7 +1921,11 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       anomalyConfig.value.alert_enabled &&
       anomalyConfig.value.alert_destination_ids.length === 0
     ) {
-      wizardStep.value = 3;
+      activeTab.value = "anomaly-alerting";
+      toast({
+        variant: "error",
+        message: t("alerts.validation.destinationRequired"),
+      });
       return;
     }
 
@@ -1747,9 +1935,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
     if (c.query_mode === "custom_sql") {
       if (!c.custom_sql?.trim()) {
-        q.notify({
-          type: "negative",
-          message: "Custom SQL is required in custom SQL mode.",
+        toast({
+          variant: "error",
+          message: t("alerts.messages.customSqlRequired"),
         });
         wizardStep.value = 2;
         anomalySaving.value = false;
@@ -1770,11 +1958,10 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
           page_type: c.stream_type,
         });
       } catch (sqlErr: any) {
-        const msg =
-          sqlErr?.response?.data?.message || "Invalid SQL query";
-        q.notify({
-          type: "negative",
-          message: `SQL validation error: ${msg}`,
+        const msg = sqlErr?.response?.data?.message || t("alerts.messages.invalidSqlQueryLower");
+        toast({
+          variant: "error",
+          message: t("alerts.validation.sqlValidationError", { error: msg }),
         });
         wizardStep.value = 2;
         anomalySaving.value = false;
@@ -1783,6 +1970,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     }
 
     try {
+      const budgetPerDay = anomalyBudgetPerDay(c);
       const payload: any = {
         alert_type: "anomaly_detection",
         name: c.name,
@@ -1792,9 +1980,15 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         enabled: c.enabled ?? true,
         folder_id: (activeFolderId.value as string) || "default",
         alert_destinations:
-          c.alert_enabled && c.alert_destination_ids?.length
-            ? c.alert_destination_ids
-            : [],
+          c.alert_enabled && c.alert_destination_ids?.length ? c.alert_destination_ids : [],
+        // Feature 2. Priority is sent as an integer (the storage id); omitted
+        // entirely when unset so the payload matches a pre-Feature-2 config.
+        // Tags are always sent so clearing them actually clears — the backend
+        // treats an explicit empty list as "remove all".
+        ...(c.priority === null || c.priority === undefined
+          ? {}
+          : { priority: Number(c.priority) }),
+        tags: Array.isArray(c.tags) ? c.tags : [],
         anomaly_config: {
           query_mode: c.query_mode,
           filters: c.query_mode === "filters" ? (c.filters ?? []) : null,
@@ -1804,77 +1998,177 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
             c.query_mode === "filters" && c.detection_function !== "count"
               ? c.detection_function_field || undefined
               : undefined,
-          histogram_interval: anomalyHistogramInterval.value,
-          schedule_interval: anomalyScheduleInterval.value,
-          detection_window_seconds: anomalyDetectionWindowSeconds.value,
+          ...anomalyIntervalPayload(c, anomalyStoredIntervals.value),
           training_window_days: c.training_window_days,
           retrain_interval_days: c.retrain_interval_days,
-          threshold: c.threshold,
+          // Mutually exclusive on the wire; in budget mode `threshold` is controller-derived, never sent.
+          ...(budgetPerDay !== null
+            ? { alert_budget_per_day: budgetPerDay }
+            : { threshold: c.threshold }),
           alert_enabled: c.alert_enabled,
         },
       };
 
-      const routeAnomalyId = router.currentRoute.value.params
-        .anomaly_id as string | undefined;
-      if (routeAnomalyId) {
-        await anomalyDetectionService.update(orgId, routeAnomalyId, payload);
-        q.notify({
-          type: "positive",
-          message: "Anomaly detection config updated.",
-        });
-      } else {
-        await anomalyDetectionService.create(orgId, payload);
-        q.notify({
-          type: "positive",
-          message:
-            t("alerts.anomalyCreated") ||
-            "Anomaly detection config created. Training will start shortly.",
-        });
-      }
+      const routeAnomalyId = router.currentRoute.value.params.anomaly_id as string | undefined;
+      await saveAnomalyConfig.mutateAsync({
+        payload,
+        folderId: (activeFolderId.value as string) || "default",
+      });
+      toast({
+        variant: "success",
+        message: routeAnomalyId
+          ? t("alerts.messages.anomalyConfigUpdated")
+          : t("alerts.anomalyCreated"),
+      });
 
       emit("update:list", (activeFolderId.value as string) || "default");
     } catch (err: any) {
-      q.notify({
-        type: "negative",
-        message:
-          err?.response?.data?.message || "Failed to save anomaly config.",
+      toast({
+        variant: "error",
+        message: err?.response?.data?.message || t("alerts.messages.anomalyConfigSaveFailed"),
       });
     } finally {
       anomalySaving.value = false;
     }
   };
 
-  const handleSave = () => {
-    if (formData.value.is_real_time === "anomaly") {
-      saveAnomalyDetection();
-    } else {
-      onSubmit();
+  // ── Save gate (Rule ③/④) ──────────────────────────────────────────────────
+  // The footer Save button (and Enter) drives `form.handleSubmit()`; the ONE
+  // composed schema now owns name/stream + the step field rules, so
+  // `useOForm({ onSubmit: performSave })` runs the actual save ONLY when the
+  // schema passes. handleSave adds the block-on-invalid + focus + toast that the
+  // old validateAndFocus() gave.
+  //
+  // Anomaly runs this too. It used to be excluded because the anomaly branch was
+  // a pure pass-through — the schema could never fail, so the block was dead code
+  // and saveAnomalyDetection's own toasts were the only feedback. Now that the
+  // branch enforces `name`, excluding anomaly would make a blank name fail
+  // SILENTLY: handleSubmit rejects, performSave never runs, and nothing tells the
+  // user why. The anomaly branch's ONLY rule is the blank name, so this can only
+  // fire for that.
+  const handleSave = async () => {
+    await form.handleSubmit();
+    if (!form.state.isValid) {
+      focusOnFirstError();
+      toast({
+        variant: "error",
+        message: t("alerts.messages.fixHighlightedFields"),
+      });
     }
+  };
+
+  // Imperative pre-save gates RE-HOMED from QueryConfig.validate(), which returns
+  // true early in DESCENDANT mode — so its non-schema query-text gates (empty
+  // SQL / empty PromQL / aggregate-column toast) no longer fire. Re-home them
+  // here with the SAME messages so save stays blocked (Rule ④). The field rules
+  // (threshold / frequency / conditions / promql-condition / group_by / period /
+  // silence / destinations / name / stream) are covered by the composed schema.
+  const runImperativeQueryChecks = (): boolean => {
+    if (formData.value.is_real_time === "composite") return true;
+    // ── Cron gate (R4 RESTORE) ───────────────────────────────────────────────
+    // Pre-migration AlertSettings.validate() ran validateFrequency() first and
+    // returned {valid:false} on any cronJobError, which the orchestrator turned
+    // into a block + toast + switch to the condition tab. QueryConfig still
+    // RENDERS cronError inline but nothing gated save. Recomputed here from the
+    // form (not QueryConfig's local ref) so the gate holds regardless of which
+    // step is mounted. Messages are verbatim from validateFrequency.
+    // Minutes/hours mode needs no branch here: the ≥1 rule and the org-floor
+    // rule both live in the schema, keyed on `_ui.checkEvery`.
+    const tc = formData.value.trigger_condition || {};
+    if (tc.frequency_type === "cron") {
+      // Old validate() returned {valid:false, message:null} for a missing cron
+      // or timezone, and the orchestrator only toasted `if (message)` — so this
+      // case blocked + switched tab with NO toast, relying on QueryConfig's
+      // inline "Cron expression and timezone are required". Parity: no toast.
+      if (!tc.cron || !tc.timezone) {
+        activeTab.value = "condition";
+        return false;
+      }
+      try {
+        const intervalInSecs = getCronIntervalDifferenceInSeconds(tc.cron);
+        if (
+          typeof intervalInSecs === "number" &&
+          !isAboveMinRefreshInterval(intervalInSecs, store.state?.zoConfig)
+        ) {
+          const minInterval = Number(store.state?.zoConfig?.min_auto_refresh_interval) || 1;
+          activeTab.value = "condition";
+          toast({
+            variant: "error",
+            message: t("alerts.queryConfig.frequencyGreaterThanSeconds", {
+              seconds: minInterval - 1,
+            }),
+          });
+          return false;
+        }
+      } catch {
+        activeTab.value = "condition";
+        toast({
+          variant: "error",
+          message: t("alerts.queryConfig.invalidCronExpression"),
+        });
+        return false;
+      }
+    }
+
+    const qc = formData.value.query_condition || {};
+    const tab = qc.type || "custom";
+    if (tab === "sql") {
+      if (!qc.sql || String(qc.sql).trim() === "") {
+        activeTab.value = "condition";
+        toast({
+          variant: "error",
+          message: t("alerts.messages.sqlQueryEmpty"),
+        });
+        return false;
+      }
+      if (sqlQueryErrorMsg.value && sqlQueryErrorMsg.value.trim() !== "") {
+        activeTab.value = "condition";
+        toast({
+          variant: "error",
+          message: t("alerts.messages.fixSqlErrorBeforeSaving"),
+        });
+        return false;
+      }
+    } else if (tab === "promql") {
+      if (!qc.promql || String(qc.promql).trim() === "") {
+        activeTab.value = "condition";
+        toast({
+          variant: "error",
+          message: t("alerts.messages.promqlQueryEmpty"),
+        });
+        return false;
+      }
+    }
+    // NOTE: the custom/measure "Column is required when using an aggregate
+    // function." gate USED to live here as a toast-only check. It moved into the
+    // composed schema (QueryConfig.schema.ts, the isCustom && isMeasure block)
+    // so the name-bound <OFormSelect> actually renders the error — an imperative
+    // toast can never paint a field, which is why the red highlight main drew
+    // (via QueryConfig's `columnSelectError` ref) went missing. Save stays
+    // blocked: a schema issue fails handleSubmit before onSubmit runs, so this
+    // function is never even reached in that state.
+    return true;
   };
 
   let callAlert: Promise<{ data: any }>;
 
-  const onSubmit = async () => {
-    // Delaying submission by 500ms to allow the form to validate
-    await new Promise((resolve) => setTimeout(resolve, 500));
-
-    // FINAL VALIDATION CHECKPOINT
-    // For V3 layout, validate sequentially with auto-focus
-    if (!isAnomalyMode.value) {
-      const valid = await validateAndFocus();
-      if (!valid) return false;
-    } else {
-      // Anomaly wizard validation — validate name from topbar ref
-      if (!anomalyConfig.value.name?.trim()) {
-        q.notify({
-          type: "negative",
-          message: "Anomaly detection name is required.",
-          timeout: 2000,
-        });
-        focusTopbarField(anomalyNameRef);
-        return false;
-      }
+  // Advisories that ride along with a 200 — an alert that can only ever page
+  // the catch-all team, or one whose groups span teams. Shown beside the
+  // success toast and never in place of it: the save did happen, and an
+  // operator who meant it is entitled to keep it.
+  const showSaveWarnings = (res: { data?: { warnings?: string[] } }) => {
+    for (const message of res?.data?.warnings ?? []) {
+      toast({ variant: "warning", message: raw(message), timeout: 10000 });
     }
+  };
+
+  // Post-schema scheduled/realtime save. Runs ONLY after the composed schema
+  // passes (via handleSubmit); preserves the imperative gates + the payload
+  // assembly byte-for-byte (Rule ④ payload parity). The payload is built from
+  // `form.state.values` — the synchronous source of truth (formData is its
+  // reactive read-view and can lag by a tick after a just-written setF).
+  const onSubmit = async () => {
+    if (!runImperativeQueryChecks()) return false;
 
     if (
       formData.value.is_real_time == "false" &&
@@ -1882,9 +2176,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       !getParser(formData.value.query_condition.sql)
     ) {
       activeTab.value = "condition";
-      q.notify({
-        type: "negative",
-        message: "Selecting all Columns in SQL query is not allowed.",
+      toast({
+        variant: "error",
+        message: t("alerts.messages.selectAllColumnsNotAllowed"),
         timeout: 1500,
       });
       return false;
@@ -1903,12 +2197,17 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       const minutes = String(now.getMinutes()).padStart(2, "0");
       const time = `${hours}:${minutes}`;
 
-      const convertedDateTime = convertDateToTimestamp(
-        date,
-        time,
-        formData.value.trigger_condition.timezone,
+      // Resolve any lingering "Browser Time (<zone>)" label (e.g. an existing
+      // alert opened from an older release) to a plain IANA zone before deriving
+      // the offset — otherwise convertDateToTimestamp returns NaN and tz_offset
+      // serializes to null in the saved payload.
+      const resolvedTimezone = resolveBrowserTimezone(
+        formData.value?.trigger_condition?.timezone ?? "",
       );
-      formData.value.tz_offset = convertedDateTime.offset;
+      setF("trigger_condition.timezone", resolvedTimezone);
+
+      const convertedDateTime = convertDateToTimestamp(date, time, resolvedTimezone);
+      setF("tz_offset", convertedDateTime.offset);
     }
 
     // Validate UDS
@@ -1917,22 +2216,34 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       const invalidCount = udsValidation.invalidFields.length;
       let message = "";
 
+      // Three DISTINCT sentence shapes (singular / short list / truncated list),
+      // not one pluralised message — vue-i18n plural forms can't reproduce the
+      // third branch's extra params, so the hand-rolled branching stays and each
+      // shape gets its own key.
       if (invalidCount === 1) {
-        message = `Field "${udsValidation.invalidFields[0]}" is not available. Please use only the available fields in your conditions.`;
+        message = t("alerts.messages.udsFieldNotAvailable", {
+          field: udsValidation.invalidFields[0],
+        });
       } else if (invalidCount <= 3) {
-        message = `Fields ${udsValidation.invalidFields.map((f: string) => `"${f}"`).join(", ")} are not available. Please use only the available fields in your conditions.`;
+        message = t("alerts.messages.udsFieldsNotAvailable", {
+          fields: udsValidation.invalidFields.map((f: string) => `"${f}"`).join(", "),
+        });
       } else {
         const firstThree = udsValidation.invalidFields
           .slice(0, 3)
           .map((f: string) => `"${f}"`)
           .join(", ");
         const remaining = invalidCount - 3;
-        message = `${invalidCount} fields are not available (${firstThree} and ${remaining} more). Please use only the available fields in your conditions.`;
+        message = t("alerts.messages.udsFieldsNotAvailableTruncated", {
+          count: invalidCount,
+          fields: firstThree,
+          remaining,
+        });
       }
 
-      q.notify({
-        type: "negative",
-        message: message,
+      toast({
+        variant: "error",
+        message: raw(message),
         timeout: 6000,
       });
 
@@ -1942,24 +2253,20 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
     const payload = getAlertPayload();
 
-    const dismiss = q.notify({
-      spinner: true,
-      message: "Please wait...",
-      timeout: 2000,
+    const dismiss = toast({
+      variant: "loading",
+      message: t("common.pleaseWait"),
+      timeout: 0,
     });
 
-    if (
-      formData.value.is_real_time == "false" &&
-      formData.value.query_condition.type == "sql"
-    ) {
+    if (formData.value.is_real_time == "false" && formData.value.query_condition.type == "sql") {
       try {
         await validateSqlQueryPromise.value;
       } catch (error) {
         dismiss();
-        q.notify({
-          type: "negative",
-          message:
-            "Error while validating sql query. Please check the query and try again.",
+        toast({
+          variant: "error",
+          message: t("alerts.messages.sqlValidationRequestFailed"),
           timeout: 1500,
         });
         console.error("Error while validating sql query", error);
@@ -1967,30 +2274,35 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
       }
     }
 
-    // VERSION HANDLING - wrap conditions with version field for backend
-    payload.query_condition.conditions = {
-      version: 2,
-      conditions: formData.value.query_condition.conditions,
-    };
+    if (formData.value.is_real_time !== "composite") {
+      // VERSION HANDLING - wrap conditions with version field for backend
+      payload.query_condition.conditions = {
+        version: 2,
+        conditions: form.state.values.query_condition.conditions,
+      };
+    }
 
     if (beingUpdated.value) {
-      payload.folder_id =
-        router.currentRoute.value.query.folder || "default";
+      payload.folder_id = router.currentRoute.value.query.folder || "default";
       callAlert = alertsService.update_by_alert_id(
         store.state.selectedOrganization.identifier,
         payload,
         activeFolderId.value,
       );
-      callAlert
+      // Hold the settled promise so onSubmit (and therefore the form's
+      // isSubmitting) spans the whole request — otherwise the Save button
+      // re-enables in the same tick and repeat clicks fire duplicate saves.
+      const request = callAlert
         .then((res: { data: any }) => {
-          formData.value = { ...defaultAlertValue() };
+          resetForm(defaultAlertValue());
           emit("update:list", activeFolderId.value);
           addAlertForm.value?.resetValidation();
           dismiss();
-          q.notify({
-            type: "positive",
-            message: `Alert updated successfully.`,
+          toast({
+            variant: "success",
+            message: t("alerts.messages.alertUpdated"),
           });
+          showSaveWarnings(res);
         })
         .catch((err: any) => {
           dismiss();
@@ -2008,7 +2320,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         alert_name: formData.value.name,
         page: "Add/Update Alert",
       });
-      return;
+      return request;
     } else {
       payload.folder_id = activeFolderId.value;
       callAlert = alertsService.create_by_alert_id(
@@ -2017,16 +2329,18 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         activeFolderId.value,
       );
 
-      callAlert
+      // Same as the update branch: returned below so isSubmitting spans the request.
+      const request = callAlert
         .then((res: { data: any }) => {
-          formData.value = { ...defaultAlertValue() };
+          resetForm(defaultAlertValue());
           emit("update:list", activeFolderId.value);
           addAlertForm.value?.resetValidation();
           dismiss();
-          q.notify({
-            type: "positive",
-            message: `Alert saved successfully.`,
+          toast({
+            variant: "success",
+            message: t("alerts.messages.alertSaved"),
           });
+          showSaveWarnings(res);
         })
         .catch((err: any) => {
           dismiss();
@@ -2044,170 +2358,213 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         alert_name: formData.value.name,
         page: "Add/Update Alert",
       });
+      return request;
     }
+  };
+
+  // useOForm's onSubmit handler (wired at form creation). Runs after the schema
+  // passes. Anomaly bypasses the alert form/payload entirely (its own OForm +
+  // saveAnomalyDetection). The anomaly schema branch is pass-through, so this is
+  // still reached in anomaly mode and delegates correctly.
+  const performSave = async () => {
+    if (isAnomalyMode.value) {
+      await saveAnomalyDetection();
+      return;
+    }
+    await onSubmit();
   };
 
   // ── Data Initialization (replaces created() hook) ───────────────────────
 
   const initializeFormData = async () => {
-    formData.value = { ...defaultAlertValue(), ...cloneDeep(props.modelValue) };
+    // Build the full alert object in a LOCAL var, apply every transform, then
+    // seed the ONE form with a single form.reset (Rule ③ — NOT a per-field
+    // setFieldValue loop, NOT a mirror). The form-only extras (logGroupBy /
+    // _meta) are added by resetForm().
+    const data: any = { ...defaultAlertValue(), ...cloneDeep(props.modelValue) };
 
     const route = router.currentRoute.value;
-    const isFromPanel =
-      route.query.fromPanel === "true" && route.query.panelData;
+    const hasPrefill = !!route.query.prefill;
 
     if (!props.isUpdated) {
-      formData.value.is_real_time =
-        alertType.value === "realTime" ? true : false;
+      data.is_real_time = alertType.value === "realTime" ? true : false;
     }
-    formData.value.is_real_time = formData.value.is_real_time.toString();
-
-    if (isFromPanel) {
-      formData.value.query_condition.type = "";
-      await loadPanelDataIfPresent();
-    }
+    if (data.alert_type === "composite") data.is_real_time = "composite";
+    data.is_real_time = data.is_real_time.toString();
 
     if (store.state?.zoConfig?.min_auto_refresh_interval)
-      formData.value.trigger_condition.frequency = Math.max(
+      data.trigger_condition.frequency = Math.max(
         10,
         Math.ceil(store.state?.zoConfig?.min_auto_refresh_interval / 60 || 10),
       );
 
     beingUpdated.value = props.isUpdated;
-    updateStreams(false)?.then(() => {
-      updateEditorContent(formData.value.stream_name);
-    });
 
-    if (
-      props.modelValue &&
-      props.modelValue.name != undefined &&
-      props.modelValue.name != ""
-    ) {
+    // Edit prefill (modelValue carries a saved alert).
+    let pendingTimezoneOffset: number | null = null;
+    if (props.modelValue && props.modelValue.name != undefined && props.modelValue.name != "") {
       beingUpdated.value = true;
       disableColor.value = "grey-5";
-      formData.value = cloneDeep(props.modelValue);
-      isAggregationEnabled.value =
-        !!formData.value.query_condition.aggregation;
+      // Replace the working object with the saved alert (mirrors the old
+      // `formData.value = cloneDeep(modelValue)` full swap).
+      Object.keys(data).forEach((k) => delete data[k]);
+      Object.assign(data, cloneDeep(props.modelValue));
+      // The swap above replaces every key with the raw GET response, which for
+      // a composite carries `alert_type` but not `is_real_time`. Re-derive the
+      // composite flag so the composite form (not the scheduled form) renders.
+      if (data.alert_type === "composite") data.is_real_time = "composite";
+      // Guard the enterprise workflows link: the edited alert is expected to
+      // carry `workflows` (v2 GET returns it, serde-defaulted to []), but if a
+      // partially-populated row is ever passed, default it so an edit-save can't
+      // silently wipe existing links. Must run AFTER the swap above, which
+      // replaces every key on `data`.
+      if (!Array.isArray(data.workflows)) data.workflows = [];
+      // BE stores seconds; the form field displays minutes (mirrors the
+      // frequency field's display unit). Falls back to 0 for any alert type
+      // where the field is absent from the GET response (older cached
+      // response shape, etc.) rather than showing NaN.
+      data.pending_period_sec = Math.round((Number(data.pending_period_sec) || 0) / 60);
+      isAggregationEnabled.value = !!data.query_condition?.aggregation;
 
-      if (formData.value.query_condition.promql_condition) {
-        if (!formData.value.query_condition.promql_condition.column) {
-          formData.value.query_condition.promql_condition.column = "value";
+      if (data.query_condition?.promql_condition) {
+        if (!data.query_condition.promql_condition.column) {
+          data.query_condition.promql_condition.column = "value";
         }
-        if (!formData.value.query_condition.promql_condition.operator) {
-          formData.value.query_condition.promql_condition.operator = ">=";
+        if (!data.query_condition.promql_condition.operator) {
+          data.query_condition.promql_condition.operator = ">=";
         }
         if (
-          formData.value.query_condition.promql_condition.value ===
-            undefined ||
-          formData.value.query_condition.promql_condition.value === null
+          data.query_condition.promql_condition.value === undefined ||
+          data.query_condition.promql_condition.value === null
         ) {
-          formData.value.query_condition.promql_condition.value = 1;
+          data.query_condition.promql_condition.value = 1;
         }
       }
 
       lastValidStep.value = 6;
 
-      if (!formData.value.trigger_condition?.timezone) {
-        if (formData.value.tz_offset === 0) {
-          formData.value.trigger_condition.timezone = "UTC";
+      if (data.is_real_time !== "composite" && !data.trigger_condition?.timezone) {
+        if (data.tz_offset === 0) {
+          data.trigger_condition.timezone = "UTC";
         } else {
-          getTimezonesByOffset(formData.value.tz_offset).then((res: any) => {
-            if (res.length > 1) showTimezoneWarning.value = true;
-            formData.value.trigger_condition.timezone = res[0];
-          });
+          // Resolved async AFTER the form.reset below → setF in the .then.
+          pendingTimezoneOffset = data.tz_offset;
         }
+      } else if (data.is_real_time !== "composite") {
+        // Heal legacy alerts (e.g. created on older releases) that persisted a
+        // "Browser Time (<zone>)" label — resolve it to a plain IANA zone so the
+        // picker shows a valid value and the save path computes a real offset.
+        data.trigger_condition.timezone = resolveBrowserTimezone(data.trigger_condition.timezone);
       }
 
-      if (formData.value.query_condition.vrl_function) {
+      if (data.query_condition?.vrl_function) {
         showVrlFunction.value = true;
-        formData.value.query_condition.vrl_function = smartDecodeVrlFunction(
-          formData.value.query_condition.vrl_function,
+        data.query_condition.vrl_function = smartDecodeVrlFunction(
+          data.query_condition.vrl_function,
         );
       }
     }
 
-    formData.value.is_real_time = formData.value.is_real_time.toString();
+    data.is_real_time = data.is_real_time.toString();
 
     // Convert context_attributes from object to array format
     if (
-      formData.value.context_attributes &&
-      typeof formData.value.context_attributes === "object" &&
-      !Array.isArray(formData.value.context_attributes)
+      data.context_attributes &&
+      typeof data.context_attributes === "object" &&
+      !Array.isArray(data.context_attributes)
     ) {
-      formData.value.context_attributes = Object.keys(
-        formData.value.context_attributes,
-      ).map((attr) => {
-        return {
-          key: attr,
-          value: formData.value.context_attributes[attr],
-          id: getUUID(),
-        };
-      });
-    } else if (!formData.value.context_attributes) {
-      formData.value.context_attributes = [];
+      data.context_attributes = Object.keys(data.context_attributes).map((attr) => ({
+        key: attr,
+        value: data.context_attributes[attr],
+        id: getUUID(),
+      }));
+    } else if (!data.context_attributes) {
+      data.context_attributes = [];
     }
 
     // VERSION DETECTION AND CONVERSION
-    if (
-      formData.value.query_condition.conditions?.version === "2" ||
-      formData.value.query_condition.conditions?.version === 2
-    ) {
-      formData.value.query_condition.conditions = ensureIds(
-        formData.value.query_condition.conditions.conditions,
-      );
+    if (data.is_real_time === "composite") {
+      data.query_condition ??= defaultAlertValue().query_condition;
+      data.stream_type ??= "";
+      data.stream_name ??= "";
+      // The composite GET response may carry `null` for optional fields; the
+      // form inputs expect strings/arrays, so normalize them here.
+      data.description ??= "";
+      data.template ??= "";
+      data.tags ??= [];
+      data.composite_condition ??= {
+        expression: "",
+        warning_counts_as_firing: true,
+        stale_child_policy: "use_last_state",
+      };
+      data.children ??= [];
     } else if (
-      formData.value.query_condition.conditions &&
-      !Array.isArray(formData.value.query_condition.conditions) &&
-      Object.keys(formData.value.query_condition.conditions).length != 0
+      data.query_condition.conditions?.version === "2" ||
+      data.query_condition.conditions?.version === 2
     ) {
-      const version = detectConditionsVersion(
-        formData.value.query_condition.conditions,
-      );
+      data.query_condition.conditions = ensureIds(data.query_condition.conditions.conditions);
+    } else if (
+      data.query_condition.conditions &&
+      !Array.isArray(data.query_condition.conditions) &&
+      Object.keys(data.query_condition.conditions).length != 0
+    ) {
+      const version = detectConditionsVersion(data.query_condition.conditions);
 
       if (version === 0) {
-        formData.value.query_condition.conditions = ensureIds(
-          convertV0ToV2(formData.value.query_condition.conditions),
-        );
+        data.query_condition.conditions = ensureIds(convertV0ToV2(data.query_condition.conditions));
       } else if (version === 1) {
-        if (
-          formData.value.query_condition.conditions.and ||
-          formData.value.query_condition.conditions.or
-        ) {
-          formData.value.query_condition.conditions = ensureIds(
-            convertV1BEToV2(formData.value.query_condition.conditions),
+        if (data.query_condition.conditions.and || data.query_condition.conditions.or) {
+          data.query_condition.conditions = ensureIds(
+            convertV1BEToV2(data.query_condition.conditions),
           );
-        } else if (
-          formData.value.query_condition.conditions.label &&
-          formData.value.query_condition.conditions.items
-        ) {
-          formData.value.query_condition.conditions = ensureIds(
-            convertV1ToV2(formData.value.query_condition.conditions),
+        } else if (data.query_condition.conditions.label && data.query_condition.conditions.items) {
+          data.query_condition.conditions = ensureIds(
+            convertV1ToV2(data.query_condition.conditions),
           );
         }
       } else {
-        formData.value.query_condition.conditions = ensureIds(
-          formData.value.query_condition.conditions,
-        );
+        data.query_condition.conditions = ensureIds(data.query_condition.conditions);
       }
     } else if (
-      Array.isArray(formData.value.query_condition.conditions) &&
-      formData.value.query_condition.conditions.length > 0
+      Array.isArray(data.query_condition.conditions) &&
+      data.query_condition.conditions.length > 0
     ) {
-      formData.value.query_condition.conditions = ensureIds(
-        convertV0ToV2(formData.value.query_condition.conditions),
-      );
+      data.query_condition.conditions = ensureIds(convertV0ToV2(data.query_condition.conditions));
     } else if (
-      formData.value.query_condition.conditions == null ||
-      formData.value.query_condition.conditions == undefined ||
-      formData.value.query_condition.conditions.length == 0 ||
-      Object.keys(formData.value.query_condition.conditions).length == 0
+      data.query_condition.conditions == null ||
+      data.query_condition.conditions == undefined ||
+      data.query_condition.conditions.length == 0 ||
+      Object.keys(data.query_condition.conditions).length == 0
     ) {
-      formData.value.query_condition.conditions = {
+      data.query_condition.conditions = {
         filterType: "group",
         logicalOperator: "AND",
         conditions: [],
         groupId: getUUID(),
       };
+    }
+
+    // Seed the ONE form (single source of truth) with the fully-transformed obj.
+    resetForm(data);
+
+    // Resolve the timezone from the stored offset (edit prefill) after the reset.
+    if (pendingTimezoneOffset != null) {
+      getTimezonesByOffset(pendingTimezoneOffset).then((res: any) => {
+        if (res.length > 1) showTimezoneWarning.value = true;
+        setF("trigger_condition.timezone", res[0]);
+      });
+    }
+
+    // A prefill from any source surface writes into the now-seeded form.
+    if (hasPrefill) {
+      setF("query_condition.type", "");
+      await applyAlertPrefill();
+    }
+
+    if (data.is_real_time !== "composite") {
+      updateStreams(false)?.then(() => {
+        updateEditorContent(formData.value.stream_name);
+      });
     }
   };
 
@@ -2215,11 +2572,7 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
   // Sync shared fields from alert formData into anomaly config
   watch(
-    () => [
-      formData.value.name,
-      formData.value.stream_type,
-      formData.value.stream_name,
-    ],
+    () => [formData.value.name, formData.value.stream_type, formData.value.stream_name],
     ([name, streamType, streamName]) => {
       anomalyConfig.value.name = name as string;
       anomalyConfig.value.stream_type = (streamType as string) || "logs";
@@ -2240,11 +2593,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     (val) => {
       if (val === "anomaly") {
         anomalyConfig.value.name = formData.value.name || "";
-        anomalyConfig.value.stream_type =
-          formData.value.stream_type || "logs";
+        anomalyConfig.value.stream_type = formData.value.stream_type || "logs";
         anomalyConfig.value.stream_name = formData.value.stream_name || "";
-        anomalyConfig.value.folder_id =
-          (activeFolderId.value as string) || "default";
+        anomalyConfig.value.folder_id = (activeFolderId.value as string) || "default";
         if (wizardStep.value > 3) wizardStep.value = 1;
       }
     },
@@ -2254,12 +2605,13 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   watch(
     () => props.destinations.length,
     () => {
-      formData.value.destinations = formData.value.destinations.filter(
-        (destination: any) => {
+      setF(
+        "destinations",
+        (formData.value.destinations ?? []).filter((destination: any) => {
           return props.destinations.some((dest: any) => {
             return dest.name === destination;
           });
-        },
+        }),
       );
     },
   );
@@ -2307,11 +2659,11 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
           : "";
         isUsingBackendSql.value = false;
         if (!formData.value.query_condition.promql_condition) {
-          formData.value.query_condition.promql_condition = {
+          setF("query_condition.promql_condition", {
             column: "value",
             operator: ">=",
             value: 1,
-          };
+          });
         }
       } else if (newType === "custom") {
         previewQuery.value = "";
@@ -2397,6 +2749,18 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
           if ((newVal as any).destinationsFieldRef) {
             focusManager.registerField("destinations", {
               ref: (newVal as any).destinationsFieldRef,
+              onBeforeFocus: () => {
+                if (isAnomalyMode.value) {
+                  activeTab.value = "anomaly-alerting";
+                } else {
+                  activeTab.value = "condition";
+                }
+              },
+            });
+          }
+          if ((newVal as any).pendingPeriodFieldRef) {
+            focusManager.registerField("pending_period", {
+              ref: (newVal as any).pendingPeriodFieldRef,
               onBeforeFocus: () => {
                 if (isAnomalyMode.value) {
                   activeTab.value = "anomaly-alerting";
@@ -2523,12 +2887,11 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
     // Pre-set anomaly mode
     if (router.currentRoute.value.name === "addAnomalyDetection") {
-      formData.value.is_real_time = "anomaly";
+      setF("is_real_time", "anomaly");
     }
 
     // Load anomaly detection config when editing
-    const routeAnomalyId = router.currentRoute.value.params
-      .anomaly_id as string | undefined;
+    const routeAnomalyId = router.currentRoute.value.params.anomaly_id as string | undefined;
     if (routeAnomalyId) {
       try {
         const res = await anomalyDetectionService.get(
@@ -2536,46 +2899,28 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
           routeAnomalyId,
         );
         const data = res.data;
-        const parseInterval = (
-          raw: string,
-          defaultValue: number,
-          defaultUnit: "m" | "h",
-        ) => {
-          if (!raw) return { value: defaultValue, unit: defaultUnit };
-          if (raw.endsWith("h"))
-            return {
-              value: parseInt(raw) || defaultValue,
-              unit: "h" as const,
-            };
-          return {
-            value: parseInt(raw) || defaultValue,
-            unit: "m" as const,
-          };
-        };
-        const parseSeconds = (secs: number) => {
-          if (secs >= 3600 && secs % 3600 === 0)
-            return { value: secs / 3600, unit: "h" as const };
-          return { value: Math.round(secs / 60), unit: "m" as const };
-        };
-        const histInterval = parseInterval(
-          data.histogram_interval || "5m",
-          5,
-          "m",
+        const histInterval = parseAnomalyInterval(data.histogram_interval, 5, "m");
+        const sched = parseAnomalyInterval(data.schedule_interval, 1, "h");
+        const winSecs =
+          typeof data.detection_window_seconds === "number" && data.detection_window_seconds > 0
+            ? data.detection_window_seconds
+            : null;
+        const win = anomalyWindowSecondsToParts(
+          winSecs ?? anomalyIntervalSeconds(sched.value, sched.unit) ?? 3600,
         );
-        const sched = parseInterval(
-          data.schedule_interval || "1h",
-          1,
-          "h",
-        );
-        const win = data.detection_window_seconds
-          ? parseSeconds(data.detection_window_seconds)
-          : parseSeconds(
-              sched.value * (sched.unit === "h" ? 3600 : 60),
-            );
+        anomalyStoredIntervals.value = {
+          histogram: {
+            raw: typeof data.histogram_interval === "string" ? data.histogram_interval : null,
+            ...histInterval,
+          },
+          schedule: {
+            raw: typeof data.schedule_interval === "string" ? data.schedule_interval : null,
+            ...sched,
+          },
+          window: { raw: winSecs, value: win.value, unit: win.unit, parsed: winSecs !== null },
+        };
         const rawDestIds =
-          data.alert_destinations ??
-          data.alert_destination_ids ??
-          data.alert_destination_id;
+          data.alert_destinations ?? data.alert_destination_ids ?? data.alert_destination_id;
         const destIds: string[] = Array.isArray(rawDestIds)
           ? rawDestIds
           : rawDestIds
@@ -2585,15 +2930,14 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
         const fnMatch = rawFn.match(/^(\w+)\(([^)]*)\)$/);
         const parsedFn = fnMatch ? fnMatch[1] : rawFn;
         const parsedField =
-          data.detection_function_field ||
-          (fnMatch && fnMatch[2] !== "*" ? fnMatch[2] : "");
+          data.detection_function_field || (fnMatch && fnMatch[2] !== "*" ? fnMatch[2] : "");
         anomalyConfig.value = {
           ...defaultAnomalyConfig(),
           ...data,
           detection_function: parsedFn,
           detection_function_field: parsedField,
           threshold: data.threshold ?? data.percentile ?? 97,
-          filters: data.filters ?? [],
+          filters: Array.isArray(data.filters) ? data.filters : [],
           histogram_interval_value: histInterval.value,
           histogram_interval_unit: histInterval.unit,
           schedule_interval_value: sched.value,
@@ -2602,17 +2946,24 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
           detection_window_unit: win.unit,
           alert_destination_ids: destIds,
         };
-        formData.value.is_real_time = "anomaly";
-        formData.value.name = data.name;
-        formData.value.stream_name = data.stream_name;
-        formData.value.stream_type = data.stream_type;
+        setF("is_real_time", "anomaly");
+        setF("name", data.name);
+        setF("stream_name", data.stream_name);
+        setF("stream_type", data.stream_type);
         if (data.folder_id) activeFolderId.value = data.folder_id;
         anomalyEditMode.value = true;
         lastValidStep.value = 6;
+
+        // The stream is only known NOW. initializeFormData already ran its
+        // updateStreams, but at that point stream_type was empty, so it
+        // returned early — leaving the stream select with no options and the
+        // stream's columns unloaded. The form value was set, yet nothing was
+        // selectable and every field picker downstream was empty.
+        if (data.stream_type) await updateStreams(false);
       } catch {
-        q.notify({
-          type: "negative",
-          message: "Failed to load anomaly detection config.",
+        toast({
+          variant: "error",
+          message: t("alerts.messages.anomalyConfigLoadFailed"),
         });
       }
     }
@@ -2668,7 +3019,6 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
   return {
     // Dependencies
     t,
-    q,
     store,
     router,
     track,
@@ -2697,12 +3047,13 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
 
     // Anomaly state
     anomalyConfig,
+    anomalyStoredIntervals,
     anomalyStep2Ref,
     showAnomalySummary,
     anomalyEditMode,
     anomalyRetraining,
     anomalySaving,
-    anomalyStatusColor,
+    anomalyStatusVariant,
     anomalyFormatTs,
     anomalyTriggerRetrain,
     isAnomalyMode,
@@ -2722,6 +3073,9 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     previewQuery,
     isUsingBackendSql,
     sqlQueryErrorMsg,
+    sqlErrorRanges,
+    sqlAggColumnOptions,
+    sqlQueryHasHaving,
     validateSqlQueryPromise,
     addAlertFormRef,
     viewSqlEditorDialog,
@@ -2731,7 +3085,8 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     showTimezoneWarning,
     showJsonEditorDialog,
     validationErrors,
-    isLoadingPanelData,
+    isLoadingPrefill,
+    prefillWarnings,
     activeFolderId,
     alertType,
 
@@ -2746,9 +3101,6 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     streamTypeRef,
     streamNameRef,
     anomalyNameRef,
-    alertNameError,
-    streamTypeError,
-    streamNameError,
     currentStepCaption,
     isLastStep,
     goToStep2,
@@ -2771,9 +3123,13 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     rowTemplatePlaceholder,
     decodedVrlFunction,
     getSelectedTab,
-    canSaveAlert,
     getFormattedDestinations,
     generatedSqlQuery,
+
+    // Form (Rule ③ owner) + write helpers
+    form,
+    setF,
+    resetForm,
 
     // Methods
     editorUpdate,
@@ -2784,6 +3140,19 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     generateSqlQuery: generateSqlQueryLocal,
     onInputUpdate,
     getAlertPayload,
+    updateSqlQuery,
+    updatePromqlQuery,
+    updateVrlFunction,
+    updateAggregation,
+    updatePromqlCondition,
+    updateSloCondition,
+    updateTriggerCondition,
+    updateTemplate,
+    updateContextAttributes,
+    updateDescription,
+    updateRowTemplate,
+    updateRowTemplateType,
+    updateDeduplication,
     validateInputs,
     validateSqlQuery,
     validateConditionsAgainstUDS,
@@ -2804,29 +3173,28 @@ export function useAlertForm(props: AlertFormProps, emit: AlertFormEmit) {
     refreshDestinations,
     refreshTemplates,
     updateDestinations,
+    updateWorkflows,
     updateTab,
     handleGoToSqlEditor,
     clearMultiWindows,
     handleEditorStateChanged,
     handleEditorClosed,
-    routeToCreateDestination,
     openEditorDialog,
     openJsonEditor,
+    jsonEditorData,
     saveAlertJson,
-    loadPanelDataIfPresent,
+    applyAlertPrefill,
     handleSave,
     onSubmit,
     saveAnomalyDetection,
     previewAlert,
-    validateFormAndNavigateToErrorField,
-    navigateToErrorField,
     focusOnFirstError,
     handleAlertError,
     getParser,
     initializeFormData,
 
     // Constants/utils
-    outlinedInfo,
+    info: "info",
     getTimezoneOffset,
     isValidResourceName,
     convertDateToTimestamp,

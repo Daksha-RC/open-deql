@@ -1,4 +1,4 @@
-<!-- Copyright 2026 OpenObserve Inc.
+﻿<!-- Copyright 2026 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,88 +15,104 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="tw:w-full tw:h-full tw:flex tw:flex-col tw:overflow-hidden">
-    <!-- Sticky header: title + tabs -->
-    <div class="tw:shrink-0 tw:bg-[var(--o2-card-bg)]">
-      <div class="q-px-md q-py-md">
-        <div class="general-page-title">
-          {{ t("settings.correlation.title") }}
-        </div>
-        <div class="general-page-subtitle">
-          {{ t("settings.correlation.subtitle") }}
-        </div>
-      </div>
-      <div class="tw:px-4 tw:flex tw:justify-start">
-        <q-tabs v-model="activeTab" inline-label dense @update:model-value="onTabChange">
-          <q-tab
-            name="services"
-            :label="t('settings.correlation.discoveredServicesTab')"
-            no-caps
-          />
-          <q-tab
-            name="discovery"
-            :label="t('settings.correlation.serviceDiscoveryTab')"
-            no-caps
-          />
-          <q-tab
-            name="alert-correlation"
-            :label="t('settings.correlation.alertCorrelationTab')"
-            no-caps
-          />
-          <q-tab
-            name="field-aliases"
-            :label="t('settings.correlation.fieldAliasesTab')"
-            no-caps
-          />
-        </q-tabs>
-      </div>
-    </div>
+  <OPageLayout
+    icon="group-work"
+    :subtitle="t('settings.correlationSettingsPage.subtitle')"
+    data-test="correlation-settings-header"
+    tabs-below
+    bleed
+  >
+    <template #title>
+      <span data-test="correlation-settings-page-title">{{
+        t("settings.correlationSettings")
+      }}</span>
+    </template>
 
-    <!-- Scrollable content -->
-    <div class="tw:flex-1 tw:overflow-y-auto tw:px-4 tw:py-2">
-      <div v-show="activeTab === 'discovery'">
+    <!-- Module tabs (Level-2 nav) -->
+    <template #header-tabs>
+      <OTabs
+        :model-value="activeTab"
+        dense
+        align="left"
+        data-test="correlation-settings-tabs"
+        @update:model-value="onTabChange"
+      >
+        <OTab name="services" :label="t('settings.correlation.discoveredServicesTab')" />
+        <OTab name="discovery" :label="t('settings.correlation.serviceDiscoveryTab')" />
+        <OTab name="alert-correlation" :label="t('settings.correlation.alertCorrelationTab')" />
+        <OTab
+          name="field-aliases"
+          data-test="correlation-settings-field-aliases-tab"
+          :label="t('settings.correlation.fieldAliasesTab')"
+        />
+      </OTabs>
+    </template>
+
+    <!-- Tab content -->
+    <div class="min-h-0 flex-1 overflow-hidden">
+      <div v-show="activeTab === 'services'" class="h-full">
+        <DiscoveredServices @navigate-to-configuration="onTabChange('discovery')" />
+      </div>
+
+      <div v-show="activeTab === 'discovery'" class="px-page-edge h-full overflow-y-auto py-4">
         <ServiceIdentitySetup
           :org-identifier="store.state.selectedOrganization.identifier"
           :semantic-groups="semanticGroups"
           @navigate-to-aliases="onNavigateToAliases"
           @navigate-to-services="onTabChange('services')"
-          @update-service-fields="onUpdateServiceFields"
         />
       </div>
 
-      <div v-show="activeTab === 'services'">
-        <DiscoveredServices @navigate-to-configuration="onTabChange('discovery')" />
+      <div v-show="activeTab === 'alert-correlation'" class="px-page-edge h-full overflow-y-auto">
+        <OrganizationDeduplicationSettings
+          :org-id="store.state.selectedOrganization.identifier"
+          :config="store.state.organizationSettings?.deduplication_config"
+          @saved="onCorrelationSettingsSaved"
+        />
       </div>
 
-      <OrganizationDeduplicationSettings
-        v-show="activeTab === 'alert-correlation'"
-        :org-id="store.state.selectedOrganization.identifier"
-        :config="store.state.organizationSettings?.deduplication_config"
-        @saved="onCorrelationSettingsSaved"
-      />
-
-      <SemanticFieldGroupsConfig
-        v-show="activeTab === 'field-aliases'"
-        :semantic-field-groups="semanticGroups"
-        :scroll-to-group-id="aliasScrollToGroup"
-        @update:semantic-field-groups="onSaveSemanticGroups"
-      />
+      <div v-show="activeTab === 'field-aliases'" class="px-page-edge h-full overflow-y-auto py-4">
+        <SemanticFieldGroupsConfig
+          :key="`field-aliases-${fieldAliasesEditorKey}`"
+          :semantic-field-groups="draftSemanticGroups"
+          :scroll-to-group-id="aliasScrollToGroup"
+          @update:semanticFieldGroups="onDraftSemanticGroupsChange"
+        >
+          <template #header-actions>
+            <OButton
+              data-test="correlation-semanticfieldgroup-save-btn"
+              :variant="isFieldAliasesDirty ? 'primary' : 'outline'"
+              size="sm"
+              :loading="savingFieldAliases"
+              @click="saveSemanticGroups"
+            >
+              {{ t("common.save") }}
+            </OButton>
+          </template>
+        </SemanticFieldGroupsConfig>
+      </div>
     </div>
-  </div>
+  </OPageLayout>
 </template>
 
 <script lang="ts">
+import OTabs from "@/lib/navigation/Tabs/OTabs.vue";
+import OTab from "@/lib/navigation/Tabs/OTab.vue";
 import { defineComponent, ref, computed, onMounted, watch } from "vue";
 import { useStore } from "vuex";
-import { useQuasar } from "quasar";
-import { useI18n } from "vue-i18n";
-import { useRouter, useRoute } from "vue-router";
+import { useI18nTyped } from "@/types/i18n";
+import { useRouter, useRoute, onBeforeRouteLeave } from "vue-router";
 import OrganizationDeduplicationSettings from "@/components/alerts/OrganizationDeduplicationSettings.vue";
 import DiscoveredServices from "@/components/settings/DiscoveredServices.vue";
 import ServiceIdentitySetup from "@/components/settings/ServiceIdentitySetup.vue";
-import AppTabs from "@/components/common/AppTabs.vue";
 import SemanticFieldGroupsConfig from "@/components/alerts/SemanticFieldGroupsConfig.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
 import serviceStreamsService from "@/services/service_streams";
+import { serviceStreamKeys } from "@/services/service_streams.querykeys";
+import { queryClient } from "@/composables/query/queryClient";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { useConfirmDialog } from "@/composables/useConfirmDialog";
 
 export default defineComponent({
   name: "CorrelationSettings",
@@ -104,37 +120,69 @@ export default defineComponent({
     OrganizationDeduplicationSettings,
     DiscoveredServices,
     ServiceIdentitySetup,
-    AppTabs,
     SemanticFieldGroupsConfig,
+    OTabs,
+    OTab,
+    OButton,
+    OPageLayout,
   },
   setup() {
     const store = useStore();
-    const q = useQuasar();
-    const { t } = useI18n();
+    const { confirm } = useConfirmDialog();
+    const { t } = useI18nTyped();
     const router = useRouter();
     const route = useRoute();
 
     // URL slug ↔ internal tab name
     const slugToTab: Record<string, string> = {
       "service-discovery": "discovery",
-      "services": "services",
+      services: "services",
       "alert-correlation": "alert-correlation",
       "field-aliases": "field-aliases",
     };
     const tabToSlug: Record<string, string> = {
-      "discovery": "service-discovery",
-      "services": "services",
+      discovery: "service-discovery",
+      services: "services",
       "alert-correlation": "alert-correlation",
       "field-aliases": "field-aliases",
     };
 
     const initialSlug = route.params.tab as string;
     const activeTab = ref(slugToTab[initialSlug] ?? "services");
-    const aliasScrollToGroup = ref<string | undefined>(
-      route.query.group as string | undefined
-    );
+    const aliasScrollToGroup = ref<string | undefined>(route.query.group as string | undefined);
 
     const semanticGroups = ref<any[]>([]);
+    const draftSemanticGroups = ref<any[]>([]);
+    const savingFieldAliases = ref(false);
+
+    // Compare only user-meaningful fields. `id` is auto-derived from display+group
+    // by the child component on blur, so including it here would falsely flag dirty
+    // just because the user focused/blurred a Name input. Empty draft entries
+    // (no display + no fields) are ignored so just clicking "Add Custom Group"
+    // without filling anything in doesn't enable Save.
+    const normalizeGroupsForCompare = (groups: any[]): string => {
+      const normalized = (groups ?? [])
+        .filter((g) => (g.display ?? "").trim() !== "" || (g.fields ?? []).length > 0)
+        .map((g) => ({
+          display: (g.display ?? "").trim(),
+          group: g.group ?? "",
+          is_workload_type: !!g.is_workload_type,
+          fields: [...(g.fields ?? [])].sort(),
+        }));
+      normalized.sort((a, b) => a.display.localeCompare(b.display));
+      return JSON.stringify(normalized);
+    };
+
+    const isFieldAliasesDirty = computed(
+      () =>
+        normalizeGroupsForCompare(draftSemanticGroups.value) !==
+        normalizeGroupsForCompare(semanticGroups.value),
+    );
+    // Bumped to force-reset SemanticFieldGroupsConfig's internal state on discard
+    const fieldAliasesEditorKey = ref(0);
+
+    const cloneGroups = (groups: any[]): any[] =>
+      groups.map((g) => ({ ...g, fields: [...(g.fields ?? [])] }));
 
     const loadSemanticGroups = async () => {
       try {
@@ -144,6 +192,7 @@ export default defineComponent({
       } catch (_) {
         semanticGroups.value = [];
       }
+      draftSemanticGroups.value = cloneGroups(semanticGroups.value);
     };
 
     onMounted(loadSemanticGroups);
@@ -155,7 +204,7 @@ export default defineComponent({
         const tab = slugToTab[slug as string] ?? "discovery";
         if (tab !== activeTab.value) activeTab.value = tab;
         aliasScrollToGroup.value = route.query.group as string | undefined;
-      }
+      },
     );
 
     // Clear the group deep-link after the scroll + blink animation completes,
@@ -178,22 +227,42 @@ export default defineComponent({
       {
         label: t("settings.correlation.discoveredServicesTab"),
         value: "services",
+        icon: "dns",
       },
       {
         label: t("settings.correlation.serviceDiscoveryTab"),
         value: "discovery",
+        icon: "manage-search",
       },
       {
         label: t("settings.correlation.alertCorrelationTab"),
         value: "alert-correlation",
+        icon: "notifications",
       },
       {
         label: t("settings.correlation.fieldAliasesTab"),
         value: "field-aliases",
+        icon: "link",
       },
     ]);
 
-    const onTabChange = (tab: string) => {
+    const confirmDiscardUnsaved = async (): Promise<boolean> => {
+      if (!isFieldAliasesDirty.value) return true;
+      return confirm({
+        title: t("common.unsavedChanges"),
+        message: t("settings.correlation.fieldAliasesUnsavedConfirm"),
+        confirmLabel: t("common.discardChanges"),
+        cancelLabel: t("common.cancel"),
+      });
+    };
+
+    const onTabChange = async (value: string | number) => {
+      const tab = String(value);
+      if (activeTab.value === "field-aliases" && tab !== "field-aliases") {
+        const proceed = await confirmDiscardUnsaved();
+        if (!proceed) return;
+        if (isFieldAliasesDirty.value) discardSemanticGroups();
+      }
       activeTab.value = tab;
       router.push({
         name: "correlationSettings",
@@ -212,35 +281,45 @@ export default defineComponent({
       });
     };
 
-    const onSaveSemanticGroups = async (groups: any[]) => {
+    const onDraftSemanticGroupsChange = (groups: any[]) => {
+      draftSemanticGroups.value = groups;
+    };
+
+    const saveSemanticGroups = async () => {
+      if (savingFieldAliases.value) return;
+      if (!isFieldAliasesDirty.value) return;
+      savingFieldAliases.value = true;
       try {
         const orgId = store.state.selectedOrganization.identifier;
+        const groups = draftSemanticGroups.value;
         await serviceStreamsService.updateSemanticGroups(orgId, groups);
+        // The groups are cached, and dimension analytics is computed from them.
+        void queryClient.invalidateQueries({ queryKey: serviceStreamKeys.all(orgId) });
         semanticGroups.value = groups;
-        q.notify({ type: "positive", message: t("settings.correlation.fieldAliasesSaved") });
+        draftSemanticGroups.value = cloneGroups(groups);
+        toast({ variant: "success", message: t("settings.correlation.fieldAliasesSaved") });
       } catch (_) {
-        q.notify({ type: "negative", message: t("settings.correlation.fieldAliasesSaveError") });
+        toast({ variant: "error", message: t("settings.correlation.fieldAliasesSaveError") });
+      } finally {
+        savingFieldAliases.value = false;
       }
     };
 
-    const onUpdateServiceFields = async (fields: string[]) => {
-      try {
-        const orgId = store.state.selectedOrganization.identifier;
-        const updated = semanticGroups.value.map((g: any) =>
-          g.id === "service" ? { ...g, fields } : g
-        );
-        await serviceStreamsService.updateSemanticGroups(orgId, updated);
-        semanticGroups.value = updated;
-        q.notify({ type: "positive", message: t("settings.correlation.fieldAliasesSaved") });
-      } catch (_) {
-        q.notify({ type: "negative", message: t("settings.correlation.fieldAliasesSaveError") });
-      }
+    const discardSemanticGroups = () => {
+      draftSemanticGroups.value = cloneGroups(semanticGroups.value);
+      // Force-remount the editor so its internal localGroups resets cleanly
+      fieldAliasesEditorKey.value += 1;
     };
 
     const onCorrelationSettingsSaved = () => {
       // Child components handle their own notifications and data refresh
       // No global store update needed as settings are managed via settings v2 API
     };
+
+    onBeforeRouteLeave(async () => {
+      if (!isFieldAliasesDirty.value) return true;
+      return await confirmDiscardUnsaved();
+    });
 
     return {
       store,
@@ -250,24 +329,16 @@ export default defineComponent({
       onTabChange,
       onCorrelationSettingsSaved,
       onNavigateToAliases,
-      onUpdateServiceFields,
-      onSaveSemanticGroups,
+      onDraftSemanticGroupsChange,
+      saveSemanticGroups,
+      discardSemanticGroups,
       semanticGroups,
+      draftSemanticGroups,
+      isFieldAliasesDirty,
+      savingFieldAliases,
+      fieldAliasesEditorKey,
       t,
     };
   },
 });
 </script>
-
-<style scoped lang="scss">
-.general-page-title {
-  font-size: 1.25rem;
-  font-weight: 700;
-  line-height: 1.5rem;
-}
-.general-page-subtitle {
-  font-size: 0.875rem;
-  font-weight: 500;
-  line-height: 1.25rem;
-}
-</style>

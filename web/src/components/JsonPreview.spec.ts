@@ -15,7 +15,6 @@
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import store from "@/test/unit/helpers/store";
 
 // All vi.mock() calls must come before any component imports — they are hoisted by Vitest.
@@ -26,6 +25,10 @@ vi.mock("vue-i18n", () => ({
 
 vi.mock("@/utils/zincutils", () => ({
   getImageURL: vi.fn(() => "mock-url"),
+}));
+
+vi.mock("@/utils/clipboard", () => ({
+  copyToClipboard: vi.fn().mockResolvedValue(true),
 }));
 
 vi.mock("@/components/logs/LogsHighLighting.vue", () => ({
@@ -44,19 +47,8 @@ vi.mock("@/components/logs/ChunkedContent.vue", () => ({
   },
 }));
 
-const mockNotify = vi.fn();
-
-vi.mock("quasar", async (importOriginal) => {
-  const actual = (await importOriginal()) as any;
-  return {
-    ...actual,
-    useQuasar: () => ({ notify: mockNotify }),
-  };
-});
-
 import JsonPreview from "./JsonPreview.vue";
-
-installQuasar();
+import * as clipboardUtils from "@/utils/clipboard";
 
 // ── Mount factory ─────────────────────────────────────────────────────────────
 
@@ -99,21 +91,19 @@ describe("JsonPreview", () => {
   describe("copy button visibility", () => {
     it("should show the copy button when showCopyButton is true (default)", () => {
       wrapper = mountJsonPreview({ showCopyButton: true });
-      // The copy button is a q-btn with an icon; it renders when showCopyButton is true.
+      // The copy button renders when showCopyButton is true.
       // We locate it by its click handler binding — the element with icon="content_copy" exists.
       expect(wrapper.find("button").exists()).toBe(true);
     });
 
     it("should hide the copy button when showCopyButton is false", () => {
       wrapper = mountJsonPreview({ showCopyButton: false });
-      // With showCopyButton false the q-btn is removed from the DOM entirely.
-      // The only remaining button-like elements would belong to q-btn-dropdown if present,
+      // With showCopyButton false the copy button is removed from the DOM entirely.
+      // Any remaining button-like elements would belong to the field-dropdown slot,
       // but with no field-dropdown slot there are none either.
       const buttons = wrapper.findAll("button");
       // None of the buttons should be the copy button — identified by the content_copy icon text.
-      const hasCopyButton = buttons.some((b) =>
-        b.html().includes("content_copy"),
-      );
+      const hasCopyButton = buttons.some((b) => b.html().includes("content_copy"));
       expect(hasCopyButton).toBe(false);
     });
   });
@@ -124,15 +114,9 @@ describe("JsonPreview", () => {
         value: { level: "info", message: "hello", status: 200 },
       });
 
-      expect(
-        wrapper.find('[data-test="json-preview-key-level"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="json-preview-key-message"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="json-preview-key-status"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="json-preview-key-level"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="json-preview-key-message"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="json-preview-key-status"]').exists()).toBe(true);
     });
 
     it("should render the key label text inside the key span", () => {
@@ -150,9 +134,7 @@ describe("JsonPreview", () => {
     });
 
     it("should NOT render the field-dropdown button when no field-dropdown slot is provided", () => {
-      expect(
-        wrapper.find('[data-test="json-preview-field-dropdown-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="json-preview-field-dropdown-btn"]').exists()).toBe(false);
     });
   });
 
@@ -167,9 +149,7 @@ describe("JsonPreview", () => {
     });
 
     it("should render the field-dropdown button when the field-dropdown slot is provided", () => {
-      expect(
-        wrapper.find('[data-test="json-preview-field-dropdown-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="json-preview-field-dropdown-btn"]').exists()).toBe(true);
     });
   });
 
@@ -189,20 +169,20 @@ describe("JsonPreview", () => {
       expect(emitted![0][0]).toEqual(value);
     });
 
-    it("should call $q.notify after clicking the copy button", async () => {
-      wrapper = mountJsonPreview({
-        showCopyButton: true,
-        value: { key: "val" },
-      });
+    it("should call copyToClipboard with the JSON-stringified value after clicking the copy button", async () => {
+      const value = { key: "val" };
+      wrapper = mountJsonPreview({ showCopyButton: true, value });
 
       const copyButton = wrapper.find("button");
       expect(copyButton.exists()).toBe(true);
 
       await copyButton.trigger("click");
 
-      expect(mockNotify).toHaveBeenCalledOnce();
-      expect(mockNotify).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "positive" }),
+      expect(clipboardUtils.copyToClipboard).toHaveBeenCalledOnce();
+      expect(clipboardUtils.copyToClipboard).toHaveBeenCalledWith(
+        JSON.stringify(value, null, 2),
+        expect.any(Function),
+        expect.objectContaining({ timeout: 1500 }),
       );
     });
   });
@@ -216,20 +196,14 @@ describe("JsonPreview", () => {
         },
       );
 
-      expect(
-        wrapper.find('[data-test="custom-toolbar-btn"]').exists(),
-      ).toBe(true);
-      expect(wrapper.find('[data-test="custom-toolbar-btn"]').text()).toBe(
-        "View Trace",
-      );
+      expect(wrapper.find('[data-test="custom-toolbar-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="custom-toolbar-btn"]').text()).toBe("View Trace");
     });
 
     it("should not render any toolbar content when toolbar slot is not provided", () => {
       wrapper = mountJsonPreview({ value: { field: "val" } });
 
-      expect(
-        wrapper.find('[data-test="custom-toolbar-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="custom-toolbar-btn"]').exists()).toBe(false);
     });
   });
 });

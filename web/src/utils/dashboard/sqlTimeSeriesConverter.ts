@@ -17,6 +17,8 @@ import { toZonedTime } from "date-fns-tz";
 import { formatUnitValue, getUnitValue } from "./convertDataIntoUnitValue";
 import { calculateDynamicNameGap } from "./chartDimensionUtils";
 import { formatDate, isTimeSeries, isTimeStamp } from "./dateTimeUtils";
+import { chartColor } from "../chartTheme";
+import { escapeHtml } from "@/utils/html";
 
 /**
  * Handles auto SQL time series conversion.
@@ -59,8 +61,7 @@ export const applyAutoSQLTimeSeries = (
 
     const timestampField = panelSchema.queries[0].fields?.x.find(
       (it: any) =>
-        !it.functionName &&
-        it?.args?.[0]?.value?.field == store.state?.zoConfig?.timestamp_column,
+        !it.functionName && it?.args?.[0]?.value?.field == store.state?.zoConfig?.timestamp_column,
     );
 
     //if x axis has time series
@@ -119,6 +120,9 @@ export const applyAutoSQLTimeSeries = (
             axis.axisLabel.rotate = 0;
             axis.axisLabel.overflow = "none";
             axis.axisLabel.width = undefined;
+            // time ticks render at fixed intervals regardless of panel
+            // width — cull colliding labels instead of letting them abut
+            axis.axisLabel.hideOverlap = true;
           }
           // Recalculate nameGap with 0 rotation for time-based axis
           if (axis.name) {
@@ -132,28 +136,27 @@ export const applyAutoSQLTimeSeries = (
           options.xAxis[0].axisLabel.rotate = 0;
           options.xAxis[0].axisLabel.overflow = "none";
           options.xAxis[0].axisLabel.width = undefined;
+          // time ticks render at fixed intervals regardless of panel
+          // width — cull colliding labels instead of letting them abut
+          options.xAxis[0].axisLabel.hideOverlap = true;
         }
         // Recalculate nameGap with 0 rotation for time-based axis
         if (options.xAxis[0].name) {
-          options.xAxis[0].nameGap = calculateDynamicNameGap(
-            0,
-            120,
-            12,
-            25,
-            10,
-          );
+          options.xAxis[0].nameGap = calculateDynamicNameGap(0, 120, 12, 25, 10);
         }
       }
 
       options.xAxis[0].data = [];
 
       // Pin x-axis range to the user's full query range so anchors are unnecessary.
+      // queryStartMs is the query start in ms (past start for comparison queries).
+      // timeGap is already in ms — adding it shifts the past range to the current period.
       const queryStartMs = parseInt(metadata?.queries[0]?.startTime?.toString() ?? "0") / 1000;
       const queryEndMs = parseInt(metadata?.queries[0]?.endTime?.toString() ?? "0") / 1000;
       const timeGap = metadata?.queries[0]?.timeRangeGap?.seconds ?? 0;
       if (queryStartMs > 0 && queryEndMs > 0) {
-        options.xAxis[0].min = toZonedTime(queryStartMs + timeGap * 1000, store.state.timezone);
-        options.xAxis[0].max = toZonedTime(queryEndMs + timeGap * 1000, store.state.timezone);
+        options.xAxis[0].min = toZonedTime(queryStartMs + timeGap, store.state.timezone);
+        options.xAxis[0].max = toZonedTime(queryEndMs + timeGap, store.state.timezone);
       }
 
       options.tooltip.formatter = function (name: any) {
@@ -185,8 +188,7 @@ export const applyAutoSQLTimeSeries = (
         if (hoveredSeriesState?.value?.hoveredSeriesName) {
           // get the current series index from name
           const currentSeriesIndex = name.findIndex(
-            (it: any) =>
-              it.seriesName == hoveredSeriesState?.value?.hoveredSeriesName,
+            (it: any) => it.seriesName == hoveredSeriesState?.value?.hoveredSeriesName,
           );
 
           // if hovered series index is not -1 then take it to very first position
@@ -208,24 +210,28 @@ export const applyAutoSQLTimeSeries = (
             // if have than bold it
             if (it?.seriesName == hoveredSeriesState?.value?.hoveredSeriesName)
               hoverText.push(
-                `<strong>${it.marker} ${it.seriesName} : ${formatUnitValue(
-                  getUnitValue(
-                    it.data[1],
-                    panelSchema.config?.unit,
-                    panelSchema.config?.unit_custom,
-                    panelSchema.config?.decimals,
+                `<strong>${it.marker} ${escapeHtml(it.seriesName)} : ${escapeHtml(
+                  formatUnitValue(
+                    getUnitValue(
+                      it.data[1],
+                      panelSchema.config?.unit,
+                      panelSchema.config?.unit_custom,
+                      panelSchema.config?.decimals,
+                    ),
                   ),
                 )} </strong>`,
               );
             // else normal text
             else
               hoverText.push(
-                `${it.marker} ${it.seriesName} : ${formatUnitValue(
-                  getUnitValue(
-                    it.data[1],
-                    panelSchema.config?.unit,
-                    panelSchema.config?.unit_custom,
-                    panelSchema.config?.decimals,
+                `${it.marker} ${escapeHtml(it.seriesName)} : ${escapeHtml(
+                  formatUnitValue(
+                    getUnitValue(
+                      it.data[1],
+                      panelSchema.config?.unit,
+                      panelSchema.config?.unit_custom,
+                      panelSchema.config?.decimals,
+                    ),
                   ),
                 )}`,
               );
@@ -240,7 +246,7 @@ export const applyAutoSQLTimeSeries = (
         label: {
           fontsize: 12,
           precision: panelSchema.config?.decimals,
-          backgroundColor: store.state.theme === "dark" ? "#333" : "",
+          backgroundColor: chartColor("--color-chart-crosshair-bg"),
           formatter: function (params: any) {
             try {
               if (params?.axisDimension == "y")
@@ -311,10 +317,7 @@ export const applyCustomSQLTimeSeries = (
     options.xAxis.length > 0 &&
     options.xAxis[0].data.length > 0
   ) {
-    const sample = options.xAxis[0].data.slice(
-      0,
-      Math.min(20, options.xAxis[0].data.length),
-    );
+    const sample = options.xAxis[0].data.slice(0, Math.min(20, options.xAxis[0].data.length));
 
     const isTimeSeriesData = isTimeSeries(sample);
 
@@ -356,6 +359,9 @@ export const applyCustomSQLTimeSeries = (
             axis.axisLabel.rotate = 0;
             axis.axisLabel.overflow = "none";
             axis.axisLabel.width = undefined;
+            // time ticks render at fixed intervals regardless of panel
+            // width — cull colliding labels instead of letting them abut
+            axis.axisLabel.hideOverlap = true;
           }
           // Recalculate nameGap with 0 rotation for time-based axis
           if (axis.name) {
@@ -369,28 +375,27 @@ export const applyCustomSQLTimeSeries = (
           options.xAxis[0].axisLabel.rotate = 0;
           options.xAxis[0].axisLabel.overflow = "none";
           options.xAxis[0].axisLabel.width = undefined;
+          // time ticks render at fixed intervals regardless of panel
+          // width — cull colliding labels instead of letting them abut
+          options.xAxis[0].axisLabel.hideOverlap = true;
         }
         // Recalculate nameGap with 0 rotation for time-based axis
         if (options.xAxis[0].name) {
-          options.xAxis[0].nameGap = calculateDynamicNameGap(
-            0,
-            120,
-            12,
-            25,
-            10,
-          );
+          options.xAxis[0].nameGap = calculateDynamicNameGap(0, 120, 12, 25, 10);
         }
       }
 
       options.xAxis[0].data = [];
 
       // Pin x-axis range to the user's full query range so anchors are unnecessary.
+      // queryStartMs is the query start in ms (past start for comparison queries).
+      // timeGap is already in ms — adding it shifts the past range to the current period.
       const queryStartMs = parseInt(metadata?.queries[0]?.startTime?.toString() ?? "0") / 1000;
       const queryEndMs = parseInt(metadata?.queries[0]?.endTime?.toString() ?? "0") / 1000;
       const timeGap = metadata?.queries[0]?.timeRangeGap?.seconds ?? 0;
       if (queryStartMs > 0 && queryEndMs > 0) {
-        options.xAxis[0].min = toZonedTime(queryStartMs + timeGap * 1000, store.state.timezone);
-        options.xAxis[0].max = toZonedTime(queryEndMs + timeGap * 1000, store.state.timezone);
+        options.xAxis[0].min = toZonedTime(queryStartMs + timeGap, store.state.timezone);
+        options.xAxis[0].max = toZonedTime(queryEndMs + timeGap, store.state.timezone);
       }
 
       options.tooltip.formatter = function (name: any) {
@@ -422,8 +427,7 @@ export const applyCustomSQLTimeSeries = (
           if (hoveredSeriesState?.value?.hoveredSeriesName) {
             // get the current series index from name
             const currentSeriesIndex = name?.findIndex(
-              (it: any) =>
-                it.seriesName == hoveredSeriesState?.value?.hoveredSeriesName,
+              (it: any) => it.seriesName == hoveredSeriesState?.value?.hoveredSeriesName,
             );
 
             // if hovered series index is not -1 then take it to very first position
@@ -442,28 +446,30 @@ export const applyCustomSQLTimeSeries = (
             if (it?.data?.[1] != null) {
               // check if the series is the current series being hovered
               // if have than bold it
-              if (
-                it?.seriesName == hoveredSeriesState?.value?.hoveredSeriesName
-              )
+              if (it?.seriesName == hoveredSeriesState?.value?.hoveredSeriesName)
                 hoverText.push(
-                  `<strong>${it?.marker} ${it?.seriesName} : ${formatUnitValue(
-                    getUnitValue(
-                      it?.data?.[1],
-                      panelSchema.config?.unit,
-                      panelSchema.config?.unit_custom,
-                      panelSchema.config?.decimals,
+                  `<strong>${it?.marker} ${escapeHtml(it?.seriesName)} : ${escapeHtml(
+                    formatUnitValue(
+                      getUnitValue(
+                        it?.data?.[1],
+                        panelSchema.config?.unit,
+                        panelSchema.config?.unit_custom,
+                        panelSchema.config?.decimals,
+                      ),
                     ),
                   )} </strong>`,
                 );
               // else normal text
               else
                 hoverText.push(
-                  `${it.marker} ${it.seriesName} : ${formatUnitValue(
-                    getUnitValue(
-                      it?.data?.[1],
-                      panelSchema.config?.unit,
-                      panelSchema.config?.unit_custom,
-                      panelSchema.config?.decimals,
+                  `${it.marker} ${escapeHtml(it.seriesName)} : ${escapeHtml(
+                    formatUnitValue(
+                      getUnitValue(
+                        it?.data?.[1],
+                        panelSchema.config?.unit,
+                        panelSchema.config?.unit_custom,
+                        panelSchema.config?.decimals,
+                      ),
                     ),
                   )}`,
                 );
@@ -480,7 +486,7 @@ export const applyCustomSQLTimeSeries = (
         label: {
           fontsize: 12,
           precision: panelSchema.config?.decimals,
-          backgroundColor: store.state.theme === "dark" ? "#333" : "",
+          backgroundColor: chartColor("--color-chart-crosshair-bg"),
           formatter: function (params: any) {
             try {
               if (params?.axisDimension == "y")

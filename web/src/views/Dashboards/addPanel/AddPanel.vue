@@ -16,193 +16,164 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <!-- eslint-disable vue/no-unused-components -->
 <template>
-  <div style="overflow-y: auto" class="scroll">
-    <!-- Header Section -->
-    <div class="tw:px-[0.625rem] tw:mb-[0.625rem] q-pt-xs">
-      <div
-        class="flex items-center q-pa-sm card-container"
-        :class="!store.state.isAiChatEnabled ? 'justify-between' : ''"
-      >
-        <div
-          class="flex items-center q-table__title"
-          :class="!store.state.isAiChatEnabled ? 'q-mr-md' : 'q-mr-sm'"
+  <OPageLayout bleed>
+    <!-- The panel NAME is the page title (inline-edited in place) and the
+         mode is demoted to the subtitle, so the header answers "which panel"
+         first and "what am I doing to it" second. That means owning the
+         header: <OForm> has to be an ANCESTOR of OPageHeader for the title
+         field to inject the form context, and it cannot simply wrap the whole
+         page because the body renders AddSettingVariable, which owns a form of
+         its own (nested <form> elements). `contents` keeps the wrapper out of
+         the layout box model. The header's Save still submits by form id. -->
+    <template #header>
+      <OForm id="add-panel-form" :form="form" class="contents">
+        <OPageHeader
+          :back="{
+            label: currentDashboardData.data?.title || t('dashboard.header'),
+            onClick: goBack,
+            dataTest: 'dashboard-back-btn',
+          }"
+          :subtitle="editMode ? t('panel.editPanel') : t('panel.addPanel')"
+          title-overflow="visible"
         >
-          <span>
-            {{ editMode ? t("panel.editPanel") : t("panel.addPanel") }}
-          </span>
-          <div>
-            <q-input
+          <template #title>
+            <OFormInlineEdit
               data-test="dashboard-panel-name"
-              v-model="dashboardPanelData.data.title"
-              :label="t('panel.name') + '*'"
-              class="q-ml-xl dynamic-input"
-              dense
-              borderless
-              :style="inputStyle"
+              name="title"
+              :placeholder="t('panel.namePlaceholder')"
+              :aria-label="t('panel.name')"
+              :edit-hint="
+                panelAutoName.isAuto.value ? t('common.inlineEdit.autoHint') : t('panel.renameHint')
+              "
+              @update:model-value="panelAutoName.markManual"
+              @commit="panelAutoName.onCommit"
+              @cancel="panelAutoName.onCommit"
             />
-          </div>
-        </div>
-        <div class="flex q-gutter-sm">
-          <q-btn
-            outline
-            padding="xs sm"
-            class="q-mr-sm tw:h-[36px] el-border"
-            no-caps
-            label="Dashboard Tutorial"
-            @click="showTutorial"
-            data-test="dashboard-panel-tutorial-btn"
-          ></q-btn>
-          <q-btn
-            v-if="
-              !['html', 'markdown', 'custom_chart'].includes(
-                dashboardPanelData.data.type,
-              )
-            "
-            outline
-            padding="sm"
-            class="q-mr-sm tw:h-[36px] el-border"
-            no-caps
-            icon="info_outline"
-            @click="showViewPanel = true"
-            data-test="dashboard-panel-data-view-query-inspector-btn"
-          >
-            <q-tooltip anchor="center left" self="center right"
-              >Query Inspector
-            </q-tooltip>
-          </q-btn>
-          <DateTimePickerDashboard
-            v-if="selectedDate"
-            v-model="selectedDate"
-            ref="dateTimePickerRef"
-            :disable="disable"
-            class="tw:h-[36px]"
-            @hide="setTimeForVariables"
-            data-test="dashboard-global-date-time-picker"
-          />
-          <q-btn
-            outline
-            color="red"
-            no-caps
-            flat
-            class="o2-secondary-button tw:h-[36px] q-ml-md"
-            style="color: red !important"
-            :class="
-              store.state.theme === 'dark'
-                ? 'o2-secondary-button-dark'
-                : 'o2-secondary-button-light'
-            "
-            :label="t('panel.discard')"
-            @click="goBackToDashboardList"
-            data-test="dashboard-panel-discard"
-          />
-          <q-btn
-            class="o2-secondary-button tw:h-[36px] q-ml-md"
-            :class="
-              store.state.theme === 'dark'
-                ? 'o2-secondary-button-dark'
-                : 'o2-secondary-button-light'
-            "
-            no-caps
-            flat
-            :label="t('panel.save')"
-            data-test="dashboard-panel-save"
-            @click.stop="savePanelData.execute()"
-            :loading="savePanelData.isLoading.value"
-          />
-          <template
-            v-if="!['html', 'markdown'].includes(dashboardPanelData.data.type)"
-          >
-            <q-btn
-              v-if="config.isEnterprise === 'false'"
-              data-test="dashboard-apply"
-              class="tw:h-[36px] q-ml-md o2-primary-button"
-              :class="
-                store.state.theme === 'dark'
-                  ? 'o2-primary-button-dark'
-                  : 'o2-primary-button-light'
-              "
-              no-caps
-              flat
-              dense
-              :loading="searchRequestTraceIds.length > 0"
-              :disable="searchRequestTraceIds.length > 0"
-              :label="t('panel.apply')"
-              @click="() => runQuery(false)"
-            />
-            <q-btn-group
-              v-if="config.isEnterprise === 'true'"
-              class="tw:h-[36px] q-ml-md o2-primary-button"
-              style="
-                padding-left: 0px !important ;
-                padding-right: 0px !important;
-                display: inline-flex;
-              "
-              :class="
-                store.state.theme === 'dark'
-                  ? searchRequestTraceIds.length > 0
-                    ? 'o2-negative-button-dark'
-                    : 'o2-secondary-button-dark'
-                  : searchRequestTraceIds.length > 0
-                    ? 'o2-negative-button-light'
-                    : 'o2-secondary-button-light'
-              "
-            >
-              <q-btn
-                :data-test="
-                  searchRequestTraceIds.length > 0
-                    ? 'dashboard-cancel'
-                    : 'dashboard-apply'
-                "
-                no-caps
-                :label="
-                  searchRequestTraceIds.length > 0
-                    ? t('panel.cancel')
-                    : t('panel.apply')
-                "
-                @click="onApplyBtnClick"
-              />
-
-              <q-btn-dropdown
-                class="text-bold no-border tw:px-0"
-                no-caps
-                flat
-                dense
-                auto-close
-                dropdown-icon="keyboard_arrow_down"
-                :disable="searchRequestTraceIds.length > 0"
-              >
-                <q-list>
-                  <q-item
-                    clickable
-                    @click="runQuery(true)"
-                    :disable="searchRequestTraceIds.length > 0"
-                  >
-                    <q-item-section avatar>
-                      <q-icon
-                        size="xs"
-                        name="refresh"
-                        style="align-items: baseline; padding: 0px"
-                      />
-                    </q-item-section>
-                    <q-item-section>
-                      <q-item-label
-                        style="
-                          font-size: 12px;
-                          align-items: baseline;
-                          padding: 0px;
-                        "
-                        >Refresh Cache & Apply</q-item-label
-                      >
-                    </q-item-section>
-                  </q-item>
-                </q-list>
-              </q-btn-dropdown>
-            </q-btn-group>
           </template>
-        </div>
-      </div>
-    </div>
+          <template #actions>
+            <template v-if="!isMobile">
+              <OButton
+                variant="outline"
+                size="sm"
+                @click="showTutorial"
+                data-test="dashboard-panel-tutorial-btn"
+                >{{ t("dashboard.addPanel.dashboardTutorial") }}</OButton
+              >
+              <OButton
+                v-if="!['html', 'markdown', 'custom_chart'].includes(dashboardPanelData.data.type)"
+                variant="outline"
+                size="icon-sm"
+                @click="showViewPanel = true"
+                data-test="dashboard-panel-data-view-query-inspector-btn"
+                icon-left="info-outline"
+              >
+                <OTooltip
+                  side="left"
+                  align="center"
+                  :content="t('dashboard.addPanel.queryInspector')"
+                  shortcut-id="panelEditorQueryInspector"
+                />
+              </OButton>
+            </template>
+            <DateTimePickerDashboard
+              v-if="selectedDate"
+              v-model="selectedDate"
+              ref="dateTimePickerRef"
+              :disable="disable"
+              class="max-md:[&_.date-time-label]:hidden"
+              @hide="setTimeForVariables"
+              data-test="dashboard-global-date-time-picker"
+            />
+            <OButton
+              v-if="!isMobile"
+              variant="outline-destructive"
+              size="sm-action"
+              @click="goBackToDashboardList"
+              data-test="dashboard-panel-discard"
+              >{{ t("panel.discard") }}</OButton
+            >
+            <OButton
+              variant="outline"
+              size="sm-action"
+              data-test="dashboard-panel-save"
+              type="submit"
+              form="add-panel-form"
+              :loading="isSavingPanel"
+              >{{ t("panel.save") }}</OButton
+            >
+            <template v-if="!['html', 'markdown'].includes(dashboardPanelData.data.type)">
+              <OButton
+                v-if="config.isEnterprise === 'false'"
+                variant="primary"
+                size="sm-action"
+                data-test="dashboard-apply"
+                :loading="searchRequestTraceIds.length > 0"
+                :disabled="searchRequestTraceIds.length > 0"
+                @click="() => runQuery(false)"
+                >{{ t("panel.apply") }}</OButton
+              >
+              <OButtonGroup v-if="config.isEnterprise === 'true'" radius="lg">
+                <OButton
+                  :data-test="
+                    searchRequestTraceIds.length > 0 ? 'dashboard-cancel' : 'dashboard-apply'
+                  "
+                  :variant="searchRequestTraceIds.length > 0 ? 'destructive' : 'primary'"
+                  size="sm-action"
+                  @click="onApplyBtnClick"
+                >
+                  {{ searchRequestTraceIds.length > 0 ? t("panel.cancel") : t("panel.apply") }}
+                </OButton>
 
+                <ODropdown side="bottom" align="end">
+                  <template #trigger>
+                    <OButton
+                      :variant="searchRequestTraceIds.length > 0 ? 'destructive' : 'primary'"
+                      size="icon-sm"
+                      class="h-8.5!"
+                      :disabled="searchRequestTraceIds.length > 0"
+                      icon-left="keyboard-arrow-down"
+                    />
+                  </template>
+                  <ODropdownItem @select="runQuery(true)">
+                    <div class="flex items-center gap-2">
+                      <OIcon name="refresh" size="xs" />
+                      <span>{{ t("dashboard.addPanel.refreshCacheAndApply") }}</span>
+                    </div>
+                  </ODropdownItem>
+                </ODropdown>
+              </OButtonGroup>
+            </template>
+          </template>
+          <template #actions-overflow>
+            <template v-if="isMobile">
+              <OButton
+                variant="outline"
+                size="sm"
+                @click="showTutorial"
+                data-test="dashboard-panel-tutorial-btn"
+                >{{ t("dashboard.addPanel.dashboardTutorial") }}</OButton
+              >
+              <OButton
+                v-if="!['html', 'markdown', 'custom_chart'].includes(dashboardPanelData.data.type)"
+                variant="outline"
+                size="sm"
+                icon-left="info-outline"
+                @click="showViewPanel = true"
+                data-test="dashboard-panel-data-view-query-inspector-btn"
+                >{{ t("dashboard.addPanel.queryInspector") }}</OButton
+              >
+              <OButton
+                variant="outline-destructive"
+                size="sm"
+                @click="goBackToDashboardList"
+                data-test="dashboard-panel-discard"
+                >{{ t("panel.discard") }}</OButton
+              >
+            </template>
+          </template>
+        </OPageHeader>
+      </OForm>
+    </template>
     <!-- PanelEditor Content Area -->
     <PanelEditor
       ref="panelEditorRef"
@@ -210,9 +181,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       :editMode="editMode"
       :dashboardData="dashboardDataForPanelEditor"
       :variablesData="updatedVariablesData"
-      :selectedDateTime="
-        dateTimeForVariables || dashboardPanelData.meta.dateTime
-      "
+      :selectedDateTime="dateTimeForVariables || dashboardPanelData.meta.dateTime"
       @variablesDataUpdated="variablesDataUpdated"
       @openAddVariable="handleOpenAddVariable"
       @chartApiError="handleChartApiError"
@@ -221,30 +190,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     />
 
     <!-- Query Inspector Dialog -->
-    <q-dialog v-model="showViewPanel">
-      <QueryInspector :metaData="metaData" :data="panelTitle"></QueryInspector>
-    </q-dialog>
+    <QueryInspector
+      v-model:open="showViewPanel"
+      :metaData="metaData"
+      :data="panelTitle"
+      data-test="query-inspector-dialog"
+    />
 
     <!-- Add Variable Drawer -->
     <div
       v-if="isAddVariableOpen"
-      class="add-variable-drawer-overlay"
-      :class="store.state.theme === 'dark' ? 'theme-dark' : 'theme-light'"
+      class="add-variable-drawer-overlay bg-overlay-scrim fixed top-0 right-0 bottom-0 left-0 z-6000 flex justify-end"
       @click.self="handleCloseAddVariable"
     >
-      <div class="add-variable-drawer-panel tw:px-4 tw:pt-4">
+      <div
+        class="add-variable-drawer-panel border-border-default bg-surface-base h-screen w-180 overflow-hidden rounded-none! border-s ps-2 pt-2 shadow-sm"
+      >
         <AddSettingVariable
           @save="handleSaveVariable"
           @close="handleCloseAddVariable"
-          :dashboardVariablesList="
-            currentDashboardData.data?.variables?.list || []
-          "
+          :dashboardVariablesList="currentDashboardData.data?.variables?.list || []"
           :variableName="selectedVariableToEdit"
           :isFromAddPanel="true"
         />
       </div>
     </div>
-  </div>
+  </OPageLayout>
 </template>
 
 <script lang="ts">
@@ -259,8 +230,14 @@ import {
   onUnmounted,
   onMounted,
   defineAsyncComponent,
+  provide,
+  inject,
 } from "vue";
-import { useI18n } from "vue-i18n";
+import {
+  clearExemplarOverride,
+  exemplarOverrideKey,
+} from "@/composables/dashboard/useExemplarOverride";
+import { raw, useI18nTyped } from "@/types/i18n";
 import {
   addPanel,
   checkIfVariablesAreLoaded,
@@ -268,30 +245,42 @@ import {
   getPanel,
   updatePanel,
   updateDashboard,
-  deleteVariable,
 } from "../../../utils/commons";
 import { onBeforeRouteLeave, useRoute, useRouter } from "vue-router";
 import { useStore } from "vuex";
 import useDashboardPanelData from "../../../composables/dashboard/useDashboardPanel";
 import DateTimePickerDashboard from "../../../components/DateTimePickerDashboard.vue";
 import AddSettingVariable from "../../../components/dashboards/settings/AddSettingVariable.vue";
-import { useLoading } from "@/composables/useLoading";
 import { debounce, isEqual } from "lodash-es";
-import { provide, inject } from "vue";
+import { rangesFromServerError, type SqlErrorRange } from "@/utils/query/sqlDiagnostics";
+import useBreakpoint from "@/composables/useBreakpoint";
 import useNotifications from "@/composables/useNotifications";
 import config from "@/aws-exports";
 import useCancelQuery from "@/composables/dashboard/useCancelQuery";
+import { isQueryVrlEnabled } from "@/composables/dashboard/useVrlFunction";
 import useAiChat from "@/composables/useAiChat";
 import useStreams from "@/composables/useStreams";
 import { checkIfConfigChangeRequiredApiCallOrNot } from "@/utils/dashboard/checkConfigChangeApiCall";
 import { panelIdToBeRefreshed } from "@/utils/dashboard/convertCustomChartData";
-import {
-  createDashboardsContextProvider,
-  contextRegistry,
-} from "@/composables/contextProviders";
-import { processQueryMetadataErrors } from "@/utils/zincutils";
+import { createDashboardsContextProvider, contextRegistry } from "@/composables/contextProviders";
 import { useVariablesManager } from "@/composables/dashboard/useVariablesManager";
 import { PanelEditor } from "@/components/dashboards/PanelEditor";
+import OButtonGroup from "@/lib/core/Button/OButtonGroup.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import { useShortcuts } from "@/lib/vue-shortcut-manager";
+import { isInputFocused } from "@/utils/keyboardShortcuts";
+import OForm from "@/lib/forms/Form/OForm.vue";
+import OFormInlineEdit from "@/lib/forms/InlineEdit/OFormInlineEdit.vue";
+import { useOForm } from "@/lib/forms/Form/useOForm";
+import { useAutoName } from "@/composables/useAutoName";
+import { buildPanelAutoName } from "@/utils/autoName";
+import { makeAddPanelSchema, type AddPanelForm } from "./AddPanel.schema";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownItem from "@/lib/overlay/Dropdown/ODropdownItem.vue";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
+import OPageHeader from "@/lib/core/PageHeader/OPageHeader.vue";
 
 const QueryInspector = defineAsyncComponent(() => {
   return import("@/components/dashboards/QueryInspector.vue");
@@ -299,16 +288,29 @@ const QueryInspector = defineAsyncComponent(() => {
 
 export default defineComponent({
   name: "AddPanel",
-  props: ["metaData"],
 
   components: {
+    OIcon,
+    OButtonGroup,
+    OButton,
+    OPageLayout,
+    OPageHeader,
+    OForm,
+    OFormInlineEdit,
+    ODropdown,
+    ODropdownItem,
+    OTooltip,
     DateTimePickerDashboard,
     AddSettingVariable,
     QueryInspector,
     PanelEditor,
   },
-  setup(props) {
+  setup() {
     provide("dashboardPanelDataPageKey", "dashboard");
+
+    // Server-error highlight ranges shared with the descendant query editor.
+    const dashboardSqlErrorRanges = ref<SqlErrorRange[]>([]);
+    provide("dashboardSqlErrorRanges", dashboardSqlErrorRanges);
 
     // PanelEditor ref for accessing exposed methods/properties
     const panelEditorRef = ref<InstanceType<typeof PanelEditor> | null>(null);
@@ -316,24 +318,22 @@ export default defineComponent({
     // This will be used to copy the chart data to the chart renderer component
     // This will deep copy the data object without reactivity and pass it on to the chart renderer
     const chartData = ref();
-    const { t } = useI18n();
+    const { t } = useI18nTyped();
+    const { isMobile } = useBreakpoint();
     const router = useRouter();
     const route = useRoute();
     const store = useStore();
 
     // Initialize or inject variables manager
     const injectedManager = inject("variablesManager", null);
-    const variablesManager = injectedManager || useVariablesManager();
+    const variablesManager = injectedManager || useVariablesManager(t);
 
     // Provide to child components
     if (!injectedManager) {
       provide("variablesManager", variablesManager);
     }
-    const {
-      showErrorNotification,
-      showPositiveNotification,
-      showConfictErrorNotificationWithRefreshBtn,
-    } = useNotifications();
+    const { showErrorNotification, showConfictErrorNotificationWithRefreshBtn } =
+      useNotifications();
     const {
       dashboardPanelData,
       resetDashboardPanelData,
@@ -341,16 +341,81 @@ export default defineComponent({
       resetAggregationFunction,
       validatePanel,
       makeAutoSQLQuery,
-    } = useDashboardPanelData("dashboard");
-    const editMode = ref(false);
+    } = useDashboardPanelData("dashboard", t);
+    const editMode = ref(!!route.query.panelId);
     const selectedDate: any = ref(null);
     const dateTimePickerRef: any = ref(null);
     const errorData: any = reactive({
       errors: [],
     });
+
+    // ── Panel title OForm (header #tabs slot) ────────────────────────────────
+    // This component renders <OForm> in the header slot and reads the form's
+    // state via form.useStore. `title` is entangled with the editor's
+    // dashboardPanelData.data.title (read by the save flow + width preview +
+    // QueryInspector), so it's a name=-owned field synced both ways with guards:
+    // form → editor below (so the editor sees typing), and editor → form
+    // (external-source sync for async edit-prefill / import; dontUpdateMeta
+    // avoids a post-submit "required" flash). The header Save submits via
+    // `form="add-panel-form"`; loading is form-driven.
+    const addPanelSchema = makeAddPanelSchema(t);
+    const form = useOForm<AddPanelForm>({
+      defaultValues: { title: dashboardPanelData.data.title ?? "" },
+      schema: addPanelSchema,
+      // forward to the onSave defined below (avoids a TDZ ref at setup time)
+      onSubmit: (value) => onSave(value),
+    });
+
+    // Form-driven Save spinner for the header Save button (outside <OForm>).
+    const isSavingPanel = form.useStore((s: any) => s.isSubmitting);
+
+    // Project the form-owned title OUT to the editor state so the live width
+    // preview / QueryInspector / save see it as the user types.
+    const titleStore = form.useStore((s: any) => s.values?.title);
+    watch(titleStore, (v: any) => {
+      if (dashboardPanelData.data.title !== (v ?? "")) {
+        dashboardPanelData.data.title = v ?? "";
+      }
+    });
+
+    // Panel title arrives async in edit mode (getPanel → Object.assign in
+    // onMounted) + on import; re-seed the form-owned `title` when the editor
+    // state changes externally (the `!==` guard stops a loop with the projection
+    // above; dontUpdateMeta avoids a post-submit "required" flash).
+    watch(
+      () => dashboardPanelData.data.title,
+      (newTitle) => {
+        if (form.state.values.title !== newTitle) {
+          form.setFieldValue("title", newTitle ?? "", { dontUpdateMeta: true });
+        }
+      },
+    );
+
+    // ── Smart panel name ─────────────────────────────────────────────────────
+    // A new panel names itself after what it measures ("Avg of duration by
+    // service") and keeps re-deriving that as the query is built — until the
+    // first keystroke in the header, after which the name is the user's. Edit
+    // mode is excluded outright: a saved panel's title is never regenerated.
+    // dontUpdateMeta keeps a generated title from tripping the "required"
+    // error state before the user has done anything.
+    // The time column is deployment-configurable, so it has to be read from
+    // config rather than assumed to be `_timestamp` — the same value
+    // usePanelFields compares against when it builds the fields.
+    const panelNameSuggestion = computed(() =>
+      buildPanelAutoName(dashboardPanelData, t, {
+        timestampColumn: store.state.zoConfig?.timestamp_column,
+      }),
+    );
+    const panelAutoName = useAutoName({
+      suggestion: panelNameSuggestion,
+      currentValue: () => (form.state.values.title ?? "") as string,
+      apply: (name: string) => form.setFieldValue("title", name, { dontUpdateMeta: true }),
+      enabled: () => !editMode.value,
+    });
+
     let variablesData: any = reactive({});
     const { registerAiChatHandler, removeAiChatHandler } = useAiChat();
-    const { getStream } = useStreams();
+    const { getStream } = useStreams(t);
     const seriesData = ref([]);
     const shouldRefreshWithoutCache = ref(false);
 
@@ -399,17 +464,13 @@ export default defineComponent({
           currentTabId.value || "",
         );
 
-        updatedVariablesData.isVariablesLoading =
-          variablesManager.isLoading.value;
+        updatedVariablesData.isVariablesLoading = variablesManager.isLoading.value;
         // IMPORTANT: Deep copy to prevent reactive updates from live state
         updatedVariablesData.values = JSON.parse(JSON.stringify(mergedVars));
       } else {
         // Fallback: deep copy from variablesData
-        updatedVariablesData.isVariablesLoading =
-          variablesData.isVariablesLoading;
-        updatedVariablesData.values = JSON.parse(
-          JSON.stringify(variablesData.values),
-        );
+        updatedVariablesData.isVariablesLoading = variablesData.isVariablesLoading;
+        updatedVariablesData.values = JSON.parse(JSON.stringify(variablesData.values));
       }
     };
 
@@ -441,7 +502,7 @@ export default defineComponent({
     });
     // ======= [END] default variable values
 
-    const metaData = ref(null);
+    const metaData = ref<Record<string, any> | null>(null);
     const showViewPanel = ref(false);
     const metaDataValue = (metadata: any) => {
       metaData.value = metadata;
@@ -466,9 +527,7 @@ export default defineComponent({
           // Trigger chart update with loaded variables
           if (editMode.value || !isInitialDashboardPanelData()) {
             // Copy the panel data to trigger chart render with initial variables
-            chartData.value = JSON.parse(
-              JSON.stringify(dashboardPanelData.data),
-            );
+            chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
             panelEditorRef.value?.initChartData(dashboardPanelData.data);
           }
         }
@@ -529,14 +588,31 @@ export default defineComponent({
       panelId: currentPanelId.value,
     }));
 
-    // this is used to activate the watcher only after on mounted
-    let isPanelConfigWatcherActivated = false;
-    const isPanelConfigChanged = ref(false);
+    let isUnsavedTrackingActive = false;
+    let panelBaseline: unknown = null;
 
-    const savePanelData = useLoading(async () => {
+    // Mutations before the user's first input are the editor loading itself (defaults, stream auto-select), not edits.
+    const captureBaselineOnFirstInput = () => {
+      if (isUnsavedTrackingActive && panelBaseline === null) {
+        panelBaseline = JSON.parse(JSON.stringify(dashboardPanelData.data));
+      }
+    };
+
+    const hasUnsavedChanges = () =>
+      isUnsavedTrackingActive &&
+      panelBaseline !== null &&
+      !isEqual(panelBaseline, JSON.parse(JSON.stringify(dashboardPanelData.data)));
+
+    // @submit fires only after the schema passes (title required+trim). Write
+    // the validated `value` into the editor state, then run the existing save
+    // (which reads dashboardPanelData + does the deeper validatePanel checks).
+    // OForm awaits this → the header Save button shows its spinner from the
+    // form's isSubmitting.
+    const onSave = async (value: AddPanelForm) => {
+      dashboardPanelData.data.title = value.title;
       const dashboardId = route.query.dashboard + "";
       await savePanelChangesToDashboard(dashboardId);
-    });
+    };
 
     onUnmounted(async () => {
       // clear a few things
@@ -544,6 +620,8 @@ export default defineComponent({
 
       // remove beforeUnloadHandler event listener
       window.removeEventListener("beforeunload", beforeUnloadHandler);
+      window.removeEventListener("pointerdown", captureBaselineOnFirstInput, true);
+      window.removeEventListener("keydown", captureBaselineOnFirstInput, true);
 
       removeAiContextHandler();
 
@@ -574,13 +652,10 @@ export default defineComponent({
         );
 
         try {
-          Object.assign(
-            dashboardPanelData.data,
-            JSON.parse(JSON.stringify(panelData ?? {})),
-          );
+          Object.assign(dashboardPanelData.data, JSON.parse(JSON.stringify(panelData ?? {})));
 
-          // FIX: For custom_chart panels, ensure customQuery flag is always true
-          // This prevents the query from being lost due to watchers that fire during mount
+          // For custom_chart panels, ensure customQuery flag is always true.
+          // This prevents the query from being lost due to watchers that fire during mount.
           if (dashboardPanelData.data.type === "custom_chart") {
             dashboardPanelData.data.queries.forEach((query: any) => {
               if (query.query) {
@@ -593,31 +668,32 @@ export default defineComponent({
           console.error("Error while parsing panel data", e);
         }
 
-        // check if vrl function exists
-        if (
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].vrlFunctionQuery
-        ) {
-          // enable vrl function editor
-          dashboardPanelData.layout.vrlFunctionToggle = true;
+        const queryCount = dashboardPanelData.data.queries?.length ?? 0;
+        if (dashboardPanelData.layout.currentQueryIndex >= queryCount) {
+          dashboardPanelData.layout.currentQueryIndex = queryCount > 0 ? queryCount - 1 : 0;
         }
+
+        // Set the VRL toggle for the active query: on iff it has a VRL function.
+        dashboardPanelData.layout.vrlFunctionToggle = isQueryVrlEnabled(
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex],
+        );
 
         await nextTick();
         // Initialize PanelEditor's chartData after loading panel data
         panelEditorRef.value?.initChartData(dashboardPanelData.data);
-        updateDateTime(selectedDate.value);
+        updateDateTime();
       } else {
         editMode.value = false;
         resetDashboardPanelDataAndAddTimeField();
         // Initialize PanelEditor's chartData as empty for new panel
         panelEditorRef.value?.initChartData({});
         // set the value of the date time after the reset
-        updateDateTime(selectedDate.value);
+        updateDateTime();
       }
-      // let it call the wathcers and then mark the panel config watcher as activated
       await nextTick();
-      isPanelConfigWatcherActivated = true;
+      isUnsavedTrackingActive = true;
+      window.addEventListener("pointerdown", captureBaselineOnFirstInput, true);
+      window.addEventListener("keydown", captureBaselineOnFirstInput, true);
 
       //event listener before unload and data is updated
       window.addEventListener("beforeunload", beforeUnloadHandler);
@@ -627,9 +703,7 @@ export default defineComponent({
       // Only generate SQL if we're in auto query mode
       if (
         !editMode.value &&
-        !dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].customQuery
+        !dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].customQuery
       ) {
         await makeAutoSQLQuery();
       }
@@ -650,9 +724,8 @@ export default defineComponent({
     // Watch for stream or query type changes and update context provider
     watch(
       () => [
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.stream,
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.stream,
         dashboardPanelData.data.queryType,
         dashboardPanelData.layout.currentQueryIndex,
       ],
@@ -678,11 +751,7 @@ export default defineComponent({
      * Retrieves the selected date from the query parameters.
      */
     const getSelectedDateFromQueryParams = (params: any) => ({
-      valueType: params.period
-        ? "relative"
-        : params.from && params.to
-          ? "absolute"
-          : "relative",
+      valueType: params.period ? "relative" : params.from && params.to ? "absolute" : "relative",
       startTime: params.from ? params.from : null,
       endTime: params.to ? params.to : null,
       relativeTimePeriod: params.period ? params.period : "15m",
@@ -691,11 +760,7 @@ export default defineComponent({
     const loadDashboard = async () => {
       let data = JSON.parse(
         JSON.stringify(
-          (await getDashboard(
-            store,
-            route.query.dashboard,
-            route.query.folder ?? "default",
-          )) ?? {},
+          (await getDashboard(store, route.query.dashboard, route.query.folder ?? "default")) ?? {},
         ),
       );
 
@@ -721,19 +786,14 @@ export default defineComponent({
         );
 
         // Mark current tab and panel as visible so their variables can load
-        const tabId =
-          (route.query.tab as string) ??
-          currentDashboardData.data?.tabs?.[0]?.tabId;
+        const tabId = (route.query.tab as string) ?? currentDashboardData.data?.tabs?.[0]?.tabId;
         if (tabId) {
           variablesManager.setTabVisibility(tabId, true);
         }
 
         // In edit mode, mark the panel as visible
         if (route.query.panelId) {
-          variablesManager.setPanelVisibility(
-            route.query.panelId as string,
-            true,
-          );
+          variablesManager.setPanelVisibility(route.query.panelId as string, true);
         } else {
           // In add mode (new panel), mark "current_panel" as visible
           // This allows variables scoped to "current_panel" to load
@@ -753,12 +813,9 @@ export default defineComponent({
       }
 
       // if variables data is null, set it to empty list
-      if (
-        !(
-          currentDashboardData.data?.variables &&
-          currentDashboardData.data?.variables?.list.length
-        )
-      ) {
+      if (!(
+        currentDashboardData.data?.variables && currentDashboardData.data?.variables?.list.length
+      )) {
         variablesData.isVariablesLoading = false;
         variablesData.values = [];
       }
@@ -766,8 +823,7 @@ export default defineComponent({
       // Capture initial variable names on first load (only once during mount)
       if (initialVariableNames.value.length === 0) {
         initialVariableNames.value =
-          currentDashboardData.data?.variables?.list?.map((v: any) => v.name) ||
-          [];
+          currentDashboardData.data?.variables?.list?.map((v: any) => v.name) || [];
       }
 
       // check if route has time related query params
@@ -775,23 +831,19 @@ export default defineComponent({
       if (!((route.query.from && route.query.to) || route.query.period)) {
         // if dashboard has relative time settings
         if (
-          (currentDashboardData.data?.defaultDatetimeDuration?.type ??
-            "relative") === "relative"
+          (currentDashboardData.data?.defaultDatetimeDuration?.type ?? "relative") === "relative"
         ) {
           selectedDate.value = {
             valueType: "relative",
             relativeTimePeriod:
-              currentDashboardData.data?.defaultDatetimeDuration
-                ?.relativeTimePeriod ?? "15m",
+              currentDashboardData.data?.defaultDatetimeDuration?.relativeTimePeriod ?? "15m",
           };
         } else {
           // else, dashboard will have absolute time settings
           selectedDate.value = {
             valueType: "absolute",
-            startTime:
-              currentDashboardData.data?.defaultDatetimeDuration?.startTime,
-            endTime:
-              currentDashboardData.data?.defaultDatetimeDuration?.endTime,
+            startTime: currentDashboardData.data?.defaultDatetimeDuration?.startTime,
+            endTime: currentDashboardData.data?.defaultDatetimeDuration?.endTime,
           };
         }
       } else {
@@ -799,8 +851,8 @@ export default defineComponent({
         selectedDate.value = getSelectedDateFromQueryParams(route.query);
       }
 
-      // v4.0: In edit mode, if panel has panel-specific time, pre-populate
-      // the date picker so the user sees the same time context as view mode
+      // In edit mode, if panel has panel-specific time, pre-populate the date
+      // picker so the user sees the same time context as view mode.
       // Priority: URL panel params > saved panel_time_range > global (already set above)
       if (editMode.value) {
         const panelId = route.query.panelId as string;
@@ -823,12 +875,8 @@ export default defineComponent({
           };
         } else if (dashboardPanelData.data.config?.panel_time_range) {
           // Priority 2: Panel's saved config time
-          const panelTimeRange =
-            dashboardPanelData.data.config.panel_time_range;
-          if (
-            panelTimeRange.type === "relative" &&
-            panelTimeRange.relativeTimePeriod
-          ) {
+          const panelTimeRange = dashboardPanelData.data.config.panel_time_range;
+          if (panelTimeRange.type === "relative" && panelTimeRange.relativeTimePeriod) {
             selectedDate.value = {
               valueType: "relative",
               relativeTimePeriod: panelTimeRange.relativeTimePeriod,
@@ -858,8 +906,7 @@ export default defineComponent({
         dashboardPanelData.data.queries[0].fields?.breakdown?.length == 0 &&
         dashboardPanelData.data.queries[0].fields.y.length == 0 &&
         dashboardPanelData.data.queries[0].fields.z.length == 0 &&
-        dashboardPanelData.data.queries[0].fields.filter.conditions.length ==
-          0 &&
+        dashboardPanelData.data.queries[0].fields.filter.conditions.length == 0 &&
         dashboardPanelData.data.queries.length == 1
       );
     };
@@ -867,6 +914,8 @@ export default defineComponent({
     const isOutDated = computed(() => {
       //check that is it addpanel initial call
       if (isInitialDashboardPanelData() && !editMode.value) return false;
+      // chartData not yet initialized — don't show "not up to date" banner
+      if (!chartData.value) return false;
       //compare chartdata and dashboardpaneldata and variables data as well
 
       const normalizeVariables = (obj: any) => {
@@ -934,7 +983,10 @@ export default defineComponent({
         panelEditorRef.value?.initChartData(dashboardPanelData.data);
       },
     );
-    const dateTimeForVariables = ref(null);
+    const dateTimeForVariables = ref<{
+      start_time: Date;
+      end_time: Date;
+    } | null>(null);
 
     const setTimeForVariables = () => {
       const date = dateTimePickerRef.value?.getConsumableDateTime();
@@ -948,7 +1000,7 @@ export default defineComponent({
       };
     };
     watch(selectedDate, () => {
-      updateDateTime(selectedDate.value);
+      updateDateTime();
     });
     // Watch for panel-level time configuration changes and update URL
     watch(
@@ -975,10 +1027,7 @@ export default defineComponent({
         // Update URL with panel time parameters
         const query = { ...route.query };
 
-        if (
-          newPanelTime.type === "relative" &&
-          newPanelTime.relativeTimePeriod
-        ) {
+        if (newPanelTime.type === "relative" && newPanelTime.relativeTimePeriod) {
           // Relative time: pt-period.{panelId}={relativeTimePeriod}
           query[`pt-period.${panelId}`] = newPanelTime.relativeTimePeriod;
           // Remove absolute time params if they exist
@@ -1017,8 +1066,7 @@ export default defineComponent({
           dashboardPanelData.layout.querySplitter = 41;
         } else {
           if (expandedSplitterHeight.value !== null) {
-            dashboardPanelData.layout.querySplitter =
-              expandedSplitterHeight.value;
+            dashboardPanelData.layout.querySplitter = expandedSplitterHeight.value;
           }
         }
       },
@@ -1026,10 +1074,8 @@ export default defineComponent({
 
     const runQuery = (withoutCache = false) => {
       try {
-        if (!isValid(true, true)) {
-          // do not return if query is not valid
-          // allow to fire query
-        }
+        // PanelEditor.runQuery shows the toast on Apply.
+        isValid(true, true, false);
 
         // should use cache flag
         shouldRefreshWithoutCache.value = withoutCache;
@@ -1043,7 +1089,7 @@ export default defineComponent({
         panelEditorRef.value?.initChartData(dashboardPanelData.data);
         // refresh the date time based on current time if relative date is selected
         dateTimePickerRef.value && dateTimePickerRef.value.refresh();
-        updateDateTime(selectedDate.value);
+        updateDateTime();
 
         // Call PanelEditor's runQuery if available
         if (panelEditorRef.value) {
@@ -1073,15 +1119,15 @@ export default defineComponent({
       }
     };
 
-    const updateDateTime = (value: object) => {
+    const updateDateTime = () => {
       if (selectedDate.value && dateTimePickerRef?.value) {
         // CRITICAL: Clear panelIdToBeRefreshed to ensure panel refreshes
         // In add/edit panel mode, when time changes, this panel should always refresh
         panelIdToBeRefreshed.value = null;
 
-        // v4.0: In add/edit panel mode, ALWAYS use global date time picker for chart rendering
-        // Config date time (panel_time_range) is ONLY saved for view mode default
-        // Never use panel_time_range for chart rendering in edit mode
+        // In add/edit panel mode, ALWAYS use global date time picker for chart rendering.
+        // Config date time (panel_time_range) is ONLY saved for view mode default.
+        // Never use panel_time_range for chart rendering in edit mode.
         const date = dateTimePickerRef.value?.getConsumableDateTime();
         const effectiveTime = {
           start_time: new Date(date.startTime),
@@ -1116,10 +1162,9 @@ export default defineComponent({
         variablesCreatedInSession.value.length > 0 &&
         currentDashboardData.data?.variables?.list
       ) {
-        currentDashboardData.data.variables.list =
-          currentDashboardData.data.variables.list.filter(
-            (v: any) => !variablesCreatedInSession.value.includes(v.name),
-          );
+        currentDashboardData.data.variables.list = currentDashboardData.data.variables.list.filter(
+          (v: any) => !variablesCreatedInSession.value.includes(v.name),
+        );
       }
 
       // Clear the tracking arrays
@@ -1138,20 +1183,9 @@ export default defineComponent({
       });
     };
 
-    //watch dashboardpaneldata when changes, isUpdated will be true
-    watch(
-      () => dashboardPanelData.data,
-      () => {
-        if (isPanelConfigWatcherActivated) {
-          isPanelConfigChanged.value = true;
-        }
-      },
-      { deep: true },
-    );
-
     const beforeUnloadHandler = (e: any) => {
       //check is data updated or not
-      if (isPanelConfigChanged.value) {
+      if (hasUnsavedChanges()) {
         // Display a confirmation message
         const confirmMessage = t("dashboard.unsavedMessage"); // Some browsers require a return statement to display the message
         e.returnValue = confirmMessage;
@@ -1172,7 +1206,7 @@ export default defineComponent({
       }
 
       // else continue to warn user
-      if (from.path === "/dashboards/add_panel" && isPanelConfigChanged.value) {
+      if (from.path === "/dashboards/add_panel" && hasUnsavedChanges()) {
         const confirmMessage = t("dashboard.unsavedMessage");
         if (window.confirm(confirmMessage)) {
           // User confirmed navigation - clean up variables created during this session
@@ -1203,28 +1237,24 @@ export default defineComponent({
     });
 
     //validate the data
-    const isValid = (onlyChart = false, isFieldsValidationRequired = true) => {
+    const isValid = (onlyChart = false, isFieldsValidationRequired = true, notify = true) => {
       const errors = errorData.errors;
       errors.splice(0);
       const dashboardData = dashboardPanelData;
 
       // check if name of panel is there
       if (!onlyChart) {
-        if (
-          dashboardData.data.title == null ||
-          dashboardData.data.title.trim() == ""
-        ) {
-          errors.push("Name of Panel is required");
+        if (dashboardData.data.title == null || dashboardData.data.title.trim() == "") {
+          errors.push(t("dashboard.addPanel.nameOfPanelRequired"));
         }
       }
 
       // will push errors in errors array
       validatePanel(errors, isFieldsValidationRequired);
 
-      if (errors.length) {
-        showErrorNotification(
-          "There are some errors, please fix them and try again",
-        );
+      if (errors.length && notify) {
+        // This view's `errorData` is rendered nowhere, so the toast is all the user gets.
+        showErrorNotification(raw(errors.join(", ")));
       }
 
       if (errors.length) {
@@ -1235,13 +1265,9 @@ export default defineComponent({
     };
 
     const savePanelChangesToDashboard = async (dashId: string) => {
-      if (
-        dashboardPanelData.data.type === "custom_chart" &&
-        errorData.errors.length > 0
-      ) {
-        showErrorNotification(
-          "There are some errors, please fix them and try again",
-        );
+      // Left generic: these errors are never cleared before this guard, so they can be stale.
+      if (dashboardPanelData.data.type === "custom_chart" && errorData.errors.length > 0) {
+        showErrorNotification(t("dashboard.addPanel.fixErrors"));
         return;
       }
       if (!isValid(false, true)) {
@@ -1269,9 +1295,7 @@ export default defineComponent({
 
             // Update the panel data in currentDashboardData
             const tab = currentDashboardData.data.tabs.find(
-              (t: any) =>
-                t.tabId ===
-                (route.query.tab ?? currentDashboardData.data.tabs[0].tabId),
+              (t: any) => t.tabId === (route.query.tab ?? currentDashboardData.data.tabs[0].tabId),
             );
             if (tab) {
               const panelIndex = tab.panels.findIndex(
@@ -1293,8 +1317,9 @@ export default defineComponent({
 
             if (errorMessageOnSave instanceof Error) {
               errorData.errors.push(
-                "Error saving panel configuration : " +
-                  errorMessageOnSave.message,
+                t("dashboard.addPanel.errorSavingPanelConfig", {
+                  message: errorMessageOnSave.message,
+                }),
               );
               return;
             }
@@ -1309,15 +1334,15 @@ export default defineComponent({
             );
             if (errorMessageOnSave instanceof Error) {
               errorData.errors.push(
-                "Error saving panel configuration : " +
-                  errorMessageOnSave.message,
+                t("dashboard.addPanel.errorSavingPanelConfig", {
+                  message: errorMessageOnSave.message,
+                }),
               );
               return;
             }
           }
         } else {
-          const panelId =
-            "Panel_ID" + Math.floor(Math.random() * (99999 - 10 + 1)) + 10;
+          const panelId = "Panel_ID" + Math.floor(Math.random() * (99999 - 10 + 1)) + 10;
 
           dashboardPanelData.data.id = panelId;
           chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
@@ -1351,9 +1376,7 @@ export default defineComponent({
             variablesCreatedInSession.value.length > 0
               ? variablesCreatedInSession.value
                   .map((name: string) =>
-                    currentDashboardData.data?.variables?.list?.find(
-                      (v: any) => v.name === name,
-                    ),
+                    currentDashboardData.data?.variables?.list?.find((v: any) => v.name === name),
                   )
                   .filter((v: any) => v !== undefined)
               : undefined;
@@ -1369,15 +1392,24 @@ export default defineComponent({
           );
           if (errorMessageOnSave instanceof Error) {
             errorData.errors.push(
-              "Error saving panel configuration  : " +
-                errorMessageOnSave.message,
+              t("dashboard.addPanel.errorSavingPanelConfig2", {
+                message: errorMessageOnSave.message,
+              }),
             );
             return;
           }
         }
 
-        isPanelConfigWatcherActivated = false;
-        isPanelConfigChanged.value = false;
+        isUnsavedTrackingActive = false;
+
+        // The author sees the value just saved, not an older view-mode override of this panel.
+        clearExemplarOverride(
+          exemplarOverrideKey(
+            store.state.selectedOrganization.identifier,
+            dashId,
+            String(dashboardPanelData.data.id),
+          ),
+        );
 
         // Clear variables created during session since panel is being saved
         variablesCreatedInSession.value = [];
@@ -1400,15 +1432,16 @@ export default defineComponent({
             error?.response?.data?.message ??
               error?.message ??
               (editMode.value
-                ? "Error while updating panel"
-                : "Error while creating panel"),
+                ? t("dashboard.addPanel.errorUpdatingPanel")
+                : t("dashboard.addPanel.errorCreatingPanel")),
+            t,
           );
         } else {
           showErrorNotification(
             error?.message ??
               (editMode.value
-                ? "Error while updating panel"
-                : "Error while creating panel"),
+                ? t("dashboard.addPanel.errorUpdatingPanel")
+                : t("dashboard.addPanel.errorCreatingPanel")),
             {
               timeout: 2000,
             },
@@ -1420,18 +1453,32 @@ export default defineComponent({
     const expandedSplitterHeight = ref(null);
 
     const handleChartApiError = (errorMsg: any) => {
-      if (typeof errorMsg === "string") {
-        errorMessage.value = errorMsg;
+      const errorText = typeof errorMsg === "string" ? errorMsg : (errorMsg?.message ?? "");
+
+      if (errorText) {
+        errorMessage.value = errorText;
         const errorList = errorData.errors ?? [];
         errorList.splice(0);
-        errorList.push(errorMsg);
-      } else if (errorMsg?.message) {
-        errorMessage.value = errorMsg.message ?? "";
-        const errorList = errorData.errors ?? [];
-        errorList.splice(0);
-        errorList.push(errorMsg.message);
+        errorList.push(errorText);
       } else {
         errorMessage.value = "";
+      }
+
+      // Locate the offending token in the query and squiggle it in the editor
+      // (shares the central engine; message text carries the DataFusion detail).
+      if (!errorText) {
+        dashboardSqlErrorRanges.value = [];
+      } else {
+        const idx = dashboardPanelData.layout.currentQueryIndex;
+        const currentQuery = dashboardPanelData.data.queries?.[idx];
+        rangesFromServerError({
+          message: errorText,
+          sqlMode: dashboardPanelData.data.queryType === "sql",
+          query: currentQuery?.query,
+          streamName: currentQuery?.fields?.stream,
+        }).then((ranges) => {
+          dashboardSqlErrorRanges.value = ranges;
+        });
       }
     };
 
@@ -1464,10 +1511,7 @@ export default defineComponent({
     });
 
     // provide variablesAndPanelsDataLoadingState to share data between components
-    provide(
-      "variablesAndPanelsDataLoadingState",
-      variablesAndPanelsDataLoadingState,
-    );
+    provide("variablesAndPanelsDataLoadingState", variablesAndPanelsDataLoadingState);
 
     // provide runQuery to allow child components (like QueryEditor AI bar) to trigger query execution
     provide("runQuery", runQuery);
@@ -1479,7 +1523,7 @@ export default defineComponent({
 
       return searchIds.flat() as string[];
     });
-    const { traceIdRef, cancelQuery } = useCancelQuery();
+    const { traceIdRef, cancelQuery } = useCancelQuery(t);
 
     const cancelAddPanelQuery = () => {
       traceIdRef.value = searchRequestTraceIds.value;
@@ -1489,9 +1533,7 @@ export default defineComponent({
     const disable = ref(false);
 
     watch(variablesAndPanelsDataLoadingState, () => {
-      const panelsValues = Object.values(
-        variablesAndPanelsDataLoadingState.panels,
-      );
+      const panelsValues = Object.values(variablesAndPanelsDataLoadingState.panels);
       disable.value = panelsValues.some((item: any) => item === true);
     });
 
@@ -1505,24 +1547,9 @@ export default defineComponent({
 
     // [END] cancel running queries
 
-    const inputStyle = computed(() => {
-      if (!dashboardPanelData.data.title) {
-        return { width: "200px" };
-      }
-
-      const contentWidth = Math.min(
-        dashboardPanelData.data.title.length * 8 + 60,
-        400,
-      );
-      return { width: `${contentWidth}px` };
-    });
-
-    const debouncedUpdateChartConfig = debounce((newVal, oldVal) => {
+    const debouncedUpdateChartConfig = debounce((newVal) => {
       if (!isEqual(chartData.value, newVal)) {
-        const configNeedsApiCall = checkIfConfigChangeRequiredApiCallOrNot(
-          chartData.value,
-          newVal,
-        );
+        const configNeedsApiCall = checkIfConfigChangeRequiredApiCallOrNot(chartData.value, newVal);
 
         if (!configNeedsApiCall) {
           chartData.value = JSON.parse(JSON.stringify(newVal));
@@ -1545,48 +1572,41 @@ export default defineComponent({
     };
 
     const getContext = async () => {
-      return new Promise(async (resolve, reject) => {
-        try {
-          const isAddPanelPage = router.currentRoute.value.name === "addPanel";
+      try {
+        const isAddPanelPage = router.currentRoute.value.name === "addPanel";
 
-          const isStreamSelectedInDashboardPage =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.stream;
+        const isStreamSelectedInDashboardPage =
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .stream;
 
-          if (!isAddPanelPage || !isStreamSelectedInDashboardPage) {
-            resolve("");
-            return;
-          }
-
-          const payload = {};
-
-          const stream =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.stream;
-
-          const streamType =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.stream_type;
-
-          if (!streamType || !stream?.length) {
-            resolve("");
-            return;
-          }
-
-          const schema = await getStream(stream, streamType, true);
-
-          payload["stream_name"] = stream;
-          payload["schema"] = schema.uds_schema || schema.schema || [];
-
-          resolve(payload);
-        } catch (error) {
-          console.error("Error in getContext for add panel page", error);
-          resolve("");
+        if (!isAddPanelPage || !isStreamSelectedInDashboardPage) {
+          return "";
         }
-      });
+
+        const payload: Record<string, unknown> = {};
+
+        const stream =
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .stream;
+
+        const streamType =
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .stream_type;
+
+        if (!streamType || !stream?.length) {
+          return "";
+        }
+
+        const schema = await getStream(stream, streamType, true);
+
+        payload["stream_name"] = stream;
+        payload["schema"] = schema.uds_schema || schema.schema || [];
+
+        return payload;
+      } catch (error) {
+        console.error("Error in getContext for add panel page", error);
+        return "";
+      }
     };
 
     const removeAiContextHandler = () => {
@@ -1597,10 +1617,7 @@ export default defineComponent({
 
     // Computed properties for current tab and panel IDs
     const currentTabId = computed(() => {
-      return (
-        (route.query.tab as string) ??
-        currentDashboardData.data?.tabs?.[0]?.tabId
-      );
+      return (route.query.tab as string) ?? currentDashboardData.data?.tabs?.[0]?.tabId;
     });
 
     const currentPanelId = computed(() => {
@@ -1649,9 +1666,7 @@ export default defineComponent({
 
       if (isEdit) {
         // Find and update
-        const index = variablesList.findIndex(
-          (v: any) => v.name === oldVariableName,
-        );
+        const index = variablesList.findIndex((v: any) => v.name === oldVariableName);
         if (index !== -1) {
           variablesList[index] = variableData;
           // Also update tracking
@@ -1659,16 +1674,14 @@ export default defineComponent({
             variablesCreatedInSession.value.includes(oldVariableName) &&
             oldVariableName !== variableData.name
           ) {
-            const trackIndex =
-              variablesCreatedInSession.value.indexOf(oldVariableName);
+            const trackIndex = variablesCreatedInSession.value.indexOf(oldVariableName);
             variablesCreatedInSession.value[trackIndex] = variableData.name;
           }
           if (
             variablesWithCurrentPanel.value.includes(oldVariableName) &&
             oldVariableName !== variableData.name
           ) {
-            const trackIndex =
-              variablesWithCurrentPanel.value.indexOf(oldVariableName);
+            const trackIndex = variablesWithCurrentPanel.value.indexOf(oldVariableName);
             variablesWithCurrentPanel.value[trackIndex] = variableData.name;
           }
         }
@@ -1684,8 +1697,7 @@ export default defineComponent({
       isAddVariableOpen.value = false;
 
       // Update variablesWithCurrentPanel tracking
-      const usesCurrentPanel =
-        variableData.panels && variableData.panels.includes("current_panel");
+      const usesCurrentPanel = variableData.panels && variableData.panels.includes("current_panel");
       if (usesCurrentPanel) {
         if (!variablesWithCurrentPanel.value.includes(variableData.name)) {
           variablesWithCurrentPanel.value.push(variableData.name);
@@ -1701,10 +1713,7 @@ export default defineComponent({
       selectedVariableToEdit.value = null;
 
       // Re-initialize manager with updated list
-      await variablesManager.initialize(
-        variablesList,
-        currentDashboardData.data,
-      );
+      await variablesManager.initialize(variablesList, currentDashboardData.data);
 
       // Restore visibility
       // 1. Tab visibility
@@ -1715,10 +1724,7 @@ export default defineComponent({
 
       // 2. Panel visibility (Edit Mode)
       if (editMode.value && route.query.panelId) {
-        variablesManager.setPanelVisibility(
-          route.query.panelId as string,
-          true,
-        );
+        variablesManager.setPanelVisibility(route.query.panelId as string, true);
       } else {
         // 3. Panel visibility (Add Mode - current_panel)
         // In add mode, mark "current_panel" as visible so variables can load
@@ -1738,26 +1744,33 @@ export default defineComponent({
       // the new variables from the manager through their computed properties
     };
 
-    const isPartialData = ref(false);
-    const isPanelLoading = ref(false);
-    const isCachedDataDifferWithCurrentTimeRange = ref(false);
-
-    const handleIsPartialDataUpdate = (data: boolean) => {
-      isPartialData.value = data;
-    };
-
-    const handleLoadingStateChange = (data: boolean) => {
-      isPanelLoading.value = data;
-    };
-
-    const handleIsCachedDataDifferWithCurrentTimeRangeUpdate = (
-      data: boolean,
-    ) => {
-      isCachedDataDifferWithCurrentTimeRange.value = data;
-    };
+    // ── Keyboard shortcuts ────────────────────────
+    useShortcuts([
+      {
+        id: "panelEditorRun",
+        handler: () => runQuery(false),
+      },
+      {
+        id: "panelEditorSave",
+        // our save is form-driven: submitting runs validation + onSave
+        handler: () => form.handleSubmit(),
+      },
+      {
+        id: "panelEditorBack",
+        handler: () => goBack(),
+      },
+      {
+        id: "panelEditorQueryInspector",
+        handler: () => {
+          if (isInputFocused()) return;
+          showViewPanel.value = true;
+        },
+      },
+    ]);
 
     return {
       t,
+      isMobile,
       updateDateTime,
       goBack,
       savePanelChangesToDashboard,
@@ -1776,7 +1789,9 @@ export default defineComponent({
       variablesData,
       liveVariablesData,
       updatedVariablesData,
-      savePanelData,
+      onSave,
+      form,
+      isSavingPanel,
       resetAggregationFunction,
       isOutDated,
       store,
@@ -1795,7 +1810,7 @@ export default defineComponent({
       cancelAddPanelQuery,
       disable,
       config,
-      inputStyle,
+      panelAutoName,
       setTimeForVariables,
       dateTimeForVariables,
       seriesData,
@@ -1816,58 +1831,9 @@ export default defineComponent({
     };
   },
   methods: {
-    goBackToDashboardList(evt: any, row: any) {
+    goBackToDashboardList() {
       this.goBack();
     },
   },
 });
 </script>
-
-<style lang="scss" scoped>
-.dynamic-input {
-  min-width: 200px;
-  max-width: 500px;
-  transition: width 0.2s ease;
-}
-
-.add-variable-drawer-overlay {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background-color: rgba(0, 0, 0, 0.5);
-  z-index: 6000;
-  display: flex;
-  justify-content: flex-end;
-}
-
-.add-variable-drawer-panel {
-  width: 900px;
-  height: 100vh;
-  background-color: white;
-  box-shadow: -2px 0 8px rgba(0, 0, 0, 0.15);
-  overflow: hidden;
-  border-radius: 0 !important;
-
-  :deep(.column.full-height) {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-  }
-
-  :deep(.scrollable-content) {
-    max-height: calc(100vh - 140px);
-    overflow-y: auto;
-  }
-
-  :deep(.sticky-footer) {
-    padding: 6px 6px;
-    margin-top: auto;
-  }
-}
-
-.theme-dark .add-variable-drawer-panel {
-  background-color: #1a1a1a;
-}
-</style>

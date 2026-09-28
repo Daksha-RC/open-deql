@@ -1,14 +1,18 @@
-import { ref, markRaw, Ref } from "vue";
+import { ref, Ref } from "vue";
 import { useRouter } from "vue-router";
 import config from "@/aws-exports";
 import { useStore } from "vuex";
 
-import { getUserInfo, getImageURL, useLocalOrganization, invalidateLoginData, useLocalCurrentUser, useLocalUserInfo } from "@/utils/zincutils";
+import {
+  getUserInfo,
+  getImageURL,
+  useLocalOrganization,
+  invalidateLoginData,
+  useLocalCurrentUser,
+  useLocalUserInfo,
+} from "@/utils/zincutils";
 import organizationService from "@/services/organizations";
-import billingService from "@/services/billings";
 import userService from "@/services/users";
-import PipelineIcon from "@/components/icons/PipelineIcon.vue";
-import { Network } from "lucide-vue-next";
 
 const MainLayoutCloudMixin = {
   setup() {
@@ -23,21 +27,29 @@ const MainLayoutCloudMixin = {
      * @returns linksList.value
      */
     const leftNavigationLinks = (linksList: any, t: any) => {
-      linksList.value.splice(5, 0, {
-        title: t("menu.pipeline"),
-        iconComponent: markRaw(Network),
-        link: "/pipeline",
-        name: "pipeline",
-      });
+      if (!linksList.value.some((link: any) => link.name === "pipeline")) {
+        const dashboardIndex = linksList.value.findIndex((link: any) => link.name === "dashboards");
+        const insertAt = dashboardIndex === -1 ? linksList.value.length : dashboardIndex;
+        linksList.value.splice(insertAt, 0, {
+          title: t("menu.pipeline"),
+          icon: "graph-2",
+          link: "/pipeline",
+          name: "pipeline",
+        });
+      }
 
-      if(!store.state.zoConfig?.custom_hide_menus
-          ?.split(",")
-          ?.includes("billings")
+      const billingsExists = linksList.value.some((link: any) => link.name === "billings");
+      if (
+        !billingsExists &&
+        !store.state.zoConfig?.custom_hide_menus?.split(",")?.includes("billings")
       ) {
-        linksList.value.splice(10, 0, {
+        const settingsIndex = linksList.value.findIndex((link: any) => link.name === "settings");
+        const insertAt = settingsIndex === -1 ? linksList.value.length : settingsIndex;
+        linksList.value.splice(insertAt, 0, {
           title: t("menu.billings"),
           icon: "payments",
           link: "/billings",
+          name: "billings",
         });
       }
 
@@ -54,13 +66,7 @@ const MainLayoutCloudMixin = {
           store.dispatch("setOrganizations", res.data.data);
           const localOrg: any = useLocalOrganization();
           orgOptions.value = res.data.data.map(
-            (data: {
-              id: any;
-              name: any;
-              type: any;
-              identifier: any;
-              UserObj: any;
-            }) => {
+            (data: { id: any; name: any; type: any; identifier: any; UserObj: any }) => {
               const optiondata: any = {
                 label: data.name,
                 id: data.id,
@@ -74,9 +80,10 @@ const MainLayoutCloudMixin = {
                   store.state.userInfo.email == data.UserObj.email) ||
                 res.data.data.length == 1
               ) {
-                selectedOrg.value = localOrg.value && Object.keys(localOrg.value).length > 0
-                  ? localOrg.value
-                  : optiondata;
+                selectedOrg.value =
+                  localOrg.value && Object.keys(localOrg.value).length > 0
+                    ? localOrg.value
+                    : optiondata;
                 useLocalOrganization(selectedOrg.value);
                 store.dispatch("setSelectedOrganization", selectedOrg.value);
               }
@@ -96,9 +103,7 @@ const MainLayoutCloudMixin = {
       userService
         .getRefreshToken()
         .then((res) => {
-          const sessionUserInfo: any = getUserInfo(
-            "#id_token=" + res.data.data.id_token
-          );
+          const sessionUserInfo: any = getUserInfo("#id_token=" + res.data.data.id_token);
 
           const userInfo = sessionUserInfo !== null ? sessionUserInfo : null;
           if (userInfo !== null) {
@@ -114,8 +119,6 @@ const MainLayoutCloudMixin = {
           console.log("Error while fetching refresh token:", e);
         });
     };
-
-
 
     const signout = async () => {
       if (config.isEnterprise == "true") {

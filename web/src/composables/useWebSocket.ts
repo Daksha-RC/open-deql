@@ -1,17 +1,14 @@
 // useWebSocket.ts
 
 import { onBeforeUnmount } from "vue";
+import { patchLargeNumbersInJson } from "@/utils/nsFieldsPatch";
 
 type MessageHandler = (event: MessageEvent, socketId: string) => void;
 type OpenHandler = (event: Event, socketId: string) => void;
 type CloseHandler = (event: CloseEvent, socketId: string) => void;
 type ErrorHandler = (event: Event, socketId: string) => void;
 
-type WebSocketHandler =
-  | MessageHandler
-  | OpenHandler
-  | CloseHandler
-  | ErrorHandler;
+type WebSocketHandler = MessageHandler | OpenHandler | CloseHandler | ErrorHandler;
 type HandlerMap = Record<string, WebSocketHandler[]>;
 
 // Store WebSocket instances and their handlers by socketId
@@ -55,7 +52,9 @@ const onOpen = (socketId: string, event: Event) => {
 };
 
 const onMessage = (socketId: string, event: MessageEvent) => {
-  const data = JSON.parse(event.data);
+  // Patches large integers (any field, e.g. a user-defined `userid`, #14376) so
+  // JSON.parse can't silently round them.
+  const data = JSON.parse(patchLargeNumbersInJson(event.data));
 
   if (data.type === "error") {
     errorHandlers[socketId]?.forEach((handler) => handler(data, socketId));
@@ -66,16 +65,11 @@ const onMessage = (socketId: string, event: MessageEvent) => {
 };
 
 const onClose = (socketId: string, event: CloseEvent) => {
-  console.log("onClose", socketId, event.code, event.reason);
   clearInterval(pingIntervals[socketId]);
   delete pingIntervals[socketId];
   delete sockets[socketId];
 
   closeHandlers[socketId]?.forEach((handler) => handler(event, socketId));
-};
-
-const onError = (socketId: string, event: Event) => {
-  errorHandlers[socketId]?.forEach((handler) => handler(event, socketId));
 };
 
 // Message and handler functions
@@ -84,18 +78,11 @@ const sendMessage = (socketId: string, message: string) => {
   if (socket && socket.readyState === WebSocket.OPEN) {
     socket.send(message);
   } else {
-    console.error(
-      `WebSocket ${socketId} is not open. Ready state is:`,
-      socket?.readyState,
-    );
+    console.error(`WebSocket ${socketId} is not open. Ready state is:`, socket?.readyState);
   }
 };
 
-const addHandler = (
-  handlersMap: HandlerMap,
-  socketId: string,
-  handler: WebSocketHandler,
-) => {
+const addHandler = (handlersMap: HandlerMap, socketId: string, handler: WebSocketHandler) => {
   if (typeof handler !== "function") {
     throw new Error("Handler must be a function");
   }
@@ -104,11 +91,7 @@ const addHandler = (
   handlersMap[socketId].push(handler);
 };
 
-const removeHandler = (
-  handlersMap: HandlerMap,
-  socketId: string,
-  handler: WebSocketHandler,
-) => {
+const removeHandler = (handlersMap: HandlerMap, socketId: string, handler: WebSocketHandler) => {
   if (typeof handler !== "function") {
     throw new Error("Handler must be a function");
   }
@@ -122,9 +105,12 @@ const removeHandler = (
 
 const closeSocket = (socketId: string) => {
   const socket = sockets[socketId];
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-      // sendMessage(socketId, JSON.stringify({ type: "close" }));
-      socket.close(1000, "search cancelled");
+  if (
+    socket &&
+    (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)
+  ) {
+    // sendMessage(socketId, JSON.stringify({ type: "close" }));
+    socket.close(1000, "search cancelled");
   }
 };
 
@@ -139,7 +125,7 @@ const useWebSocket = () => {
   const cleanupSocket = (socketId: string) => {
     const socket = sockets[socketId];
 
-    if(!socket) {
+    if (!socket) {
       console.error("Cleanup socket failed, socket not found", socketId);
       return;
     }

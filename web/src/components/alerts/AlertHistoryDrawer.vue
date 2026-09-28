@@ -1,4 +1,4 @@
-<!-- Copyright 2026 OpenObserve Inc.
+﻿<!-- Copyright 2026 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,539 +15,409 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div
-    style="width: 55vw"
-    :class="store.state.theme === 'dark' ? 'bg-dark' : 'bg-white'"
+  <ODrawer
+    data-test="alert-history-drawer"
+    bleed
+    :open="open"
+    :width="65"
+    :title="alertDetails?.name"
+    :title-data-test="'alert-history-name-badge'"
+    :sub-title="t('alert_list.alert_history')"
+    @update:open="emit('update:open', $event)"
   >
-    <!-- Header — matches Stream Detail (schema.vue) layout -->
-    <q-card-section class="q-ma-none">
-      <div class="row items-center no-wrap">
-        <div class="col">
-          <div
-            class="tw:text-[18px] tw:flex tw:items-center"
-            data-test="alert-details-title"
-          >
+    <!-- The alert name is the drawer title and "History" its subtitle (matching
+         the other detail headers); the type badge + History/Condition toggle
+         trail in header-left, the datetime picker sits in header-right. -->
+    <template #header-left>
+      <div class="flex min-w-0 flex-1 items-center gap-2" data-test="alert-details-title">
+        <!-- Alert Type Badge -->
+        <div
+          v-if="alertDetails"
+          :class="[
+            'rounded-default flex shrink-0 items-center gap-1 border px-2 py-1',
+            'bg-surface-subtle border-border-default',
+          ]"
+        >
+          <OIcon
+            :name="isAnomaly ? 'query-stats' : alertDetails.is_real_time ? 'bolt' : 'schedule'"
+            size="sm"
+            class="opacity-70"
+          />
+          <span :class="['text-xs font-semibold', 'text-text-body']">
+            {{
+              isAnomaly
+                ? t("alerts.anomalyDetection")
+                : alertDetails.is_real_time
+                  ? t("common.realTime")
+                  : t("alerts.scheduled")
+            }}
+          </span>
+        </div>
+        <!-- Tab toggle -->
+        <OToggleGroup
+          class="shrink-0"
+          :model-value="activeTab"
+          @update:model-value="activeTab = $event as string"
+        >
+          <OToggleGroupItem value="history" size="sm" data-test="alert-history-tab-history">
+            <template #icon-left>
+              <OIcon name="history" size="sm" />
+            </template>
             {{ t("alert_list.alert_history") }}
-            <!-- Alert Name Badge -->
-            <span
-              v-if="alertDetails"
-              :class="[
-                'tw:font-bold tw:mr-2 tw:px-2 tw:py-1 tw:rounded-md tw:ml-2 tw:max-w-xs tw:truncate tw:inline-block',
-                store.state.theme === 'dark'
-                  ? 'tw:text-blue-400 tw:bg-blue-900/50'
-                  : 'tw:text-blue-600 tw:bg-blue-50',
-              ]"
-              data-test="alert-history-name-badge"
-            >
-              {{ alertDetails.name }}
-              <q-tooltip
-                v-if="alertDetails.name && alertDetails.name.length > 35"
-                class="tw:text-xs"
-              >
-                {{ alertDetails.name }}
-              </q-tooltip>
-            </span>
-            <!-- Alert Type Badge -->
-            <div
-              v-if="alertDetails"
-              :class="[
-                'tw:flex tw:items-center tw:gap-1 tw:px-2 tw:py-1 tw:rounded-md tw:border',
-                store.state.theme === 'dark'
-                  ? 'tw:bg-gray-800/50 tw:border-gray-600'
-                  : 'tw:bg-gray-50 tw:border-gray-200',
-              ]"
-            >
-              <q-icon
-                :name="
-                  isAnomaly
-                    ? 'query_stats'
-                    : alertDetails.is_real_time
-                      ? 'bolt'
-                      : 'schedule'
-                "
-                size="14px"
-                class="tw:opacity-70"
-              />
-              <span
-                :class="[
-                  'tw:text-xs tw:font-semibold',
-                  store.state.theme === 'dark'
-                    ? 'tw:text-gray-200'
-                    : 'tw:text-gray-800',
-                ]"
-              >
-                {{
-                  isAnomaly
-                    ? "Anomaly Detection"
-                    : alertDetails.is_real_time
-                      ? "Real-time"
-                      : "Scheduled"
-                }}
-              </span>
-            </div>
-            <!-- Tab toggle -->
-            <div
-              class="tab-toggle tw:shrink-0 tw:ml-4"
-              :class="
-                store.state.theme === 'dark'
-                  ? 'tab-toggle-dark'
-                  : 'tab-toggle-light'
-              "
-            >
-              <button
-                class="tab-toggle-btn"
-                :class="activeTab === 'history' ? 'tab-toggle-btn-active' : ''"
-                @click="activeTab = 'history'"
-                data-test="alert-history-tab-history"
-              >
-                <q-icon name="history" size="14px" />
-                History
-              </button>
-              <button
-                class="tab-toggle-btn"
-                :class="
-                  activeTab === 'condition' ? 'tab-toggle-btn-active' : ''
-                "
-                @click="activeTab = 'condition'"
-                data-test="alert-history-tab-condition"
-              >
-                <q-icon name="code" size="14px" />
-                Condition
-              </button>
-            </div>
-          </div>
-        </div>
-        <div class="col-auto tw:flex tw:items-center tw:gap-1">
-          <DateTime
-            :style="activeTab !== 'history' ? 'visibility: hidden' : ''"
-            ref="dateTimeRef"
-            auto-apply
-            :default-type="dateTimeType"
-            :default-absolute-time="{
-              startTime: absoluteTime.startTime,
-              endTime: absoluteTime.endTime,
-            }"
-            :default-relative-time="relativeTime"
-            data-test="alert-history-drawer-date-picker"
-            @on:date-change="updateDateTime"
-          />
-          <q-btn
-            v-close-popup="true"
-            round
-            flat
-            icon="cancel"
-            data-test="alert-details-close-btn"
-          />
-        </div>
+          </OToggleGroupItem>
+          <OToggleGroupItem value="condition" size="sm" data-test="alert-history-tab-condition">
+            <template #icon-left>
+              <OIcon name="code" size="sm" />
+            </template>
+            {{ t("common.condition") }}
+          </OToggleGroupItem>
+        </OToggleGroup>
       </div>
-    </q-card-section>
-    <q-separator />
+    </template>
+    <template #header-right>
+      <div class="col-auto flex items-center gap-1">
+        <DateTime
+          :class="activeTab !== 'history' ? 'invisible' : ''"
+          ref="dateTimeRef"
+          auto-apply
+          :default-type="dateTimeType"
+          :default-absolute-time="{
+            startTime: absoluteTime.startTime,
+            endTime: absoluteTime.endTime,
+          }"
+          :default-relative-time="relativeTime"
+          data-test="alert-history-drawer-date-picker"
+          @on:date-change="updateDateTime"
+        />
+      </div>
+    </template>
 
     <!-- Content -->
-    <div
-      class="tw:flex tw:flex-col"
-      style="height: calc(100vh - 60px); overflow: hidden"
-      v-if="alertDetails"
-    >
+    <div class="flex h-full min-h-0 flex-col" v-if="alertDetails">
       <!-- Tab Panels -->
-      <q-tab-panels
+      <OTabPanels
         v-model="activeTab"
         animated
-        class="tw:flex-1 tw:overflow-hidden tw:bg-transparent"
-        style="display: flex; flex-direction: column"
+        class="flex flex-1 flex-col overflow-hidden bg-transparent"
       >
         <!-- History Panel -->
-        <q-tab-panel
-          name="history"
-          class="tw:flex tw:flex-col tw:h-full tw:p-0 tw:overflow-hidden"
-        >
-          <div
-            class="tw:flex tw:flex-col tw:flex-1 tw:overflow-hidden tw:px-2 tw:pt-1"
-          >
-            <!-- Loading state -->
-            <div
-              v-if="isLoadingHistory"
-              class="tw:flex tw:flex-col tw:items-center tw:justify-center tw:flex-1 tw:gap-3"
-            >
-              <q-spinner-hourglass size="32px" color="primary" />
-              <div
-                class="tw:text-sm"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'tw:text-gray-400'
-                    : 'tw:text-gray-500'
-                "
-              >
-                {{ t("alerts.alertDetails.loadingHistory") }}
-              </div>
-            </div>
-
+        <OTabPanel name="history" layout="flex-col" stretch class="flex-1">
+          <div class="flex h-full flex-1 flex-col overflow-hidden px-2 py-2">
             <!-- Empty state -->
-            <div
-              v-else-if="alertHistory.length === 0"
-              class="tw:flex tw:flex-col tw:items-center tw:justify-center tw:flex-1 tw:gap-2"
-            >
-              <div
-                class="tw:w-14 tw:h-14 tw:rounded-full tw:flex tw:items-center tw:justify-center tw:mb-1"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'tw:bg-gray-800'
-                    : 'tw:bg-gray-100'
-                "
-              >
-                <q-icon
-                  name="history_toggle_off"
-                  size="28px"
-                  :color="store.state.theme === 'dark' ? 'grey-6' : 'grey-5'"
-                />
-              </div>
-              <div
-                class="tw:text-sm tw:font-medium"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'tw:text-gray-400'
-                    : 'tw:text-gray-600'
-                "
-              >
-                {{ t("alerts.alertDetails.noHistoryAvailable") }}
-              </div>
-              <div
-                class="tw:text-xs"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'tw:text-gray-600'
-                    : 'tw:text-gray-400'
-                "
-              >
-                Try expanding the time range
-              </div>
-            </div>
+            <OEmptyState
+              v-if="!isLoadingHistory && alertHistory.length === 0"
+              size="block"
+              illustration="history"
+              :title="t('alerts.alertDetails.noHistoryAvailable')"
+              :description="t('alerts.alertDetails.tryExpandingTimeRange')"
+              :hide-action="true"
+              class="flex-1"
+            />
 
             <!-- History Table -->
-            <div
-              v-else
-              class="code-block tw:flex tw:flex-col tw:flex-1 tw:overflow-hidden tw:mb-2"
-              :class="
-                store.state.theme === 'dark'
-                  ? 'code-block-dark'
-                  : 'code-block-light'
-              "
-            >
-              <q-table
-                ref="qTableRef"
-                :rows="alertHistory"
-                :columns="historyTableColumns"
-                row-key="timestamp"
-                v-model:pagination="pagination"
-                @request="onRequest"
-                style="flex: 1; overflow: hidden"
-                class="o2-quasar-table o2-row-md o2-quasar-table-header-sticky history-table"
-                data-test="alert-details-history-table"
-              >
-                <template v-slot:body="props">
-                  <q-tr :props="props" :class="getRowClass(props.row.status)">
-                    <q-td
-                      v-for="col in historyTableColumns"
-                      :key="col.name"
-                      :props="props"
-                    >
-                      <template v-if="col.name === '#'">
-                        <span
-                          class="tw:text-[13px] tw:tabular-nums"
-                          :class="
-                            store.state.theme === 'dark'
-                              ? 'tw:text-gray-500'
-                              : 'tw:text-gray-400'
-                          "
-                        >
-                          {{
-                            (currentPage - 1) * selectedPerPage +
-                            props.rowIndex +
-                            1
-                          }}
-                        </span>
-                      </template>
-                      <template v-else-if="col.name === 'status'">
-                        <q-chip
-                          dense
-                          size="sm"
-                          :icon="getStatusChipIcon(props.row.status)"
-                          :label="formatStatus(props.row.status)"
-                          :color="getStatusChipColor(props.row.status)"
-                          :text-color="getStatusChipTextColor(props.row.status)"
-                          class="tw:cursor-default"
-                          data-test="alert-history-status-chip"
-                        >
-                          <q-tooltip
-                            v-if="props.row.error"
-                            max-width="300px"
-                            class="tw:text-xs tw:break-words"
-                          >
-                            {{ props.row.error }}
-                          </q-tooltip>
-                        </q-chip>
-                      </template>
-                      <template v-else-if="col.name === 'timestamp'">
-                        <span class="tw:text-[13px]">{{
-                          formatTimestamp(props.row.timestamp)
-                        }}</span>
-                        <q-tooltip class="tw:text-xs">
-                          {{ formatTimestampFull(props.row.timestamp) }}
-                        </q-tooltip>
-                      </template>
-                      <template v-else-if="col.name === 'evaluation_time'">
-                        <span class="tw:text-[13px] tw:tabular-nums">
-                          {{
-                            props.row.evaluation_took_in_secs
-                              ? props.row.evaluation_took_in_secs.toFixed(3) +
-                                "s"
-                              : "—"
-                          }}
-                        </span>
-                      </template>
-                      <template v-else-if="col.name === 'query_time'">
-                        <span class="tw:text-[13px] tw:tabular-nums">
-                          {{
-                            props.row.query_took
-                              ? props.row.query_took + "ms"
-                              : "—"
-                          }}
-                        </span>
-                      </template>
-                      <template v-else-if="col.name === 'anomaly_count'">
-                        <span
-                          class="tw:text-[13px] tw:tabular-nums"
-                          :class="
-                            props.row.anomaly_count > 0
-                              ? 'tw:text-red-500 tw:font-medium'
-                              : ''
-                          "
-                        >
-                          {{
-                            props.row.anomaly_count != null
-                              ? props.row.anomaly_count
-                              : "—"
-                          }}
-                        </span>
-                      </template>
-                    </q-td>
-                  </q-tr>
-                </template>
+            <div v-else class="flex flex-1 flex-col gap-2 overflow-hidden">
+              <!-- Firing frequency timeline -->
+              <AlertHistoryTimeline v-if="alertHistory.length > 0" :history="alertHistory" />
 
-                <template #bottom="scope">
-                  <div class="tw:flex tw:items-center tw:w-full tw:h-[48px]">
-                    <div
-                      class="o2-table-footer-title tw:flex tw:items-center tw:w-[220px]"
-                    >
-                      {{ resultTotal }} {{ t("alerts.alertDetails.results") }}
+              <div
+                class="rounded-default flex flex-1 flex-col overflow-hidden border"
+                :class="'border-border-default bg-surface-base'"
+              >
+                <OTable
+                  :data="groupedHistory"
+                  :columns="historyTableColumns"
+                  row-key="timestamp"
+                  pagination="server"
+                  v-model:current-page="currentPage"
+                  v-model:page-size="selectedPerPage"
+                  :total-count="resultTotal"
+                  :loading="isLoadingHistory"
+                  :row-class="getRowClass"
+                  :default-columns="false"
+                  :show-global-filter="false"
+                  class="history-table flex-1 overflow-hidden !border-0 !shadow-none"
+                  data-test="alert-details-history-table"
+                  @pagination-change="onPaginationChange"
+                >
+                  <template #[`cell-#`]="{ row }">
+                    <span class="text-compact tabular-nums" :class="'text-text-secondary'">
+                      {{ row._displayIndex ?? "—" }}
+                    </span>
+                  </template>
+
+                  <template #cell-status="{ row }">
+                    <!-- Flapping group row -->
+                    <div v-if="row._flappingGroup" class="flex items-center gap-1.5">
+                      <OIcon
+                        :name="expandedGroups.has(row.timestamp) ? 'expand-less' : 'expand-more'"
+                        size="sm"
+                        class="shrink-0 cursor-pointer opacity-50"
+                        @click="toggleFlappingGroup(row.timestamp)"
+                      />
+                      <OTag
+                        type="alertState"
+                        value="flapping"
+                        class="shrink-0 cursor-pointer"
+                        @click="toggleFlappingGroup(row.timestamp)"
+                      />
+                      <span class="text-2xs text-text-secondary truncate">
+                        {{ row._children.length }} {{ t("alerts.alertDetails.rowsSeparator") }}
+                        {{ row._duration }}
+                      </span>
                     </div>
-                    <QTablePagination
-                      :scope="scope"
-                      :position="'bottom'"
-                      :resultTotal="resultTotal"
-                      :perPageOptions="perPageOptions"
-                      @update:changeRecordPerPage="changePagination"
-                      @update:changePagination="onPageChange"
-                    />
-                  </div>
-                </template>
-              </q-table>
+                    <!-- Normal row -->
+                    <span v-else class="inline-flex cursor-default">
+                      <OTag
+                        type="alertState"
+                        :value="row.status"
+                        data-test="alert-history-status-chip"
+                      />
+                      <OTooltip v-if="row.error" :max-width="'18.75rem'" :content="row.error" />
+                    </span>
+                  </template>
+
+                  <template #cell-timestamp="{ row }">
+                    <span
+                      class="text-compact whitespace-nowrap tabular-nums"
+                      :class="row._child ? 'ps-5 opacity-70' : ''"
+                    >
+                      {{ formatTimestampFull(row.timestamp) }}
+                    </span>
+                  </template>
+
+                  <!-- T-10: what was observed, against what, and the level it
+                       classified to. Flapping group headers and pre-change
+                       rows (no actual_value) render "—". -->
+                  <template #cell-condition="{ row }">
+                    <span v-if="row._flappingGroup" class="text-text-secondary">—</span>
+                    <div v-else class="flex min-w-0 items-center gap-1.5">
+                      <span class="text-compact whitespace-nowrap tabular-nums">
+                        {{ conditionSummary(row) }}
+                      </span>
+                      <template v-if="row.level">
+                        <span class="text-text-secondary text-2xs shrink-0">→</span>
+                        <OTag type="alertLevel" :value="row.level" class="shrink-0" />
+                      </template>
+                      <span
+                        v-if="row.group_label"
+                        class="text-2xs text-text-secondary min-w-0 truncate"
+                        data-test="alert-history-group-label"
+                      >
+                        {{ t("alerts.historyTable.forGroup", { group: row.group_label }) }}
+                        <OTooltip :content="row.group_label" :max-width="'18.75rem'" />
+                      </span>
+                    </div>
+                  </template>
+
+                  <template #cell-evaluation_time="{ row }">
+                    <span class="text-compact tabular-nums">
+                      {{
+                        row.evaluation_took_in_secs
+                          ? row.evaluation_took_in_secs.toFixed(3) + "s"
+                          : "—"
+                      }}
+                    </span>
+                  </template>
+
+                  <template #cell-query_time="{ row }">
+                    <span class="text-compact tabular-nums">
+                      {{ row.query_took ? row.query_took + "ms" : "—" }}
+                    </span>
+                  </template>
+
+                  <template #cell-anomaly_count="{ row }">
+                    <span
+                      class="text-compact tabular-nums"
+                      :class="row.anomaly_count > 0 ? 'text-status-error-text font-medium' : ''"
+                    >
+                      {{ row.anomaly_count != null ? row.anomaly_count : "—" }}
+                    </span>
+                  </template>
+
+                  <template #cell-error="{ row }">
+                    <span class="text-compact">{{ row.error || "—" }}</span>
+                  </template>
+
+                  <template #bottom>
+                    <div class="flex h-12 w-full items-center">
+                      <div class="flex w-55 items-center text-xs font-normal max-md:hidden">
+                        {{ resultTotal }} {{ t("alerts.alertDetails.results") }}
+                      </div>
+                    </div>
+                  </template>
+                </OTable>
+              </div>
             </div>
           </div>
-        </q-tab-panel>
+        </OTabPanel>
 
         <!-- Condition Panel -->
-        <q-tab-panel
-          name="condition"
-          class="tw:flex tw:flex-col tw:h-full tw:overflow-hidden tw:p-0"
-        >
-          <div
-            class="tw:flex tw:flex-col tw:flex-1 tw:overflow-hidden tw:px-2 tw:pt-2 tw:pb-2"
-          >
+        <OTabPanel name="condition" layout="flex-col" stretch class="flex-1">
+          <div class="flex flex-1 flex-col overflow-hidden px-2 py-2">
             <!-- Anomaly detection condition view — mirrors the alert SQL code block -->
             <template v-if="isAnomaly">
               <div
-                class="code-block tw:flex tw:flex-col tw:flex-1 tw:overflow-hidden"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'code-block-dark'
-                    : 'code-block-light'
-                "
+                class="rounded-default flex flex-1 flex-col overflow-hidden border"
+                :class="'border-border-default bg-surface-panel'"
               >
                 <div
-                  class="code-block-header tw:shrink-0"
-                  :class="
-                    store.state.theme === 'dark'
-                      ? 'code-block-header-dark'
-                      : 'code-block-header-light'
-                  "
+                  class="flex shrink-0 items-center justify-between border-b px-2.5 py-1.5"
+                  :class="'bg-surface-subtle border-border-default'"
                 >
-                  <div class="tw:flex tw:items-center tw:gap-1.5">
-                    <span
-                      class="tw:text-[11px] tw:font-medium"
-                      :class="
-                        store.state.theme === 'dark'
-                          ? 'tw:text-gray-400'
-                          : 'tw:text-gray-500'
-                      "
-                    >
-                      SQL
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-2xs font-medium" :class="'text-text-secondary'">
+                      {{ t("alerts.alertDetails.sql") }}
                     </span>
                   </div>
-                  <q-btn
+                  <OButton
                     v-if="anomalySql"
-                    @click="copyToClipboard(anomalySql, 'SQL')"
-                    flat
-                    dense
-                    size="xs"
-                    icon="content_copy"
-                    :color="store.state.theme === 'dark' ? 'grey-5' : 'grey-7'"
+                    @click="
+                      copyToClipboard(anomalySql, t, {
+                        successMessage: t('common.itemCopiedSuccessfully', { item: 'SQL' }),
+                        timeout: 3000,
+                      })
+                    "
+                    variant="ghost-muted"
+                    size="icon-xs-sq"
                     data-test="anomaly-details-copy-sql-btn"
                   >
-                    <q-tooltip>{{ t("alerts.alertDetails.copy") }}</q-tooltip>
-                  </q-btn>
+                    <OIcon name="content-copy" size="sm" />
+                    <OTooltip :content="t('alerts.alertDetails.copy')" />
+                  </OButton>
                 </div>
                 <pre
-                  class="code-block-content tw:text-[13px] tw:m-0 tw:leading-relaxed tw:flex-1 tw:overflow-y-auto"
-                  >{{ anomalySql || t("alerts.alertDetails.noCondition") }}</pre
-                >
+                  class="text-compact m-0 flex-1 overflow-x-auto overflow-y-auto p-[0.625rem_0.875rem] font-mono leading-relaxed whitespace-pre-wrap"
+                  >{{ anomalySql || t("alerts.alertDetails.noCondition") }}</pre>
               </div>
             </template>
 
             <!-- Regular alert condition view -->
             <template v-else>
               <div
-                class="code-block tw:flex tw:flex-col tw:flex-1 tw:overflow-hidden"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'code-block-dark'
-                    : 'code-block-light'
-                "
+                class="rounded-default flex flex-1 flex-col overflow-hidden border"
+                :class="'border-border-default bg-surface-panel'"
               >
                 <!-- Code block header bar — stays fixed -->
                 <div
-                  class="code-block-header tw:shrink-0"
-                  :class="
-                    store.state.theme === 'dark'
-                      ? 'code-block-header-dark'
-                      : 'code-block-header-light'
-                  "
+                  class="flex shrink-0 items-center justify-between border-b px-2.5 py-1.5"
+                  :class="'bg-surface-subtle border-border-default'"
                 >
-                  <div class="tw:flex tw:items-center tw:gap-1.5">
-                    <span
-                      class="tw:text-[11px] tw:font-medium"
-                      :class="
-                        store.state.theme === 'dark'
-                          ? 'tw:text-gray-400'
-                          : 'tw:text-gray-500'
-                      "
-                    >
+                  <div class="flex items-center gap-1.5">
+                    <span class="text-2xs font-medium" :class="'text-text-secondary'">
                       {{
                         alertDetails.type === "sql"
                           ? "SQL"
                           : alertDetails.type === "promql"
                             ? "PromQL"
-                            : "Conditions"
+                            : t("alerts.alertDetails.conditions")
                       }}
                     </span>
                   </div>
-                  <q-btn
+                  <OButton
                     v-if="
                       alertDetails.conditions &&
                       alertDetails.conditions !== '' &&
                       alertDetails.conditions !== '--'
                     "
                     @click="
-                      copyToClipboard(
-                        alertDetails.conditions,
-                        alertDetails.type === 'sql'
-                          ? t('alerts.alertDetails.sqlQuery')
-                          : alertDetails.type === 'promql'
-                            ? t('alerts.alertDetails.promqlQuery')
-                            : t('alerts.alertDetails.conditions'),
-                      )
+                      copyToClipboard(alertDetails.conditions, t, {
+                        successMessage: t('common.itemCopiedSuccessfully', {
+                          item:
+                            alertDetails.type === 'sql'
+                              ? t('alerts.alertDetails.sqlQuery')
+                              : alertDetails.type === 'promql'
+                                ? t('alerts.alertDetails.promqlQuery')
+                                : t('alerts.alertDetails.conditions'),
+                        }),
+                      })
                     "
-                    flat
-                    dense
-                    size="xs"
-                    icon="content_copy"
-                    :color="store.state.theme === 'dark' ? 'grey-5' : 'grey-7'"
+                    variant="ghost-muted"
+                    size="icon-xs-sq"
                     data-test="alert-details-copy-conditions-btn"
                   >
-                    <q-tooltip>{{ t("alerts.alertDetails.copy") }}</q-tooltip>
-                  </q-btn>
+                    <OIcon name="content-copy" size="sm" />
+                    <OTooltip :content="t('alerts.alertDetails.copy')" />
+                  </OButton>
                 </div>
                 <!-- Code content — scrolls internally -->
                 <pre
-                  class="code-block-content tw:text-[13px] tw:m-0 tw:leading-relaxed tw:flex-1 tw:overflow-y-auto"
+                  class="text-compact m-0 flex-1 overflow-x-auto overflow-y-auto p-[0.625rem_0.875rem] font-mono leading-relaxed whitespace-pre-wrap"
                   >{{
-                    alertDetails.conditions !== "" &&
-                    alertDetails.conditions !== "--"
-                      ? alertDetails.type === "sql" ||
-                        alertDetails.type === "promql"
+                    alertDetails.conditions !== "" && alertDetails.conditions !== "--"
+                      ? alertDetails.type === "sql" || alertDetails.type === "promql"
                         ? alertDetails.conditions
                         : alertDetails.conditions.length !== 2
-                          ? `if ${alertDetails.conditions}`
+                          ? t("alerts.alertDetails.ifCondition", {
+                              condition: alertDetails.conditions,
+                            })
                           : t("alerts.alertDetails.noCondition")
                       : t("alerts.alertDetails.noCondition")
-                  }}</pre
-                >
+                  }}</pre>
               </div>
             </template>
 
             <!-- Description (only show if exists) -->
-            <div v-if="alertDetails.description" class="tw:mt-3 tw:shrink-0">
+            <div v-if="alertDetails.description" class="mt-3 shrink-0">
               <div
-                class="tw:flex tw:items-center tw:gap-1.5 tw:text-[12px] tw:font-semibold tw:uppercase tw:tracking-wider tw:mb-1"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'tw:text-gray-400'
-                    : 'tw:text-gray-500'
-                "
+                class="mb-1 flex items-center gap-1.5 text-xs font-semibold"
+                :class="'text-text-secondary'"
               >
-                <q-icon name="info_outline" size="13px" />
+                <OIcon name="info-outline" size="xs" />
                 {{ t("common.description") }}
               </div>
               <div
-                class="tw:text-[13px] tw:px-3 tw:py-2 tw:rounded tw:leading-relaxed"
-                :class="
-                  store.state.theme === 'dark'
-                    ? 'tw:bg-gray-800 tw:text-gray-300'
-                    : 'tw:bg-gray-50 tw:text-gray-700'
-                "
+                class="text-compact rounded-default px-3 py-2 leading-relaxed"
+                :class="'bg-surface-panel text-text-body'"
               >
                 {{ alertDetails.description }}
               </div>
             </div>
           </div>
-        </q-tab-panel>
-      </q-tab-panels>
+        </OTabPanel>
+      </OTabPanels>
     </div>
-  </div>
+  </ODrawer>
 </template>
 
 <script setup lang="ts">
+import { alertHistoryQuery } from "@/services/alerts.queries";
+import { queryClient } from "@/composables/query/queryClient";
+import OTabPanels from "@/lib/navigation/Tabs/OTabPanels.vue";
+import OTabPanel from "@/lib/navigation/Tabs/OTabPanel.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
 import { ref, watch, computed } from "vue";
 import { useStore } from "vuex";
-import { useI18n } from "vue-i18n";
-import { useQuasar, date } from "quasar";
+import { raw, useI18nTyped } from "@/types/i18n";
+import { conditionSummary, isFiringOutcome, isOkOutcome } from "@/utils/alerts/runOutcome";
+import { formatTimestamp } from "@/utils/date";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OToggleGroup from "@/lib/core/ToggleGroup/OToggleGroup.vue";
+import OToggleGroupItem from "@/lib/core/ToggleGroup/OToggleGroupItem.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
 import DateTime from "@/components/DateTime.vue";
-import QTablePagination from "@/components/shared/grid/Pagination.vue";
-import alertsService from "@/services/alerts";
+import OTable from "@/lib/core/Table/OTable.vue";
+import { COL } from "@/lib/core/Table/OTable.types";
+import type { AlertHistoryQuery } from "@/services/alerts";
 import anomalyDetectionService from "@/services/anomaly_detection";
 import { buildAnomalyPreviewSql } from "@/utils/alerts/anomalySqlBuilder";
 import type { Ref } from "vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { copyToClipboard } from "@/utils/clipboard";
+import AlertHistoryTimeline from "./AlertHistoryTimeline.vue";
 
 // Composables
-const { t } = useI18n();
+const { t } = useI18nTyped();
 const store = useStore();
-const $q = useQuasar();
 
 // Props & Emits
 interface Props {
   alertDetails: any;
   alertId: string;
   alertType?: string;
+  open?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -564,7 +434,9 @@ const anomalySql = computed(() => {
   return buildAnomalyPreviewSql(d);
 });
 
-const emit = defineEmits([]);
+const emit = defineEmits<{
+  "update:open": [value: boolean];
+}>();
 
 const resultTotal = ref(0);
 
@@ -574,7 +446,170 @@ const activeTab = ref("history");
 // Refs
 const alertHistory: Ref<any[]> = ref([]);
 const isLoadingHistory = ref(false);
-const qTableRef: Ref<any> = ref(null);
+
+// ── Flapping group helpers ──────────────────────────────────────────────────
+const MIN_FLAP_TRANSITIONS = 3; // firing↔ok flips within a run to call it flapping
+const MIN_FLAP_WINDOW = 4; // minimum consecutive rows needed
+
+// Classification is shared with the timeline and the overview so the three
+// cannot disagree about a status again — see utils/alerts/runOutcome.
+function rowIsFiring(s: string) {
+  return isFiringOutcome(s);
+}
+function rowIsOk(s: string) {
+  return isOkOutcome(s);
+}
+
+// Build a boolean mask: true = row is inside a flapping run.
+// Strategy:
+//  1. Scan forward to find the first window of MIN_FLAP_WINDOW rows that
+//     contains >= MIN_FLAP_TRANSITIONS firing↔ok flips — this is a zone start.
+//  2. Once inside a zone, keep extending as long as each new row causes a
+//     flip relative to the previous non-skipped state.
+//  3. Stop extending when we see MAX_STABLE_TAIL consecutive rows with no
+//     flip, then trim those trailing stable rows off the end of the zone.
+function buildFlappingMask(rows: any[]): boolean[] {
+  const n = rows.length;
+  const mask = new Array(n).fill(false);
+  const MAX_STABLE_TAIL = 2; // consecutive non-flipping rows that end a zone
+
+  function stateOf(s: string): "firing" | "ok" | "other" {
+    if (rowIsFiring(s)) return "firing";
+    if (rowIsOk(s)) return "ok";
+    return "other";
+  }
+
+  let i = 0;
+  while (i < n) {
+    // Count transitions in the next MIN_FLAP_WINDOW rows
+    let transitions = 0;
+    let prev = stateOf(rows[i].status);
+    let windowEnd = -1;
+    for (let j = i + 1; j < Math.min(i + MIN_FLAP_WINDOW + 10, n); j++) {
+      const cur = stateOf(rows[j].status);
+      if (cur !== "other" && prev !== "other" && cur !== prev) transitions++;
+      if (cur !== "other") prev = cur;
+      if (transitions >= MIN_FLAP_TRANSITIONS) {
+        windowEnd = j;
+        break;
+      }
+    }
+
+    if (windowEnd === -1) {
+      i++;
+      continue;
+    } // no flapping here
+
+    // Found a flapping zone starting at i — now extend it forward
+    let zoneEnd = windowEnd;
+    let stableTail = 0;
+    let lastState = stateOf(rows[zoneEnd].status);
+
+    for (let j = zoneEnd + 1; j < n; j++) {
+      const cur = stateOf(rows[j].status);
+      if (cur === "other") {
+        zoneEnd = j;
+        stableTail = 0;
+        continue;
+      }
+      if (cur !== lastState) {
+        // flip — still flapping
+        lastState = cur;
+        zoneEnd = j;
+        stableTail = 0;
+      } else {
+        // same state — stable tail growing
+        stableTail++;
+        if (stableTail >= MAX_STABLE_TAIL) break;
+        zoneEnd = j;
+      }
+    }
+
+    // Trim stable tail off the end
+    while (
+      zoneEnd > windowEnd &&
+      stateOf(rows[zoneEnd].status) === stateOf(rows[zoneEnd - 1].status)
+    ) {
+      zoneEnd--;
+    }
+
+    for (let k = i; k <= zoneEnd; k++) mask[k] = true;
+    i = zoneEnd + 1; // skip past this zone
+  }
+  return mask;
+}
+
+function durationLabel(startTs: number, endTs: number): string {
+  // timestamps are in microseconds — convert to ms
+  const startMs = startTs > 1e12 ? startTs / 1000 : startTs;
+  const endMs = endTs > 1e12 ? endTs / 1000 : endTs;
+  const ms = Math.abs(endMs - startMs);
+  const mins = Math.round(ms / 60000);
+  if (mins < 1) return "< 1 min";
+  if (mins < 60) return `${mins} min`;
+  const h = Math.floor(mins / 60);
+  const m = mins % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
+// Tracks which flapping group rows are expanded (key = group timestamp)
+const expandedGroups = ref<Set<number>>(new Set());
+
+function toggleFlappingGroup(ts: number) {
+  const s = new Set(expandedGroups.value);
+  s.has(ts) ? s.delete(ts) : s.add(ts);
+  expandedGroups.value = s;
+}
+
+// Produce the display list: normal rows pass through, flapping runs become one
+// header row (+ children shown when expanded)
+const groupedHistory = computed(() => {
+  const rows = [...alertHistory.value].sort((a, b) => b.timestamp - a.timestamp); // newest first for table
+  if (!rows.length) return rows;
+
+  // mask is on sorted-asc; re-sort for mask then flip back
+  const asc = [...rows].sort((a, b) => a.timestamp - b.timestamp);
+  const mask = buildFlappingMask(asc);
+  // map back to desc order by timestamp
+  const maskByTs = new Map(asc.map((r, i) => [r.timestamp, mask[i]]));
+
+  const result: any[] = [];
+  let i = 0;
+  let displayNum = (currentPage.value - 1) * selectedPerPage.value + 1;
+  while (i < rows.length) {
+    const row = rows[i];
+    if (!maskByTs.get(row.timestamp)) {
+      result.push({ ...row, _displayIndex: displayNum++ });
+      i++;
+    } else {
+      // collect all consecutive flapping rows
+      const children: any[] = [];
+      while (i < rows.length && maskByTs.get(rows[i].timestamp)) {
+        children.push(rows[i]);
+        i++;
+      }
+      const timestamps = children.map((r) => r.timestamp);
+      const minTs = Math.min(...timestamps);
+      const maxTs = Math.max(...timestamps);
+      const groupTs = maxTs;
+      result.push({
+        timestamp: groupTs,
+        status: "flapping",
+        _flappingGroup: true,
+        _children: children,
+        _duration: durationLabel(minTs, maxTs),
+        _displayIndex: null,
+      });
+      displayNum += children.length;
+      if (expandedGroups.value.has(groupTs)) {
+        children.forEach((c, ci) =>
+          result.push({ ...c, _child: true, _displayIndex: displayNum - children.length + ci }),
+        );
+      }
+    }
+  }
+  return result;
+});
 
 // Date time - default to last 15 minutes (relative)
 const dateTimeRef = ref<any>(null);
@@ -593,140 +628,119 @@ const dateTimeValues = ref({
   relativeTimePeriod: "15m",
 });
 
-// Pagination (server-side pagination)
+// Pagination (server-side)
 const selectedPerPage = ref<number>(50);
 const currentPage = ref<number>(1);
-const pagination: any = ref({
-  page: 1,
-  rowsPerPage: 50,
-  rowsNumber: 0,
-});
 
-const perPageOptions = [
-  { label: "10", value: 10 },
-  { label: "20", value: 20 },
-  { label: "50", value: 50 },
-  { label: "100", value: 100 },
-];
-
-const onRequest = async (requestProps: any) => {
-  const { page, rowsPerPage } = requestProps.pagination;
-  currentPage.value = page;
-  selectedPerPage.value = rowsPerPage;
+const onPaginationChange = async (params: { page: number; size: number }) => {
+  currentPage.value = params.page;
+  selectedPerPage.value = params.size;
   isLoadingHistory.value = true;
   await fetchAlertHistory(props.alertId);
-  pagination.value.page = page;
-  pagination.value.rowsPerPage = rowsPerPage;
   isLoadingHistory.value = false;
-};
-
-const changePagination = (val: { label: string; value: any }) => {
-  selectedPerPage.value = val.value;
-  pagination.value.rowsPerPage = val.value;
-  pagination.value.page = 1;
-  qTableRef.value?.requestServerInteraction({
-    pagination: pagination.value,
-  });
-};
-
-const onPageChange = (page: number) => {
-  pagination.value.page = page;
-  qTableRef.value?.requestServerInteraction({
-    pagination: pagination.value,
-  });
 };
 
 // Columns
 const alertHistoryColumns = [
   {
-    name: "#",
-    label: "#",
-    field: "#",
-    align: "left" as const,
+    id: "#",
+    header: raw("#"),
+    accessorFn: () => null,
     sortable: false,
-    style: "width: 48px;",
+    size: 48,
+    meta: { align: "left" as const },
   },
   {
-    name: "timestamp",
-    label: t("alerts.historyTable.timestamp"),
-    field: "timestamp",
-    align: "left" as const,
+    id: "timestamp",
+    header: t("alerts.historyTable.timestamp"),
+    accessorKey: "timestamp",
     sortable: true,
-    style: "width: 140px;",
+    size: 140,
+    meta: { align: "left" as const },
   },
   {
-    name: "status",
-    label: t("alerts.historyTable.status"),
-    field: "status",
-    align: "left" as const,
+    id: "status",
+    header: t("alerts.historyTable.status"),
+    accessorKey: "status",
     sortable: true,
-    style: "width: 110px;",
+    size: 280,
+    meta: { align: "left" as const },
   },
   {
-    name: "evaluation_time",
-    label: t("alerts.historyTable.evaluationTime"),
-    field: "evaluation_took_in_secs",
-    align: "right" as const,
-    sortable: true,
-    style: "width: 130px;",
-  },
-  {
-    name: "query_time",
-    label: t("alerts.historyTable.queryTime"),
-    field: "query_took",
-    align: "right" as const,
-    sortable: true,
-    style: "width: 120px;",
-  },
-  {
-    name: "error",
-    label: t("alerts.historyTable.error"),
-    field: "error",
-    align: "left" as const,
+    // T-10 value context: "actual operator threshold → level" per run.
+    id: "condition",
+    header: t("alerts.historyTable.condition"),
+    accessorKey: "actual_value",
     sortable: false,
+    size: 220,
+    meta: { align: "left" as const },
+  },
+  {
+    id: "evaluation_time",
+    header: t("alerts.historyTable.evaluationTime"),
+    accessorKey: "evaluation_took_in_secs",
+    sortable: true,
+    size: 140,
+    meta: { align: "left" as const },
+  },
+  {
+    id: "query_time",
+    header: t("alerts.historyTable.queryTime"),
+    accessorKey: "query_took",
+    sortable: true,
+    size: 100,
+    meta: { align: "left" as const },
+  },
+  {
+    id: "error",
+    header: t("alerts.historyTable.error"),
+    accessorKey: "true",
+    sortable: false,
+    size: COL.description,
+    meta: { align: "left" as const, autoWidth: true },
   },
 ];
 
 const anomalyHistoryColumns = [
   {
-    name: "#",
-    label: "#",
-    field: "#",
-    align: "left" as const,
+    id: "#",
+    header: raw("#"),
+    accessorFn: () => null,
     sortable: false,
-    style: "width: 48px;",
+    size: 48,
+    meta: { align: "left" as const },
   },
   {
-    name: "timestamp",
-    label: t("alerts.historyTable.timestamp"),
-    field: "timestamp",
-    align: "left" as const,
-    sortable: true,
-    style: "width: 140px;",
+    id: "timestamp",
+    header: t("alerts.historyTable.timestamp"),
+    accessorKey: "timestamp",
+    sortable: false,
+    size: 140,
+    meta: { align: "left" as const },
   },
   {
-    name: "status",
-    label: "Result",
-    field: "status",
-    align: "left" as const,
-    sortable: true,
-    style: "width: 120px;",
+    id: "status",
+    header: t("alerts.historyTable.result"),
+    accessorKey: "status",
+    sortable: false,
+    size: 120,
+    meta: { align: "left" as const },
   },
   {
-    name: "evaluation_time",
-    label: t("alerts.historyTable.evaluationTime"),
-    field: "evaluation_took_in_secs",
-    align: "right" as const,
-    sortable: true,
-    style: "width: 130px;",
+    id: "evaluation_time",
+    header: t("alerts.historyTable.evaluationTime"),
+    accessorKey: "evaluation_took_in_secs",
+    sortable: false,
+    size: 130,
+    meta: { align: "right" as const },
   },
   {
-    name: "anomaly_count",
-    label: "Anomalies",
-    field: "anomaly_count",
-    align: "right" as const,
-    sortable: true,
-    style: "width: 120px;",
+    id: "anomaly_count",
+    header: t("alerts.historyTable.anomalies"),
+    accessorKey: "anomaly_count",
+    sortable: false,
+    size: 120,
+    meta: { align: "right" as const },
   },
 ];
 
@@ -736,113 +750,27 @@ const historyTableColumns = computed(() =>
 
 // Helper Functions
 
-const getRowClass = (status: string) => {
-  if (store.state.theme === "dark") {
-    switch (status?.toLowerCase()) {
-      case "firing":
-      case "error":
-      case "anomaly":
-        return "row-error-dark";
-      default:
-        return "";
-    }
-  } else {
-    switch (status?.toLowerCase()) {
-      case "firing":
-      case "error":
-      case "anomaly":
-        return "row-error-light";
-      default:
-        return "";
-    }
+const getRowClass = (row: any) => {
+  if (row?._flappingGroup) {
+    // Violet-tinted highlight for flapping-group rows; token carries the theme.
+    return "!bg-surface-tint-sql";
   }
-};
-
-const formatStatus = (status: string) => {
-  if (!status) return "Unknown";
-  return status.charAt(0).toUpperCase() + status.slice(1);
-};
-
-const getStatusChipIcon = (status: string) => {
-  switch (status?.toLowerCase()) {
-    case "firing":
-    case "error":
-    case "anomaly":
-      return "error_outline";
-    case "ok":
-    case "success":
-    case "normal":
-      return "check_circle_outline";
-    case "skipped":
-      return "block";
-    case "pending":
-      return "schedule";
-    default:
-      return "help_outline";
+  if (row?._child) {
+    return "!bg-surface-subtle";
   }
-};
-
-const getStatusChipColor = (status: string) => {
-  switch (status?.toLowerCase()) {
-    case "firing":
-    case "error":
-    case "anomaly":
-      return "red-1";
-    case "ok":
-    case "success":
-    case "normal":
-      return "green-1";
-    case "skipped":
-      return "amber-1";
-    case "pending":
-      return "blue-1";
-    default:
-      return "grey-3";
+  // The row wash means "needs attention", which covers both a firing alert and
+  // an evaluation that errored. They are distinguished by the status badge —
+  // only the classification of "did it fire" is shared with the timeline.
+  const status = String(row?.status ?? "").toLowerCase();
+  if (isFiringOutcome(status) || status === "error" || status === "failed") {
+    return "!bg-status-error-bg";
   }
-};
-
-const getStatusChipTextColor = (status: string) => {
-  switch (status?.toLowerCase()) {
-    case "firing":
-    case "error":
-    case "anomaly":
-      return "red-9";
-    case "ok":
-    case "success":
-    case "normal":
-      return "green-9";
-    case "skipped":
-      return "amber-9";
-    case "pending":
-      return "blue-9";
-    default:
-      return "grey-8";
-  }
-};
-
-const formatTimestamp = (timestamp: number) => {
-  if (!timestamp) return "N/A";
-  const now = Date.now() * 1000; // microseconds
-  const diff = now - timestamp;
-
-  if (diff < 3600000000) {
-    const minutes = Math.floor(diff / 60000000);
-    return `${minutes} min ago`;
-  }
-  if (diff < 86400000000) {
-    const hours = Math.floor(diff / 3600000000);
-    return `${hours}h ago`;
-  }
-  if (diff < 604800000000) {
-    const days = Math.floor(diff / 86400000000);
-    return `${days}d ago`;
-  }
-  return date.formatDate(timestamp / 1000, "MMM DD, HH:mm");
+  return "";
 };
 
 const formatTimestampFull = (timestamp: number) => {
-  if (!timestamp) return "N/A";
-  return date.formatDate(timestamp / 1000, "MMM DD, YYYY HH:mm:ss");
+  if (!timestamp) return raw("N/A");
+  return formatTimestamp(timestamp, "MMM DD, YYYY HH:mm:ss");
 };
 
 // Main Functions
@@ -854,7 +782,7 @@ const fetchAlertHistory = async (alertId: string) => {
     const endTime = dateTimeValues.value.endTime;
     const from = (currentPage.value - 1) * selectedPerPage.value;
 
-    const historyParams: Record<string, any> = {
+    const historyParams: AlertHistoryQuery = {
       size: selectedPerPage.value,
       from: from,
       start_time: startTime,
@@ -865,23 +793,19 @@ const fetchAlertHistory = async (alertId: string) => {
     } else {
       historyParams.alert_id = alertId;
     }
-    const response = await alertsService.getHistory(
-      store?.state?.selectedOrganization?.identifier,
-      historyParams,
+    // Same cached page query as the Alert History page — paging back to a page
+    // already fetched keeps its rows instead of blanking.
+    const data = await queryClient.fetchQuery(
+      alertHistoryQuery(store?.state?.selectedOrganization?.identifier, historyParams),
     );
-    alertHistory.value = response.data?.hits || [];
-    resultTotal.value = response.data?.total || 0;
-    pagination.value.rowsNumber = response.data?.total || 0;
+    alertHistory.value = data?.hits || [];
+    resultTotal.value = data?.total || 0;
   } catch (error: any) {
     alertHistory.value = [];
     resultTotal.value = 0;
-    pagination.value.rowsNumber = 0;
-    $q.notify({
-      type: "negative",
-      message:
-        error.response?.data?.message ||
-        error.message ||
-        t("alerts.failedToFetchHistory"),
+    toast({
+      variant: "error",
+      message: error.response?.data?.message || error.message || t("alerts.failedToFetchHistory"),
       timeout: 5000,
     });
   }
@@ -906,7 +830,6 @@ const updateDateTime = (value: any) => {
     };
   }
 
-  pagination.value.page = 1;
   currentPage.value = 1;
   if (props.alertId) {
     isLoadingHistory.value = true;
@@ -916,41 +839,15 @@ const updateDateTime = (value: any) => {
   }
 };
 
-const copyToClipboard = (text: string, type: string) => {
-  navigator.clipboard
-    .writeText(text)
-    .then(() => {
-      $q.notify({
-        type: "positive",
-        message: `${type} Copied Successfully!`,
-        timeout: 3000,
-      });
-    })
-    .catch(() => {
-      $q.notify({
-        type: "negative",
-        message: "Error while copy content.",
-        timeout: 3000,
-      });
-    });
-};
-
 // Watchers
 watch(
   () => props.alertId,
   async (newVal) => {
     if (newVal) {
-      pagination.value.page = 1;
       currentPage.value = 1;
-      if (!qTableRef.value) {
-        isLoadingHistory.value = true;
-        await fetchAlertHistory(newVal);
-        isLoadingHistory.value = false;
-      } else {
-        qTableRef.value?.requestServerInteraction({
-          pagination: pagination.value,
-        });
-      }
+      isLoadingHistory.value = true;
+      await fetchAlertHistory(newVal);
+      isLoadingHistory.value = false;
       // Fetch full config for the Condition tab when this is an anomaly detection alert.
       if (isAnomaly.value) {
         try {
@@ -968,117 +865,3 @@ watch(
   { immediate: true },
 );
 </script>
-
-<style lang="scss" scoped>
-/* ── Tab toggle (header) ── */
-.tab-toggle {
-  display: flex;
-  align-items: center;
-  height: 1.625rem; /* 26px — same as chips */
-  border-radius: 6px;
-  border: 1px solid;
-  overflow: hidden;
-}
-.tab-toggle-light {
-  border-color: #d1d5db;
-  background: #f3f4f6;
-}
-.tab-toggle-dark {
-  border-color: #374151;
-  background: #1f2937;
-}
-.tab-toggle-btn {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 0 12px;
-  height: 100%;
-  font-size: 12px;
-  font-weight: 500;
-  border: none;
-  background: transparent;
-  cursor: pointer;
-  white-space: nowrap;
-  color: inherit;
-  line-height: 1;
-  transition:
-    background 0.15s,
-    color 0.15s;
-}
-.tab-toggle-btn + .tab-toggle-btn {
-  border-left: 1px solid;
-  border-color: inherit;
-}
-.tab-toggle-light .tab-toggle-btn-active {
-  background: #fff;
-  color: #1d4ed8;
-}
-.tab-toggle-dark .tab-toggle-btn-active {
-  background: #374151;
-  color: #60a5fa;
-}
-
-/* ── Code Block ── */
-.code-block {
-  border-radius: 8px;
-  overflow: hidden;
-  border: 1px solid;
-}
-.code-block-light {
-  border-color: #e5e7eb;
-  background: #f9fafb;
-}
-.code-block-dark {
-  border-color: #374151;
-  background: #111827;
-}
-
-.code-block-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 10px;
-  border-bottom: 1px solid;
-}
-.code-block-header-light {
-  background: #f3f4f6;
-  border-color: #e5e7eb;
-}
-.code-block-header-dark {
-  background: #1f2937;
-  border-color: #374151;
-}
-
-.code-block-content {
-  padding: 10px 14px;
-  font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
-  white-space: pre-wrap;
-  overflow-x: auto;
-  font-size: 13px;
-}
-
-/* ── Row tints ── */
-.row-error-light {
-  background: #fff5f5 !important;
-}
-.row-error-dark {
-  background: #2d1b1b !important;
-}
-
-/* ── Table layout ── */
-.history-table {
-  border: none !important;
-  box-shadow: none !important;
-}
-
-/* ── Tab panels fill height ── */
-:deep(.q-tab-panels) {
-  flex: 1;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-:deep(.q-tab-panel) {
-  flex: 1;
-}
-</style>

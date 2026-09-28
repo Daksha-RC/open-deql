@@ -15,26 +15,23 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="row items-center tw:flex-nowrap!" data-test="trace-row-service">
+  <div class="flex flex-nowrap! items-center" :data-test="dataTest || 'trace-row-service'">
     <!-- Service type icon -->
     <img
       data-test="trace-row-service-icon"
       :src="serviceIconUrl"
-      class="q-mr-sm tw:shrink-0 tw:w-[1.25rem] tw:h-[1.25rem]"
+      class="me-2 h-5 w-5 shrink-0"
       aria-hidden="true"
       alt=""
     />
 
     <!-- Service name + badge -->
-    <div class="row items-center tw:gap-[0.325rem] tw:min-w-0 tw:flex-nowrap!">
-      <span
-        data-test="trace-row-service-name"
-        class="text-weight-bold ellipsis tw:min-w-0 tw:text-[var(--o2-text-1)]! tw:text-[0.8rem]! tw:tracking-[0.03rem]!"
-      >
+    <div class="flex min-w-0 flex-nowrap! items-center gap-[0.325rem]">
+      <span data-test="trace-row-service-name" class="text-text-body min-w-0 truncate text-xs">
         {{ item.service_name }}
-        <QTooltip anchor="bottom middle" self="top middle">
-          {{ item.service_name }}
-        </QTooltip>
+        <OTooltip side="bottom" align="center">
+          <template #content>{{ item.service_name }}</template>
+        </OTooltip>
       </span>
     </div>
   </div>
@@ -42,33 +39,36 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { QTooltip, useQuasar } from "quasar";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
 import useTraces from "@/composables/useTraces";
 import { getServiceIconDataUrl } from "@/utils/traces/convertTraceData";
+import useTheme from "@/composables/useTheme";
 
 const props = defineProps<{
   item: Record<string, any>;
+  dataTest?: string;
 }>();
 
-const $q = useQuasar();
+const { isDark } = useTheme();
+
 const { getOrSetServiceColor } = useTraces();
 
-const rootColor = computed(
-  () => getOrSetServiceColor(props.item.service_name) ?? "#9e9e9e",
-);
+const rootColor = computed(() => getOrSetServiceColor(props.item.service_name) ?? "#9e9e9e");
 
-const serviceIconUrl = computed(() =>
-  getServiceIconDataUrl(
-    props.item.service_name,
-    $q.dark.isActive,
-    rootColor.value,
-  ),
-);
+const serviceIconUrl = computed(() => {
+  if (props.item.infer_service_system) {
+    return getServiceIconDataUrl(props.item.infer_service_system, isDark.value, rootColor.value);
+  }
 
-const extraServices = computed(() => {
-  const svcs = props.item.services ?? {};
-  return Object.keys(svcs)
-    .filter((s) => s !== props.item.service_name)
-    .map((s) => ({ name: s, color: getOrSetServiceColor(s) ?? "#9e9e9e" }));
+  if (props.item.infer_service_type) {
+    return getServiceIconDataUrl(
+      props.item.service_name,
+      isDark.value,
+      rootColor.value,
+      props.item.infer_service_type,
+    );
+  }
+
+  return getServiceIconDataUrl(props.item.service_name, isDark.value, rootColor.value);
 });
 </script>

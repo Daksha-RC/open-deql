@@ -12,9 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { mount } from "@vue/test-utils";
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mount, config } from "@vue/test-utils";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import i18n from "@/locales";
 import CellActions from "./CellActions.vue";
+
+config.global.plugins = [...(config.global.plugins ?? []), i18n];
 
 // ── Mock Vuex ──────────────────────────────────────────────────────────────────
 const mockStore = {
@@ -29,15 +32,11 @@ vi.mock("vuex", () => ({
 
 // ── Global stubs ──────────────────────────────────────────────────────────────
 const globalStubs = {
-  QBtn: {
-    template: '<button @click="$attrs.onClick?.($event)"><slot /></button>',
-  },
-  QIcon: { template: "<span><slot /></span>" },
   EqualIcon: { template: "<svg />" },
   NotEqualIcon: { template: "<svg />" },
   O2AIContextAddBtn: {
     name: "O2AIContextAddBtn",
-    template: '<div @click="$emit(\'send-to-ai-chat\', \'test\')" />',
+    template: "<div @click=\"$emit('send-to-ai-chat', 'test')\" />",
     emits: ["send-to-ai-chat"],
   },
 };
@@ -62,6 +61,21 @@ describe("CellActions", () => {
     vi.clearAllMocks();
   });
 
+  // The include/exclude glyphs are custom SVGs, not registry icons. Wrapping
+  // them in <OIcon> (whose `name` is required) meant every rendered log cell
+  // logged "Missing required prop: name" — the icons only appeared via OIcon's
+  // slot, which exists for co-locating a tooltip, not for supplying an icon.
+  it("renders its icons without triggering a Vue prop warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mountComponent();
+      const warnings = warn.mock.calls.map((c) => String(c[0] ?? ""));
+      expect(warnings.filter((w) => w.includes("Missing required prop"))).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   // ── Component Initialization ─────────────────────────────────────────────────
   describe("Component Initialization", () => {
     it("mounts successfully", () => {
@@ -81,18 +95,16 @@ describe("CellActions", () => {
     });
   });
 
-  // ── backgroundClass computed ──────────────────────────────────────────────────
-  describe("backgroundClass computed", () => {
-    it("applies dark background class in dark theme", () => {
-      mockStore.state.theme = "dark";
-      const wrapper = mountComponent();
-      expect(wrapper.find(".field_overlay").classes()).toContain("tw:bg-black");
-    });
-
-    it("applies light background class in light theme", () => {
-      mockStore.state.theme = "light";
-      const wrapper = mountComponent();
-      expect(wrapper.find(".field_overlay").classes()).toContain("tw:bg-white");
+  // ── Layout ────────────────────────────────────────────────────────────────────
+  describe("layout", () => {
+    // OTable's hover-action toolbar supplies the surface and the positioning, so
+    // this component must stay flow content — an absolute/background of its own
+    // would paint over the log line again.
+    it("renders as a plain flow row with no surface or positioning of its own", () => {
+      const classes = mountComponent().find(".field_overlay").classes();
+      expect(classes).toContain("flex");
+      expect(classes).not.toContain("absolute");
+      expect(classes).not.toContain("bg-surface-base");
     });
   });
 
@@ -236,6 +248,35 @@ describe("CellActions", () => {
   });
 
   // ── Props defaults ────────────────────────────────────────────────────────────
+  describe("value prop", () => {
+    // Logs' `source` column is JSON.stringify(row): nothing sits under
+    // row["source"], so the caller hands the rendered value in.
+    it("acts on the passed value when the row has nothing under column.id", async () => {
+      const wrapper = mountComponent({
+        column: { id: "source" },
+        row: { status: "200", message: "OK" },
+        value: '{"status":"200"}',
+        selectedStreamFields: [],
+      });
+
+      await wrapper.find("button").trigger("click");
+
+      expect(wrapper.emitted("copy")?.[0]).toEqual(['{"status":"200"}']);
+      // The title/data-test follow the same value, so they never read "undefined".
+      expect(wrapper.find(".table-cell-actions").attributes("data-test")).toBe(
+        'log-add-data-from-column-{"status":"200"}',
+      );
+    });
+
+    it("falls back to row[column.id] when no value is passed", async () => {
+      const wrapper = mountComponent();
+
+      await wrapper.find("button").trigger("click");
+
+      expect(wrapper.emitted("copy")?.[0]).toEqual(["200"]);
+    });
+  });
+
   describe("Props defaults", () => {
     it("defaults hideSearchTermActions to false", () => {
       const wrapper = mountComponent();

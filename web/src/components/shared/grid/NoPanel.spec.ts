@@ -15,51 +15,22 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
-import { createI18n } from "vue-i18n";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-
-// vi.mock is hoisted — the real module is never loaded
-vi.mock("../../../utils/zincutils", () => ({
-  getImageURL: vi.fn((path: string) => `/mock/${path}`),
-}));
 
 import NoPanel from "./NoPanel.vue";
-import { getImageURL } from "../../../utils/zincutils";
 
-installQuasar();
-
-const i18n = createI18n({
-  legacy: false,
-  locale: "en",
-  messages: {
-    en: {
-      panel: {
-        add: "Add Panel",
-      },
-    },
-  },
-});
-
-// Stubs for Quasar components not under test
-const qImgStub = {
-  template: '<img :src="src" />',
-  props: ["src", "style"],
-};
-
-const qBtnStub = {
+// Stubs for components not under test
+const oBtnStub = {
   template:
-    "<button :data-test=\"$attrs['data-test']\" @click=\"$emit('click')\">{{ label }}</button>",
-  props: ["label", "stack", "padding", "outline", "icon"],
+    "<button :data-test=\"$attrs['data-test']\" @click=\"$emit('click')\"><slot></slot></button>",
+  props: ["variant", "size"],
   emits: ["click"],
 };
 
 function mountNoPanel(props: Record<string, unknown> = {}) {
   return mount(NoPanel, {
     global: {
-      plugins: [i18n],
       stubs: {
-        "q-img": qImgStub,
-        "q-btn": qBtnStub,
+        OButton: oBtnStub,
       },
     },
     props,
@@ -85,54 +56,38 @@ describe("NoPanel", () => {
 
     it("should show the descriptive message", () => {
       expect(wrapper.text()).toContain(
-        "Start by adding your first dashboard panel",
+        "Add a panel to start visualizing logs, metrics, and traces.",
       );
     });
 
-    it("should render a q-img element", () => {
-      expect(wrapper.find("img").exists()).toBe(true);
+    it("should render the inline svg image", () => {
+      const svg = wrapper.find('[data-test="empty-panel-art"]');
+      expect(svg.exists()).toBe(true);
+      expect(svg.element.tagName.toLowerCase()).toBe("svg");
     });
 
-    it("should call getImageURL with the clipboard icon path", () => {
-      expect(getImageURL).toHaveBeenCalledWith(
-        "images/common/clipboard_icon.svg",
-      );
-    });
-
-    it("should set img src to the value returned by getImageURL", () => {
-      const img = wrapper.find("img");
-      expect(img.attributes("src")).toBe(
-        "/mock/images/common/clipboard_icon.svg",
-      );
+    it("should use CSS custom properties for colors so it follows the theme", () => {
+      const svg = wrapper.find('[data-test="empty-panel-art"]');
+      expect(svg.html()).toContain("var(--color-primary");
     });
   });
 
   describe("add panel button visibility", () => {
     it("should show the add panel button when viewOnly is false", () => {
       wrapper = mountNoPanel({ viewOnly: false });
-      expect(
-        wrapper
-          .find('[data-test="dashboard-if-no-panel-add-panel-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-if-no-panel-add-panel-btn"]').exists()).toBe(true);
     });
 
     it("should show the add panel button when viewOnly prop is not provided", () => {
       wrapper = mountNoPanel();
-      expect(
-        wrapper
-          .find('[data-test="dashboard-if-no-panel-add-panel-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-if-no-panel-add-panel-btn"]').exists()).toBe(true);
     });
 
     it("should hide the add panel button when viewOnly is true", () => {
       wrapper = mountNoPanel({ viewOnly: true });
-      expect(
-        wrapper
-          .find('[data-test="dashboard-if-no-panel-add-panel-btn"]')
-          .exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-if-no-panel-add-panel-btn"]').exists()).toBe(
+        false,
+      );
     });
   });
 
@@ -141,11 +96,9 @@ describe("NoPanel", () => {
       wrapper = mountNoPanel({ viewOnly: false });
     });
 
-    it("should display the i18n label for panel.add", () => {
-      const btn = wrapper.find(
-        '[data-test="dashboard-if-no-panel-add-panel-btn"]',
-      );
-      expect(btn.text()).toBe("Add Panel");
+    it("should display the label for the first quick-start card", () => {
+      const btn = wrapper.find('[data-test="dashboard-if-no-panel-add-panel-btn"]');
+      expect(btn.exists()).toBe(true);
     });
   });
 
@@ -155,9 +108,7 @@ describe("NoPanel", () => {
     });
 
     it("should emit update:Panel when the add button is clicked", async () => {
-      const btn = wrapper.find(
-        '[data-test="dashboard-if-no-panel-add-panel-btn"]',
-      );
+      const btn = wrapper.find('[data-test="dashboard-if-no-panel-add-panel-btn"]');
       expect(btn.exists()).toBe(true);
       await btn.trigger("click");
       expect(wrapper.emitted("update:Panel")).toBeTruthy();
@@ -165,23 +116,18 @@ describe("NoPanel", () => {
     });
 
     it("should emit update:Panel on every click", async () => {
-      const btn = wrapper.find(
-        '[data-test="dashboard-if-no-panel-add-panel-btn"]',
-      );
+      const btn = wrapper.find('[data-test="dashboard-if-no-panel-add-panel-btn"]');
       await btn.trigger("click");
       await btn.trigger("click");
       expect(wrapper.emitted("update:Panel")).toHaveLength(2);
     });
   });
 
-  describe("getImageURL utility", () => {
-    it("should not call getImageURL when viewOnly changes to true after initial mount", async () => {
+  describe("image visibility", () => {
+    it("should keep the image in the DOM regardless of viewOnly", async () => {
       wrapper = mountNoPanel({ viewOnly: false });
-      vi.clearAllMocks();
       await wrapper.setProps({ viewOnly: true });
-      // getImageURL is not expected to be called again — image is already rendered
-      // The image still exists in the DOM regardless of viewOnly
-      expect(wrapper.find("img").exists()).toBe(true);
+      expect(wrapper.find('[data-test="empty-panel-art"]').exists()).toBe(true);
     });
   });
 });

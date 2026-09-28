@@ -14,18 +14,48 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { addLabelToPromQlQuery } from "@/utils/query/promQLUtils";
-import {
-  addLabelsToSQlQuery,
-  getStreamFromQuery,
-} from "@/utils/query/sqlUtils";
+import { addLabelsToSQlQuery, getStreamFromQuery } from "@/utils/query/sqlUtils";
 import {
   formatInterval,
   formatRateInterval,
   getTimeInSecondsBasedOnUnit,
+  getVariablesReferencedInQueries,
   normalizeVariableSyntax,
+  replaceVariablePlaceholders,
+  type VariableFormat,
 } from "@/utils/dashboard/variables/variablesUtils";
 import { escapeSingleQuotes } from "@/utils/zincutils";
 import { SELECT_ALL_VALUE } from "@/utils/dashboard/constants";
+import { MIN_PERCENTILE_SAMPLES } from "@/utils/metrics/metricDefaults";
+
+const formatPanelVariableValue = (
+  variable: any,
+  format: VariableFormat | undefined,
+  queryType: any,
+): string => {
+  const escape = (value: any) => escapeSingleQuotes(String(value));
+
+  if (!Array.isArray(variable.value)) {
+    // If no data found (null value), use SELECT_ALL_VALUE
+    return `${escape(variable.value === null ? SELECT_ALL_VALUE : variable.value)}`;
+  }
+
+  // If no data found (empty array), use SELECT_ALL_VALUE
+  const values = variable.value.length === 0 ? [SELECT_ALL_VALUE] : variable.value;
+  const singleQuoted = values.map((value: any) => `'${escape(value)}'`).join(",") || "''";
+  switch (format) {
+    case "csv":
+      return values.join(",");
+    case "pipe":
+      return values.join("|");
+    case "doublequote":
+      return values.map((value: any) => `"${value}"`).join(",") || '""';
+    case "singlequote":
+      return singleQuoted;
+    default:
+      return queryType === "sql" ? singleQuoted : values.join("|");
+  }
+};
 
 /**
  * Composable that encapsulates all panel-level variable substitution logic.
@@ -46,23 +76,12 @@ export const usePanelVariableSubstitution = ({
   log: (...args: any[]) => void;
 }) => {
   // currently dependent variables data snapshot (mirrors the initialisation in usePanelDataLoader)
-  let currentDependentVariablesData = variablesData?.value?.values
-    ? JSON.parse(
-        JSON.stringify(
-          variablesData.value?.values
-            ?.filter((it: any) => it.type != "dynamic_filters") // ad hoc filters are not considered as dependent filters as they are globally applied
-            ?.filter((it: any) => {
-              const regexForVariable = new RegExp(
-                `(?:\\$\\{?\\s*${it.name}\\s*(?::\\s*(?:csv|pipe|doublequote|singlequote)\\s*)?\\}?)|(?:\\{\\{\\s*${it.name}\\s*(?::\\s*(?:csv|pipe|doublequote|singlequote)\\s*)?\\}\\})`,
-              );
-
-              return panelSchema.value.queries
-                ?.map((q: any) => regexForVariable.test(q?.query))
-                ?.includes(true);
-            }),
-        ),
-      )
-    : [];
+  let currentDependentVariablesData = JSON.parse(
+    JSON.stringify(
+      getVariablesReferencedInQueries(variablesData?.value?.values, panelSchema.value.queries) ??
+        [],
+    ),
+  );
 
   let currentDynamicVariablesData = variablesData?.value?.values
     ? JSON.parse(
@@ -85,23 +104,9 @@ export const usePanelVariableSubstitution = ({
   // Data accessors
 
   const getDependentVariablesData = () =>
-    variablesData.value?.values
-      ?.filter((it: any) => it.type != "dynamic_filters") // ad hoc filters are not considered as dependent filters as they are globally applied
-      ?.filter((it: any) => {
-        const regexForVariable = new RegExp(
-          `(?:\\$\\{?\\s*${it.name}\\s*(?::\\s*(?:csv|pipe|doublequote|singlequote)\\s*)?\\}?)|(?:\\{\\{\\s*${it.name}\\s*(?::\\s*(?:csv|pipe|doublequote|singlequote)\\s*)?\\}\\})`,
-        );
-
-        return panelSchema.value.queries
-          ?.map((q: any) => regexForVariable.test(q?.query))
-          ?.includes(true);
-      });
+    getVariablesReferencedInQueries(variablesData.value?.values, panelSchema.value.queries);
 
   const getDynamicVariablesData = () => {
-    const sqlQueryStreams =
-      panelSchema.value.queryType == "sql"
-        ? panelSchema.value.queries.map((q: any) => getStreamFromQuery(q.query))
-        : [];
     const adHocVariables = variablesData.value?.values
       ?.filter((it: any) => it.type === "dynamic_filters")
       ?.map((it: any) => it?.value)
@@ -113,32 +118,22 @@ export const usePanelVariableSubstitution = ({
 
   // Snapshot updaters
 
-  const updateCurrentDependentVariablesData = (
-    newDependentVariablesData: any,
-  ) => {
-    currentDependentVariablesData = JSON.parse(
-      JSON.stringify(newDependentVariablesData),
-    );
+  const updateCurrentDependentVariablesData = (newDependentVariablesData: any) => {
+    currentDependentVariablesData = JSON.parse(JSON.stringify(newDependentVariablesData));
   };
 
   const updateCurrentDynamicVariablesData = (newDynamicVariablesData: any) => {
-    currentDynamicVariablesData = JSON.parse(
-      JSON.stringify(newDynamicVariablesData),
-    );
+    currentDynamicVariablesData = JSON.parse(JSON.stringify(newDynamicVariablesData));
   };
 
   // Loading-state checks
 
   const areDynamicVariablesStillLoading = () =>
     variablesData.value?.values?.some(
-      (it: any) =>
-        it.type === "dynamic_filters" &&
-        (it.isLoading || it.isVariableLoadingPending),
+      (it: any) => it.type === "dynamic_filters" && (it.isLoading || it.isVariableLoadingPending),
     );
 
-  const areDependentVariablesStillLoadingWith = (
-    newDependentVariablesData: any,
-  ) => {
+  const areDependentVariablesStillLoadingWith = (newDependentVariablesData: any) => {
     const result = newDependentVariablesData?.some((it: any) => {
       const hasNullValue = it.value == null;
       const hasEmptyArray = Array.isArray(it.value) && it.value.length === 0;
@@ -190,13 +185,9 @@ export const usePanelVariableSubstitution = ({
     return true;
   };
 
-  const isAllRegularVariablesValuesSameWith = (
-    newDependentVariablesData: any,
-  ) =>
+  const isAllRegularVariablesValuesSameWith = (newDependentVariablesData: any) =>
     newDependentVariablesData.every((it: any) => {
-      const oldValue = currentDependentVariablesData.find(
-        (it2: any) => it2.name == it.name,
-      );
+      const oldValue = currentDependentVariablesData.find((it2: any) => it2.name == it.name);
       return it.multiSelect
         ? areArraysEqual(it.value, oldValue?.value)
         : it.value == oldValue?.value && oldValue?.value != "";
@@ -204,13 +195,9 @@ export const usePanelVariableSubstitution = ({
 
   const isAllDynamicVariablesValuesSameWith = (newDynamicVariablesData: any) =>
     newDynamicVariablesData.every((it: any) => {
-      const oldValue = currentDynamicVariablesData?.find(
-        (it2: any) => it2.name == it.name,
-      );
+      const oldValue = currentDynamicVariablesData?.find((it2: any) => it2.name == it.name);
       return (
-        oldValue?.value != "" &&
-        it.value == oldValue?.value &&
-        it.operator == oldValue?.operator
+        oldValue?.value != "" && it.value == oldValue?.value && it.operator == oldValue?.operator
       );
     });
 
@@ -219,7 +206,7 @@ export const usePanelVariableSubstitution = ({
   const ifPanelVariablesCompletedLoading = () => {
     // STEP 1: Check if there are any dynamic variables that are still loading
     log("Step1: checking if dynamic variables are loading, starting...");
-    const newDynamicVariablesData = getDynamicVariablesData();
+    getDynamicVariablesData();
 
     if (areDynamicVariablesStillLoading()) {
       log("Step1: dynamic variables still loading..., returning false");
@@ -266,37 +253,18 @@ export const usePanelVariableSubstitution = ({
     // so we need to fire the query
     log("Step3: checking if no of variables have changed, starting...");
 
-    log(
-      "Step3: newDependentVariablesData,",
-      JSON.stringify(newDependentVariablesData, null, 2),
-    );
-    log(
-      "Step3: newDynamicVariablesData...",
-      JSON.stringify(newDynamicVariablesData, null, 2),
-    );
+    log("Step3: newDependentVariablesData,", JSON.stringify(newDependentVariablesData, null, 2));
+    log("Step3: newDynamicVariablesData...", JSON.stringify(newDynamicVariablesData, null, 2));
 
     // if the length of the any of the regular and old dynamic data has changed,
     // we need to fire the query
-    log(
-      "Step3: newDependentVariablesData?.length",
-      newDependentVariablesData?.length,
-    );
-    log(
-      "Step3: newDynamicVariablesData?.length",
-      newDynamicVariablesData?.length,
-    );
-    log(
-      "Step3: currentDependentVariablesData?.length",
-      currentDependentVariablesData?.length,
-    );
-    log(
-      "Step3: currentAdHocVariablesData?.length",
-      currentDynamicVariablesData?.length,
-    );
+    log("Step3: newDependentVariablesData?.length", newDependentVariablesData?.length);
+    log("Step3: newDynamicVariablesData?.length", newDynamicVariablesData?.length);
+    log("Step3: currentDependentVariablesData?.length", currentDependentVariablesData?.length);
+    log("Step3: currentAdHocVariablesData?.length", currentDynamicVariablesData?.length);
 
     if (
-      newDependentVariablesData?.length !=
-        currentDependentVariablesData?.length ||
+      newDependentVariablesData?.length != currentDependentVariablesData?.length ||
       newDynamicVariablesData?.length != currentDynamicVariablesData?.length
     ) {
       updateCurrentDependentVariablesData(newDependentVariablesData);
@@ -321,33 +289,19 @@ export const usePanelVariableSubstitution = ({
     // 3. Regular variables  = 0 and Dynamic variables >= 1
     // 4. Regular variables >= 1 and Dynamic variables >= 1
 
-    log(
-      "Step4: newDependentVariablesData.length",
-      newDependentVariablesData?.length,
-    );
-    log(
-      "Step4: newDynamicVariablesData.length",
-      newDynamicVariablesData?.length,
-    );
+    log("Step4: newDependentVariablesData.length", newDependentVariablesData?.length);
+    log("Step4: newDynamicVariablesData.length", newDynamicVariablesData?.length);
 
     // execute different scenarios based on the count of variables
-    if (
-      !newDependentVariablesData?.length &&
-      !newDynamicVariablesData?.length
-    ) {
+    if (!newDependentVariablesData?.length && !newDynamicVariablesData?.length) {
       // 1. Regular variables  = 0 and Dynamic variables  = 0
       // go ahead and bravly load the data
       !newDependentVariablesData?.length && !newDynamicVariablesData?.length;
 
-      log(
-        "Step4: 1: no variables are there, no waiting, can call the api, returning true...",
-      );
+      log("Step4: 1: no variables are there, no waiting, can call the api, returning true...");
 
       return true;
-    } else if (
-      newDependentVariablesData?.length &&
-      !newDynamicVariablesData?.length
-    ) {
+    } else if (newDependentVariablesData?.length && !newDynamicVariablesData?.length) {
       log("Step4: 2: Regular variables >= 1 and Dynamic variables  = 0");
       // 2. Regular variables >= 1 and Dynamic variables  = 0
 
@@ -369,10 +323,7 @@ export const usePanelVariableSubstitution = ({
 
       log("Step4: 2: regular variables values has changed, returning true");
       return true;
-    } else if (
-      !newDependentVariablesData?.length &&
-      newDynamicVariablesData?.length
-    ) {
+    } else if (!newDependentVariablesData?.length && newDynamicVariablesData?.length) {
       // 3. Regular variables  = 0 and Dynamic variables >= 1
       log("Step4: 3: Regular variables  = 0 and Dynamic variables >= 1");
 
@@ -390,10 +341,7 @@ export const usePanelVariableSubstitution = ({
 
       log("Step4: 3: dynamic variables values has changed, returning true");
       return true;
-    } else if (
-      newDependentVariablesData?.length &&
-      newDynamicVariablesData?.length
-    ) {
+    } else if (newDependentVariablesData?.length && newDynamicVariablesData?.length) {
       // 4. Regular variables >= 1 and Dynamic variables >= 1
       log("Step4: 4: Regular variables >= 1 and Dynamic variables >= 1");
 
@@ -405,20 +353,12 @@ export const usePanelVariableSubstitution = ({
       const isAllDynamicVariablesValuesSame =
         isAllDynamicVariablesValuesSameWith(newDynamicVariablesData);
 
-      log(
-        "Step4: 4: isAllRegularVariablesValuesSame",
-        isAllRegularVariablesValuesSame,
-      );
-      log(
-        "Step4: 4: isAllDynamicVariablesValuesSame",
-        isAllDynamicVariablesValuesSame,
-      );
+      log("Step4: 4: isAllRegularVariablesValuesSame", isAllRegularVariablesValuesSame);
+      log("Step4: 4: isAllDynamicVariablesValuesSame", isAllDynamicVariablesValuesSame);
 
       // if any has changed
       if (isAllRegularVariablesValuesSame && isAllDynamicVariablesValuesSame) {
-        log(
-          "Step4: 4: regular and dynamic variables has same old value, returning false",
-        );
+        log("Step4: 4: regular and dynamic variables has same old value, returning false");
         return false;
       }
 
@@ -430,6 +370,7 @@ export const usePanelVariableSubstitution = ({
       log("Step4: 4: variables values has changed, returning true");
       return true;
     }
+    return;
   };
 
   // Query substitution
@@ -453,14 +394,11 @@ export const usePanelVariableSubstitution = ({
 
     //fixed variables value calculations
     //scrape interval by default 15 seconds
-    const scrapeInterval =
-      store.state.organizationData.organizationSettings.scrape_interval ?? 15;
+    const scrapeInterval = store.state.organizationData.organizationSettings.scrape_interval ?? 15;
 
     // timestamp in seconds / chart panel width
     const __interval =
-      (endISOTimestamp - startISOTimestamp) /
-      (chartPanelRef.value?.offsetWidth ?? 1000) /
-      1000;
+      (endISOTimestamp - startISOTimestamp) / (chartPanelRef.value?.offsetWidth ?? 1000) / 1000;
 
     // if less than 1, set it to 1
     // minimum will be 15000 millisecond
@@ -472,24 +410,33 @@ export const usePanelVariableSubstitution = ({
     // calculate rate interval in seconds
     // we need formatted interval value in seconds
     const __rate_interval: any = Math.max(
-      getTimeInSecondsBasedOnUnit(
-        formattedInterval.value,
-        formattedInterval.unit,
-      ) + scrapeInterval,
+      getTimeInSecondsBasedOnUnit(formattedInterval.value, formattedInterval.unit) + scrapeInterval,
       4 * scrapeInterval,
     );
 
     //get interval in ms
     const __interval_ms =
-      getTimeInSecondsBasedOnUnit(
-        formattedInterval.value,
-        formattedInterval.unit,
-      ) * 1000;
+      getTimeInSecondsBasedOnUnit(formattedInterval.value, formattedInterval.unit) * 1000;
 
     // calculate range in seconds (total time range of the dashboard)
     // Note: startISOTimestamp and endISOTimestamp are in microseconds (from API)
     const __range_micros = endISOTimestamp - startISOTimestamp;
     const __range_seconds = __range_micros / 1000000; // Convert microseconds to seconds
+
+    // `quantile_over_time`'s window — the same three bounds as the explorer's
+    // `computePercentileWindow`, so a card and the panel it drills into smooth
+    // the metric identically:
+    //   FLOOR  the rate interval (no gaps between evaluation points)
+    //   TARGET MIN_PERCENTILE_SAMPLES x scrape, so p90 and p99 stop interpolating
+    //          between the same top pair and drawing as one line
+    //   CAP    a quarter of the range, or the window flattens the whole chart
+    // A non-finite range must not reach the cap: Math.max/min propagate NaN, and
+    // formatRateInterval(NaN) is "", which would emit the unparseable `x[]`.
+    const cappableRange = Number.isFinite(__range_seconds) ? Math.max(0, __range_seconds) : 0;
+    const __percentile_interval: any = Math.min(
+      Math.max(__rate_interval, MIN_PERCENTILE_SAMPLES * scrapeInterval),
+      Math.max(__rate_interval, cappableRange / 4),
+    );
 
     // format range, ensuring it's never empty (minimum 1s for PromQL compatibility)
     const formattedRange = formatRateInterval(__range_seconds) || "1s";
@@ -508,6 +455,10 @@ export const usePanelVariableSubstitution = ({
         value: `${formatRateInterval(__rate_interval)}`,
       },
       {
+        name: "__percentile_interval",
+        value: `${formatRateInterval(__percentile_interval)}`,
+      },
+      {
         name: "__range",
         value: formattedRange,
       },
@@ -521,154 +472,39 @@ export const usePanelVariableSubstitution = ({
       },
     ];
 
-    // replace fixed variables with its values
-    fixedVariables?.forEach((variable: any) => {
-      // replace $VARIABLE_NAME, ${VARIABLE_NAME}, or {{VARIABLE_NAME}} with its value
-      const variableName = `$${variable.name}`;
-      const variableNameWithBrackets = `\${${variable.name}}`;
-      const mustachePlaceholder = `{{${variable.name}}}`;
-      const variableValue = variable.value;
-      if (
-        query.includes(variableName) ||
-        query.includes(variableNameWithBrackets) ||
-        query.includes(mustachePlaceholder)
-      ) {
-        metadata.push({
-          type: "fixed",
-          name: variable.name,
-          value: variable.value,
-        });
-      }
-      query = query.replaceAll(mustachePlaceholder, variableValue);
-      query = query.replaceAll(variableNameWithBrackets, variableValue);
-      query = query.replaceAll(variableName, variableValue);
+    const fixedValues = new Map<string, string>(fixedVariables.map((it) => [it.name, it.value]));
+    const dependentVariables = new Map<string, any>();
+    currentDependentVariablesData?.forEach((variable: any) => {
+      if (!dependentVariables.has(variable.name)) dependentVariables.set(variable.name, variable);
     });
 
-    if (currentDependentVariablesData?.length) {
-      currentDependentVariablesData?.forEach((variable: any) => {
-        // replace $VARIABLE_NAME or ${VARIABLE_NAME} with its value
-        const variableName = `$${variable.name}`;
-        const variableNameWithBrackets = `\${${variable.name}}`;
+    const reported = new Set<string>();
+    const report = (type: string, name: string, value: any) => {
+      if (reported.has(`${type}:${name}`)) return;
+      reported.add(`${type}:${name}`);
+      metadata.push({ type, name, value });
+    };
 
-        let variableValue = "";
-        if (Array.isArray(variable.value)) {
-          // If no data found (empty array), use SELECT_ALL_VALUE
-          const valueToUse =
-            variable.value.length === 0 ? [SELECT_ALL_VALUE] : variable.value;
-          const value =
-            valueToUse
-              .map(
-                (value: any) =>
-                  `'${variable.escapeSingleQuotes ? escapeSingleQuotes(value) : value}'`,
-              )
-              .join(",") || "''";
-          const possibleVariablesPlaceHolderTypes = [
-            // Mustache forms
-            {
-              placeHolder: `{{${variable.name}:csv}}`,
-              value: valueToUse.join(","),
-            },
-            {
-              placeHolder: `{{${variable.name}:pipe}}`,
-              value: valueToUse.join("|"),
-            },
-            {
-              placeHolder: `{{${variable.name}:doublequote}}`,
-              value:
-                valueToUse.map((value: any) => `"${value}"`).join(",") || '""',
-            },
-            {
-              placeHolder: `{{${variable.name}:singlequote}}`,
-              value: value,
-            },
-            {
-              placeHolder: `{{${variable.name}}}`,
-              value: queryType === "sql" ? value : valueToUse.join("|"),
-            },
-            // Dollar-sign forms (existing)
-            {
-              placeHolder: `\${${variable.name}:csv}`,
-              value: valueToUse.join(","),
-            },
-            {
-              placeHolder: `\${${variable.name}:pipe}`,
-              value: valueToUse.join("|"),
-            },
-            {
-              placeHolder: `\${${variable.name}:doublequote}`,
-              value:
-                valueToUse.map((value: any) => `"${value}"`).join(",") || '""',
-            },
-            {
-              placeHolder: `\${${variable.name}:singlequote}`,
-              value: value,
-            },
-            {
-              placeHolder: `\${${variable.name}}`,
-              value: queryType === "sql" ? value : valueToUse.join("|"),
-            },
-            {
-              placeHolder: `\$${variable.name}`,
-              value: queryType === "sql" ? value : valueToUse.join("|"),
-            },
-          ];
-
-          possibleVariablesPlaceHolderTypes.forEach((placeHolderObj) => {
-            if (query.includes(placeHolderObj.placeHolder)) {
-              metadata.push({
-                type: "variable",
-                name: variable.name,
-                value: placeHolderObj.value,
-              });
-            }
-            query = query.replaceAll(
-              placeHolderObj.placeHolder,
-              placeHolderObj.value,
-            );
-          });
-        } else {
-          // If no data found (null value), use SELECT_ALL_VALUE
-          const valueToUse =
-            variable.value === null ? SELECT_ALL_VALUE : variable.value;
-          variableValue = `${variable.escapeSingleQuotes ? escapeSingleQuotes(valueToUse) : valueToUse}`;
-          const mustachePlaceholder = `{{${variable.name}}}`;
-          if (
-            query.includes(variableName) ||
-            query.includes(variableNameWithBrackets) ||
-            query.includes(mustachePlaceholder)
-          ) {
-            metadata.push({
-              type: "variable",
-              name: variable.name,
-              value: valueToUse,
-            });
-          }
-
-          // Replace all forms of the variable placeholder in the query,
-          // placeholders can be in the form of {{varName}}, ${varName}, ${varName}, {{varName:csv}}, ${varName:csv} etc.
-          // which will be replaced with the variable value. For csv and pipe forms, if the variable value is an array, it will be joined with comma or pipe respectively.
-          // For doublequote form, the variable value will be wrapped with double quotes.
-          // For singlequote form, the variable value will be wrapped with single quotes.
-          query = query.replaceAll(`{{${variable.name}:csv}}`, variableValue);
-          query = query.replaceAll(`{{${variable.name}:pipe}}`, variableValue);
-          query = query.replaceAll(
-            `{{${variable.name}:doublequote}}`,
-            variableValue,
-          );
-          query = query.replaceAll(
-            `{{${variable.name}:singlequote}}`,
-            variableValue,
-          );
-          query = query.replaceAll(mustachePlaceholder, variableValue);
-          query = query.replaceAll(variableNameWithBrackets, variableValue);
-          query = query.replaceAll(variableName, variableValue);
+    query = replaceVariablePlaceholders(
+      query,
+      [...fixedValues.keys(), ...dependentVariables.keys()],
+      ({ name, format }) => {
+        // fixed variables shadow a dashboard variable of the same name
+        if (fixedValues.has(name)) {
+          if (format) return undefined;
+          report("fixed", name, fixedValues.get(name));
+          return fixedValues.get(name);
         }
-      });
 
-      return { query, metadata };
-    } else {
-      return { query, metadata };
-    }
+        const variable = dependentVariables.get(name);
+        const value = formatPanelVariableValue(variable, format, queryType);
+        const isScalar = !Array.isArray(variable.value);
+        report("variable", name, isScalar ? (variable.value ?? SELECT_ALL_VALUE) : value);
+        return value;
+      },
+    );
+
+    return { query, metadata };
   };
 
   const applyDynamicVariables = async (query: any, queryType: any) => {
@@ -693,17 +529,12 @@ export const usePanelVariableSubstitution = ({
           operator: variable.operator,
         });
 
-        query = addLabelToPromQlQuery(
-          query,
-          variable.name,
-          variable.value,
-          variable.operator,
-        );
+        query = addLabelToPromQlQuery(query, variable.name, variable.value, variable.operator);
       });
     }
 
     if (queryType === "sql") {
-      const queryStream = await getStreamFromQuery(query);
+      await getStreamFromQuery(query);
 
       const applicableAdHocVariables = adHocVariables;
       // .filter((it: any) => {

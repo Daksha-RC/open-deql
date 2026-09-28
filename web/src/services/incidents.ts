@@ -14,13 +14,18 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import http from "./http";
+import type { TranslateFn } from "@/types/i18n";
 import serviceStreamsApi, {
   type CorrelationRequest,
   type CorrelationResponse,
   type StreamInfo,
 } from "./service_streams";
 import { filterDimensionsForCorrelation } from "@/utils/telemetryCorrelation";
-import { loadIdentityConfig, clearIdentityConfigCache, clearAllIdentityConfigCache } from "@/utils/identityConfig";
+import {
+  loadIdentityConfig,
+  clearIdentityConfigCache,
+  clearAllIdentityConfigCache,
+} from "@/utils/identityConfig";
 
 // Types matching backend API responses
 export interface Incident {
@@ -37,6 +42,8 @@ export interface Incident {
   alert_count: number;
   title?: string;
   assigned_to?: string;
+  acknowledged_by?: string;
+  acknowledged_at?: number;
   created_at: number;
   updated_at: number;
 }
@@ -67,13 +74,36 @@ export interface IncidentAlert {
   incident_id: string;
   alert_id: string;
   alert_name: string;
+  alert_kind?: "internal" | "external";
   alert_fired_at: number;
   correlation_reason: "service_discovery" | "primary_match" | "secondary_match" | "alert_id";
   created_at: number;
+  source_url?: string | null;
+  labels?: Record<string, string> | null;
+  detected_source?: string | null;
+}
+
+export interface CompositeAlertSummary {
+  id: string;
+  name: string;
+  alert_type: "composite";
+  enabled: boolean;
+  folder_id: string;
 }
 
 export interface IncidentWithAlerts extends Incident {
   alerts: IncidentAlert[];
+  triggers: IncidentAlert[];
+  composite_alerts?: CompositeAlertSummary[];
+}
+
+export interface ExternalAlertPayload {
+  id: string;
+  detected_source: string;
+  source_url: string | null;
+  first_seen_at: number;
+  last_seen_at: number;
+  last_payload: unknown;
 }
 
 export interface UpdateSeverityResponse extends Incident {
@@ -83,6 +113,20 @@ export interface UpdateSeverityResponse extends Incident {
 export interface ListIncidentsResponse {
   incidents: Incident[];
   total: number;
+}
+
+/** A superseded RCA report retained for an incident. */
+export interface ArchivedRcaReport {
+  content: string;
+  /** Microseconds since epoch. */
+  archived_at: number;
+}
+
+export interface RcaHistoryResponse {
+  /** The report currently shown on the incident, or null if none has run. */
+  current: string | null;
+  /** Superseded reports, newest first. */
+  previous: ArchivedRcaReport[];
 }
 
 export interface IncidentStats {
@@ -107,7 +151,6 @@ export interface IncidentCorrelatedStreams {
   correlationData: CorrelationResponse | null;
 }
 
-
 const incidents = {
   /**
    * List incidents with optional filtering and pagination
@@ -117,7 +160,7 @@ const incidents = {
     status?: string,
     limit: number = 50,
     offset: number = 0,
-    keyword?: string
+    keyword?: string,
   ) => {
     let url = `/api/v2/${org_identifier}/alerts/incidents?limit=${limit}&offset=${offset}`;
     if (status) {
@@ -134,7 +177,16 @@ const incidents = {
    */
   get: (org_identifier: string, incident_id: string) => {
     return http().get<IncidentWithAlerts>(
-      `/api/v2/${org_identifier}/alerts/incidents/${incident_id}`
+      `/api/v2/${org_identifier}/alerts/incidents/${incident_id}`,
+    );
+  },
+
+  /**
+   * Get the raw webhook payload originally received for an external alert
+   */
+  getExternalAlertPayload: (org_identifier: string, external_alert_id: string) => {
+    return http().get<ExternalAlertPayload>(
+      `/api/v2/${org_identifier}/alerts/incidents/external-alerts/${external_alert_id}/payload`,
     );
   },
 
@@ -144,11 +196,11 @@ const incidents = {
   updateStatus: (
     org_identifier: string,
     incident_id: string,
-    status: "open" | "acknowledged" | "resolved"
+    status: "open" | "acknowledged" | "resolved",
   ) => {
     return http().patch<Incident>(
       `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/update`,
-      { status }
+      { status },
     );
   },
 
@@ -158,11 +210,11 @@ const incidents = {
   updateIncident: (
     org_identifier: string,
     incident_id: string,
-    updates: { title?: string; severity?: string }
+    updates: { title?: string; severity?: string },
   ) => {
     return http().patch<Incident | UpdateSeverityResponse>(
       `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/update`,
-      updates
+      updates,
     );
   },
 
@@ -170,9 +222,7 @@ const incidents = {
    * Get incident statistics
    */
   getStats: (org_identifier: string) => {
-    return http().get<IncidentStats>(
-      `/api/v2/${org_identifier}/alerts/incidents/stats`
-    );
+    return http().get<IncidentStats>(`/api/v2/${org_identifier}/alerts/incidents/stats`);
   },
 
   /**
@@ -181,12 +231,36 @@ const incidents = {
   triggerRca: (
     org_identifier: string,
     incident_id: string,
-    params: { reanalysis?: boolean } = {}
+    params: { reanalysis?: boolean; build_on_previous?: boolean } = {},
+    config: { signal?: AbortSignal } = {},
   ) => {
     return http().post<{ rca_content: string }>(
       `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/rca`,
       null,
-      { params }
+      { params, signal: config.signal },
+    );
+  },
+
+  /**
+   * Fetch the current RCA report plus any superseded reports retained for this
+   * incident, newest first. Loaded on demand so the incident list stays light.
+   */
+  getRcaHistory: (org_identifier: string, incident_id: string) => {
+    return http().get<RcaHistoryResponse>(
+      `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/rca/history`,
+    );
+  },
+
+  /**
+   * Cancel the in-flight RCA analysis for an incident.
+   *
+   * Aborts the server-side run when the handling node owns it, and always records a
+   * terminal cancellation event so the in-flight guard is released immediately —
+   * this is what unblocks a retry after a run was stranded by a restart.
+   */
+  cancelRca: (org_identifier: string, incident_id: string) => {
+    return http().delete<{ message: string; aborted_local_task: boolean }>(
+      `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/rca`,
     );
   },
 
@@ -194,16 +268,19 @@ const incidents = {
    * Get correlated telemetry streams for an incident
    *
    * Uses the incident's group_values to find related logs, metrics, and traces
-   * via the service correlation API. Now filters dimensions to only include
+   * via the service correlation API. Filters dimensions to only include
    * fields that are actually used for disambiguation.
    *
    * @param org_identifier Organization ID
    * @param incident The incident with group_values
+   * @param t Translator, threaded from the calling component — the only
+   *   user-facing string here is the "unknown service" fallback name.
    * @returns Correlated streams grouped by type
    */
   getCorrelatedStreams: async (
     org_identifier: string,
-    incident: Incident
+    incident: Incident,
+    t: TranslateFn,
   ): Promise<IncidentCorrelatedStreams> => {
     const allDimensions = incident.group_values ?? {};
 
@@ -214,16 +291,11 @@ const incidents = {
 
       // Filter dimensions to only include disambiguation fields
       filteredDimensions = filterDimensionsForCorrelation(allDimensions, identityConfig);
-
-      console.log("[incidents] Dimension filtering for incident correlation:", {
-        incident_id: incident.id,
-        original_count: Object.keys(allDimensions).length,
-        filtered_count: Object.keys(filteredDimensions).length,
-        original: allDimensions,
-        filtered: filteredDimensions
-      });
     } catch (err) {
-      console.warn("[incidents] Failed to load identity config for dimension filtering, using all dimensions:", err);
+      console.warn(
+        "[incidents] Failed to load identity config for dimension filtering, using all dimensions:",
+        err,
+      );
     }
 
     const request: CorrelationRequest = {
@@ -245,7 +317,7 @@ const incidents = {
     // Handle null response when no service is found
     if (!correlationData) {
       return {
-        serviceName: "Unknown Service",
+        serviceName: t("traces.unknownService"),
         matchedDimensions: {},
         additionalDimensions: allDimensions,
         logStreams: [],
@@ -270,19 +342,16 @@ const incidents = {
    * Get event timeline for an incident
    */
   getEvents: (org_identifier: string, incident_id: string) => {
-    return http().get(
-      `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/events`
-    );
+    return http().get(`/api/v2/${org_identifier}/alerts/incidents/${incident_id}/events`);
   },
 
   /**
    * Post a comment on an incident
    */
   postComment: (org_identifier: string, incident_id: string, comment: string) => {
-    return http().post(
-      `/api/v2/${org_identifier}/alerts/incidents/${incident_id}/events/comment`,
-      { comment }
-    );
+    return http().post(`/api/v2/${org_identifier}/alerts/incidents/${incident_id}/events/comment`, {
+      comment,
+    });
   },
 
   /**

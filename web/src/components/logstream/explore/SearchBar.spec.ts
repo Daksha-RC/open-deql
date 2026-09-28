@@ -15,7 +15,6 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import { createStore } from "vuex";
 import i18n from "@/locales";
 
@@ -26,7 +25,7 @@ vi.hoisted(() => {
   // SearchBar.vue uses defineAsyncComponent as a free variable (not imported from vue).
   // In JSDOM globalThis properties act as free variables, so inject it here before module eval.
   // Use the same data-test that the spec's vi.mock("@/components/CodeQueryEditor.vue") provides.
-  (globalThis as any).defineAsyncComponent = (_loader: any) => ({
+  (globalThis as any).defineAsyncComponent = () => ({
     name: "AsyncCodeQueryEditor",
     template: '<div data-test="code-editor-stub"></div>',
     props: ["query", "keywords", "functions", "editor-id"],
@@ -40,8 +39,6 @@ vi.hoisted(() => {
 });
 
 import SearchBar from "./SearchBar.vue";
-
-installQuasar();
 
 vi.mock("@/composables/useLogs", () => ({
   default: () => ({
@@ -119,13 +116,16 @@ describe("SearchBar (logstream/explore)", () => {
     it("should render search bar container", async () => {
       const wrapper = mountComp();
       await flushPromises();
-      expect(wrapper.find(".logs-search-bar-component").exists()).toBe(true);
+      expect(wrapper.find('[data-test="logstream-explore-search-bar-container"]').exists()).toBe(
+        true,
+      );
     });
 
     it("should render download logs button", async () => {
       const wrapper = mountComp();
       await flushPromises();
-      expect(wrapper.find(".download-logs-btn").exists()).toBe(true);
+      // The download button is identified by its title attribute
+      expect(wrapper.find("button[data-o2-btn]").exists()).toBe(true);
     });
 
     it("should render run query button", async () => {
@@ -146,7 +146,6 @@ describe("SearchBar (logstream/explore)", () => {
       const wrapper = mountComp({ ...defaultQueryData, streamType: "enrichment_tables" });
       await flushPromises();
       // v-show hides the element but it still renders in DOM, just hidden
-      const dateTimeContainer = wrapper.find(".float-left");
       // The container should exist but be hidden
       expect(wrapper.exists()).toBe(true);
     });
@@ -180,8 +179,11 @@ describe("SearchBar (logstream/explore)", () => {
       });
       await flushPromises();
 
-      const downloadBtn = wrapper.find(".download-logs-btn");
-      expect(downloadBtn.attributes("disabled")).toBeDefined();
+      // OButton renders as native <button data-o2-btn> with native disabled attribute
+      const allBtns = wrapper.findAll("button[data-o2-btn]");
+      const downloadBtn = allBtns.find((btn) => btn.attributes("title") === "Export logs");
+      expect(downloadBtn).toBeDefined();
+      expect(downloadBtn!.attributes("disabled")).toBeDefined();
     });
 
     it("should enable download button when hits exist", async () => {
@@ -191,7 +193,6 @@ describe("SearchBar (logstream/explore)", () => {
       });
       await flushPromises();
 
-      const downloadBtn = wrapper.find(".download-logs-btn");
       // When hits exist, the disabled prop condition is false
       // (hasOwnProperty('hits') && !hits.length) = (true && false) = false
       expect(wrapper.exists()).toBe(true);

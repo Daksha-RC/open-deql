@@ -16,11 +16,8 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { mount } from "@vue/test-utils";
 import { createStore } from "vuex";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import LicensePeriod from "@/enterprise/components/billings/LicensePeriod.vue";
 import i18n from "@/locales";
-
-installQuasar();
 
 // Mock vue-router
 const mockRouter = { push: vi.fn() };
@@ -40,8 +37,7 @@ vi.mock("@/aws-exports", () => ({
 
 /** Convert a "days from now" value into the microsecond timestamp LicensePeriod expects */
 const msToMicro = (ms: number) => ms * 1000;
-const nowPlusDays = (days: number) =>
-  msToMicro(Date.now() + days * 24 * 60 * 60 * 1000);
+const nowPlusDays = (days: number) => msToMicro(Date.now() + days * 24 * 60 * 60 * 1000);
 
 const makeStore = (licenseExpiry: number | null | undefined) => ({
   state: {
@@ -55,8 +51,7 @@ const makeStore = (licenseExpiry: number | null | undefined) => ({
  * Creates a real Vuex store so that useStore() in the Composition API
  * component resolves correctly (mocks: { $store } only works for Options API).
  */
-const createTestStore = (zoConfig: Record<string, any>) =>
-  createStore({ state: { zoConfig } });
+const createTestStore = (zoConfig: Record<string, any>) => createStore({ state: { zoConfig } });
 
 const createWrapper = (storeOverride: any) => {
   const testStore = createTestStore(storeOverride.state.zoConfig);
@@ -216,46 +211,44 @@ describe("LicensePeriod.vue", () => {
   describe("Template rendering", () => {
     it("should render the banner when warning is active", () => {
       wrapper = createWrapper(makeStore(nowPlusDays(5)));
-      const banner = wrapper.find(".license-expiry-container");
+      const banner = wrapper.find('[data-test="license-period-container"]');
       expect(banner.exists()).toBe(true);
     });
 
     it("should NOT render the banner when license is far from expiry", () => {
       wrapper = createWrapper(makeStore(nowPlusDays(30)));
-      const banner = wrapper.find(".license-expiry-container");
+      const banner = wrapper.find('[data-test="license-period-container"]');
       expect(banner.exists()).toBe(false);
     });
 
     it("should NOT render the banner when license_expiry is null", () => {
       wrapper = createWrapper(makeStore(null));
-      const banner = wrapper.find(".license-expiry-container");
+      const banner = wrapper.find('[data-test="license-period-container"]');
       expect(banner.exists()).toBe(false);
     });
 
     it("should render the message span when warning is active", () => {
       wrapper = createWrapper(makeStore(nowPlusDays(5)));
-      const span = wrapper.find(".o2-license-message");
+      const span = wrapper.find('[data-test="license-period-message"]');
       expect(span.exists()).toBe(true);
     });
 
     it("should render the subtitle span when warning is active", () => {
       wrapper = createWrapper(makeStore(nowPlusDays(5)));
-      const span = wrapper.find(".o2-license-subtitle");
+      const span = wrapper.find('[data-test="license-period-subtitle"]');
       expect(span.exists()).toBe(true);
-      expect(span.text()).toContain(
-        "Please update your license by contacting your administrator."
-      );
+      expect(span.text()).toContain("Please update your license by contacting your administrator.");
     });
 
     it("should display the expiry message text in the template", () => {
       wrapper = createWrapper(makeStore(nowPlusDays(5)));
-      const span = wrapper.find(".o2-license-message");
+      const span = wrapper.find('[data-test="license-period-message"]');
       expect(span.text()).toMatch(/5 days remaining until your license expires/);
     });
 
     it("should display expired message in the template", () => {
       wrapper = createWrapper(makeStore(nowPlusDays(-3)));
-      const span = wrapper.find(".o2-license-message");
+      const span = wrapper.find('[data-test="license-period-message"]');
       expect(span.text()).toBe("Your license has expired");
     });
   });
@@ -268,9 +261,7 @@ describe("LicensePeriod.vue", () => {
     });
 
     it("should not throw when mounted without zoConfig", () => {
-      expect(() =>
-        createWrapper({ state: { zoConfig: {} } })
-      ).not.toThrow();
+      expect(() => createWrapper({ state: { zoConfig: {} } })).not.toThrow();
     });
 
     it("should unmount gracefully", () => {

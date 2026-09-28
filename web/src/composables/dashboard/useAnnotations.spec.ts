@@ -3,11 +3,14 @@ import { useAnnotations } from "./useAnnotations";
 import { annotationService } from "../../services/dashboard_annotations";
 
 // Mock the annotation service
-vi.mock("../../services/dashboard_annotations", () => ({
-  annotationService: {
-    get_timed_annotations: vi.fn(),
-  },
-}));
+vi.mock("../../services/dashboard_annotations", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    annotationService: {
+      get_timed_annotations: vi.fn(),
+    },
+  });
+});
 
 const mockAnnotationService = vi.mocked(annotationService);
 
@@ -25,7 +28,7 @@ describe("useAnnotations", () => {
 
   it("should create useAnnotations composable with correct parameters", () => {
     const composable = useAnnotations("test-org", "test-dashboard", "test-panel");
-    
+
     expect(composable).toBeDefined();
     expect(composable.refreshAnnotations).toBeDefined();
     expect(typeof composable.refreshAnnotations).toBe("function");
@@ -62,7 +65,7 @@ describe("useAnnotations", () => {
           panels: ["test-panel"],
           start_time: 1000,
           end_time: 2000,
-        }
+        },
       );
       expect(result).toEqual([{ id: 1, text: "test annotation" }]);
     });
@@ -117,7 +120,7 @@ describe("useAnnotations", () => {
           panels: ["test-panel"],
           start_time: 1000,
           end_time: 2000,
-        }
+        },
       );
     });
 
@@ -135,7 +138,7 @@ describe("useAnnotations", () => {
           panels: ["test-panel"],
           start_time: 1000,
           end_time: 2000,
-        }
+        },
       );
     });
 
@@ -153,7 +156,7 @@ describe("useAnnotations", () => {
           panels: ["different-panel"],
           start_time: 1000,
           end_time: 2000,
-        }
+        },
       );
     });
 
@@ -171,7 +174,7 @@ describe("useAnnotations", () => {
           panels: ["test-panel"],
           start_time: 5000,
           end_time: 10000,
-        }
+        },
       );
     });
 
@@ -189,7 +192,7 @@ describe("useAnnotations", () => {
           panels: ["test-panel"],
           start_time: 0,
           end_time: 0,
-        }
+        },
       );
     });
 
@@ -207,7 +210,7 @@ describe("useAnnotations", () => {
           panels: ["test-panel"],
           start_time: -1000,
           end_time: -500,
-        }
+        },
       );
     });
 
@@ -218,7 +221,9 @@ describe("useAnnotations", () => {
       const composable = useAnnotations("test-org", "test-dashboard", "test-panel");
       const result = await composable.refreshAnnotations(1000, 2000);
 
-      expect(result).toBeUndefined();
+      // Normalised to null with the other two "no annotations" shapes: a cached
+      // query result may not be undefined.
+      expect(result).toBeNull();
     });
 
     it("should handle null service response", async () => {
@@ -271,7 +276,7 @@ describe("useAnnotations", () => {
         .mockResolvedValueOnce(mockResponse2);
 
       const composable = useAnnotations("test-org", "test-dashboard", "test-panel");
-      
+
       const result1 = await composable.refreshAnnotations(1000, 2000);
       const result2 = await composable.refreshAnnotations(3000, 4000);
 
@@ -300,11 +305,17 @@ describe("useAnnotations", () => {
     await composable2.refreshAnnotations(3000, 4000);
 
     expect(mockAnnotationService.get_timed_annotations).toHaveBeenCalledTimes(2);
-    expect(mockAnnotationService.get_timed_annotations).toHaveBeenNthCalledWith(1,
-      "org1", "dash1", { panels: ["panel1"], start_time: 1000, end_time: 2000 }
+    expect(mockAnnotationService.get_timed_annotations).toHaveBeenNthCalledWith(
+      1,
+      "org1",
+      "dash1",
+      { panels: ["panel1"], start_time: 1000, end_time: 2000 },
     );
-    expect(mockAnnotationService.get_timed_annotations).toHaveBeenNthCalledWith(2,
-      "org2", "dash2", { panels: ["panel2"], start_time: 3000, end_time: 4000 }
+    expect(mockAnnotationService.get_timed_annotations).toHaveBeenNthCalledWith(
+      2,
+      "org2",
+      "dash2",
+      { panels: ["panel2"], start_time: 3000, end_time: 4000 },
     );
   });
 });

@@ -18,7 +18,7 @@ import {
   STATUS_COLORS,
   STATUS_COLORS_DARK,
   extractStatusFromLog,
-  type StatusInfo,
+  extractStatusFromTemplate,
 } from "./statusParser";
 
 describe("statusParser.ts", () => {
@@ -27,7 +27,17 @@ describe("statusParser.ts", () => {
   // ---------------------------------------------------------------------------
   describe("STATUS_COLORS", () => {
     it("contains all expected log level keys", () => {
-      const keys = ["emergency", "alert", "critical", "error", "warning", "notice", "info", "debug", "ok"];
+      const keys = [
+        "emergency",
+        "alert",
+        "critical",
+        "error",
+        "warning",
+        "notice",
+        "info",
+        "debug",
+        "ok",
+      ];
       keys.forEach((k) => expect(STATUS_COLORS).toHaveProperty(k));
     });
 
@@ -198,31 +208,31 @@ describe("statusParser.ts", () => {
     const cases: [string, string, number][] = [
       ["emergency", "emergency", 0],
       ["EMERGENCY", "emergency", 0],
-      ["emerg",     "emergency", 0],
-      ["fatal",     "emergency", 0],
-      ["FATAL",     "emergency", 0],
-      ["alert",     "alert",     1],
-      ["ALERT",     "alert",     1],
-      ["critical",  "critical",  2],
-      ["crit",      "critical",  2],
-      ["error",     "error",     3],
-      ["ERROR",     "error",     3],
-      ["err",       "error",     3],
-      ["warning",   "warning",   4],
-      ["WARNING",   "warning",   4],
-      ["warn",      "warning",   4],
-      ["WARN",      "warning",   4],
-      ["notice",    "notice",    5],
-      ["info",      "info",      6],
-      ["INFO",      "info",      6],
-      ["information","info",     6],
-      ["debug",     "debug",     7],
-      ["DEBUG",     "debug",     7],
-      ["trace",     "debug",     7],
-      ["verbose",   "debug",     7],
-      ["ok",        "ok",        8],
-      ["success",   "ok",        8],
-      ["SUCCESS",   "ok",        8],
+      ["emerg", "emergency", 0],
+      ["fatal", "emergency", 0],
+      ["FATAL", "emergency", 0],
+      ["alert", "alert", 1],
+      ["ALERT", "alert", 1],
+      ["critical", "critical", 2],
+      ["crit", "critical", 2],
+      ["error", "error", 3],
+      ["ERROR", "error", 3],
+      ["err", "error", 3],
+      ["warning", "warning", 4],
+      ["WARNING", "warning", 4],
+      ["warn", "warning", 4],
+      ["WARN", "warning", 4],
+      ["notice", "notice", 5],
+      ["info", "info", 6],
+      ["INFO", "info", 6],
+      ["information", "info", 6],
+      ["debug", "debug", 7],
+      ["DEBUG", "debug", 7],
+      ["trace", "debug", 7],
+      ["verbose", "debug", 7],
+      ["ok", "ok", 8],
+      ["success", "ok", 8],
+      ["SUCCESS", "ok", 8],
     ];
 
     cases.forEach(([input, expectedLevel, expectedPriority]) => {
@@ -245,14 +255,14 @@ describe("statusParser.ts", () => {
   // ---------------------------------------------------------------------------
   describe("extractStatusFromLog — numeric severity levels", () => {
     const cases: [number, string, number][] = [
-      [0, "info",      6], // OTEL UNSPECIFIED → info
-      [1, "alert",     1],
-      [2, "critical",  2],
-      [3, "error",     3],
-      [4, "warning",   4],
-      [5, "notice",    5],
-      [6, "info",      6],
-      [7, "debug",     7],
+      [0, "info", 6], // OTEL UNSPECIFIED → info
+      [1, "alert", 1],
+      [2, "critical", 2],
+      [3, "error", 3],
+      [4, "warning", 4],
+      [5, "notice", 5],
+      [6, "info", 6],
+      [7, "debug", 7],
     ];
 
     cases.forEach(([input, expectedLevel, expectedPriority]) => {
@@ -289,7 +299,15 @@ describe("statusParser.ts", () => {
     });
 
     it("uses dark colors when isDark=true for levels with dark overrides", () => {
-      const levelsWithDark = ["error", "warning", "info", "debug", "ok", "critical", "emergency"] as const;
+      const levelsWithDark = [
+        "error",
+        "warning",
+        "info",
+        "debug",
+        "ok",
+        "critical",
+        "emergency",
+      ] as const;
       levelsWithDark.forEach((lvl) => {
         const input = lvl === "ok" ? "success" : lvl === "warning" ? "warn" : lvl;
         const result = extractStatusFromLog({ level: input }, true);
@@ -329,8 +347,56 @@ describe("statusParser.ts", () => {
 
     it("priority is unchanged regardless of isDark", () => {
       const light = extractStatusFromLog({ level: "error" }, false);
-      const dark  = extractStatusFromLog({ level: "error" }, true);
+      const dark = extractStatusFromLog({ level: "error" }, true);
       expect(light.priority).toBe(dark.priority);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // extractStatusFromTemplate — template/example text parsing
+  // ---------------------------------------------------------------------------
+  describe("extractStatusFromTemplate", () => {
+    it("returns info for null/empty input (light mode)", () => {
+      const result = extractStatusFromTemplate("");
+      expect(result.level).toBe("info");
+    });
+
+    it("detects ERROR in a template string", () => {
+      const result = extractStatusFromTemplate("ERROR something went wrong <*>");
+      expect(result.level).toBe("error");
+      expect(result.color).toBe(STATUS_COLORS.error);
+    });
+
+    it("detects WARN in a template string", () => {
+      const result = extractStatusFromTemplate("WARN: low memory <:NUM>");
+      expect(result.level).toBe("warning");
+    });
+
+    it("detects INFO in a template string", () => {
+      const result = extractStatusFromTemplate("[INFO] User <*> logged in");
+      expect(result.level).toBe("info");
+      expect(result.color).toBe(STATUS_COLORS.info);
+    });
+
+    it("detects DEBUG in a template string", () => {
+      const result = extractStatusFromTemplate("DEBUG <:METHOD> <:URL>");
+      expect(result.level).toBe("debug");
+    });
+
+    it("returns info when no level keyword is found in template", () => {
+      const result = extractStatusFromTemplate("User <*> accessed <:URL>");
+      expect(result.level).toBe("info");
+    });
+
+    it("uses dark color when isDark=true", () => {
+      const result = extractStatusFromTemplate("ERROR disk full", true);
+      expect(result.level).toBe("error");
+      expect(result.color).toBe(STATUS_COLORS_DARK.error);
+    });
+
+    it("handles non-string input gracefully", () => {
+      const result = extractStatusFromTemplate(null as any);
+      expect(result.level).toBe("info");
     });
   });
 });

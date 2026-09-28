@@ -15,21 +15,15 @@
 
 import { describe, expect, it, beforeEach } from "vitest";
 import { mount } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import * as quasar from "quasar";
 import PatternCard from "./PatternCard.vue";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
-
-installQuasar({
-  plugins: [quasar.Notify],
-});
 
 describe("PatternCard", () => {
   let wrapper: any;
   const mockPattern = {
     pattern_id: "pattern-1",
-    template: "User * logged in from IP *",
+    template: "User <*> logged in from IP <*>",
     description: "User login pattern",
     frequency: 1234,
     percentage: 45.67,
@@ -52,6 +46,31 @@ describe("PatternCard", () => {
 
   const mockIndex = 0;
 
+  const OBadgeStub = {
+    name: "OBadge",
+    props: ["size"],
+    template: '<span data-test-stub="o-badge"><slot /></span>',
+  };
+  const OTooltipStub = {
+    name: "OTooltip",
+    props: ["content", "maxWidth"],
+    template: '<div data-test-stub="o-tooltip" />',
+  };
+  const OButtonStub = {
+    name: "OButton",
+    props: ["variant", "size", "iconLeft", "iconRight", "disabled", "title"],
+    // Do NOT declare "click" in emits — VTU then treats the parent's @click.stop
+    // as a native DOM listener on the root element, which fires on trigger("click").
+    emits: [],
+    template:
+      '<button :data-test="$attrs[\'data-test\']" :title="title" :disabled="disabled || null"><slot /></button>',
+  };
+  const OIconStub = {
+    name: "OIcon",
+    props: ["name", "size"],
+    template: '<span data-test-stub="o-icon"><slot /></span>',
+  };
+
   beforeEach(() => {
     wrapper = mount(PatternCard, {
       props: {
@@ -64,6 +83,10 @@ describe("PatternCard", () => {
         stubs: {
           EqualIcon: { template: '<div class="equal-icon"></div>' },
           NotEqualIcon: { template: '<div class="not-equal-icon"></div>' },
+          OBadge: OBadgeStub,
+          OTooltip: OTooltipStub,
+          OButton: OButtonStub,
+          OIcon: OIconStub,
         },
       },
     });
@@ -88,13 +111,10 @@ describe("PatternCard", () => {
     });
 
     it("should display percentage with 2 decimal places", () => {
-      const percentage = wrapper.find(
-        '[data-test="pattern-card-0-percentage"]',
-      );
+      const percentage = wrapper.find('[data-test="pattern-card-0-percentage"]');
       expect(percentage.exists()).toBe(true);
       expect(percentage.text()).toBe("45.67%");
     });
-
   });
 
   describe("Anomaly Detection", () => {
@@ -104,37 +124,20 @@ describe("PatternCard", () => {
         index: mockIndex,
       });
 
-      const anomalyBadge = wrapper.find(
-        '[data-test="pattern-card-0-anomaly-badge"]',
-      );
+      const anomalyBadge = wrapper.find('[data-test="pattern-card-0-anomaly-badge"]');
       expect(anomalyBadge.exists()).toBe(true);
       expect(anomalyBadge.text()).toContain("Rare Pattern");
     });
 
     it("should not display anomaly badge when pattern is not an anomaly", () => {
-      const anomalyBadge = wrapper.find(
-        '[data-test="pattern-card-0-anomaly-badge"]',
-      );
+      const anomalyBadge = wrapper.find('[data-test="pattern-card-0-anomaly-badge"]');
       expect(anomalyBadge.exists()).toBe(false);
     });
-
   });
 
   describe("Pattern Actions", () => {
-    it("should display include button", () => {
-      const includeBtn = wrapper.find(
-        '[data-test="pattern-card-0-include-btn"]',
-      );
-      expect(includeBtn.exists()).toBe(true);
-    });
-
-    it("should display exclude button", () => {
-      const excludeBtn = wrapper.find(
-        '[data-test="pattern-card-0-exclude-btn"]',
-      );
-      expect(excludeBtn.exists()).toBe(true);
-    });
-
+    // Row-level include/exclude/create-alert buttons were moved into the details
+    // side panel (PatternDetailsDialog); the row now only opens the panel.
     it("should emit click event when card is clicked", async () => {
       const card = wrapper.find('[data-test="pattern-card-0"]');
       await card.trigger("click");
@@ -143,60 +146,10 @@ describe("PatternCard", () => {
       expect(wrapper.emitted("click")![0]).toEqual([mockPattern, mockIndex]);
     });
 
-    it("should emit include event when include button is clicked", async () => {
-      const includeBtn = wrapper.find(
-        '[data-test="pattern-card-0-include-btn"]',
-      );
-      await includeBtn.trigger("click");
-
-      expect(wrapper.emitted("include")).toBeTruthy();
-      expect(wrapper.emitted("include")![0]).toEqual([mockPattern]);
-    });
-
-    it("should emit exclude event when exclude button is clicked", async () => {
-      const excludeBtn = wrapper.find(
-        '[data-test="pattern-card-0-exclude-btn"]',
-      );
-      await excludeBtn.trigger("click");
-
-      expect(wrapper.emitted("exclude")).toBeTruthy();
-      expect(wrapper.emitted("exclude")![0]).toEqual([mockPattern]);
-    });
-
-    it("should not trigger card click when action buttons are clicked", async () => {
-      const includeBtn = wrapper.find(
-        '[data-test="pattern-card-0-include-btn"]',
-      );
-      await includeBtn.trigger("click");
-
-      // Card click should not be emitted when button is clicked
-      expect(wrapper.emitted("click")).toBeFalsy();
-    });
-
-    it("should display create alert button", () => {
-      const createAlertBtn = wrapper.find(
-        '[data-test="pattern-card-0-create-alert-btn"]',
-      );
-      expect(createAlertBtn.exists()).toBe(true);
-    });
-
-    it("should emit create-alert event when create alert button is clicked", async () => {
-      const createAlertBtn = wrapper.find(
-        '[data-test="pattern-card-0-create-alert-btn"]',
-      );
-      await createAlertBtn.trigger("click");
-
-      expect(wrapper.emitted("create-alert")).toBeTruthy();
-      expect(wrapper.emitted("create-alert")![0]).toEqual([mockPattern]);
-    });
-
-    it("should not trigger card click when create alert button is clicked", async () => {
-      const createAlertBtn = wrapper.find(
-        '[data-test="pattern-card-0-create-alert-btn"]',
-      );
-      await createAlertBtn.trigger("click");
-
-      expect(wrapper.emitted("click")).toBeFalsy();
+    it("should not render per-row action buttons", () => {
+      expect(wrapper.find('[data-test="pattern-card-0-include-btn"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="pattern-card-0-exclude-btn"]').exists()).toBe(false);
+      expect(wrapper.find('[data-test="pattern-card-0-create-alert-btn"]').exists()).toBe(false);
     });
   });
 
@@ -213,14 +166,14 @@ describe("PatternCard", () => {
   });
 
   describe("Hover Effect", () => {
-    it("should have table-row-hover class for hover effect", () => {
+    it("should have hover transition class for hover effect", () => {
       const card = wrapper.find('[data-test="pattern-card-0"]');
-      expect(card.classes()).toContain("table-row-hover");
+      expect(card.classes()).toContain("transition-colors");
     });
 
     it("should have cursor-pointer class", () => {
       const card = wrapper.find('[data-test="pattern-card-0"]');
-      expect(card.classes()).toContain("tw:cursor-pointer");
+      expect(card.classes()).toContain("cursor-pointer");
     });
 
     it("should have hover background color class", () => {
@@ -234,48 +187,46 @@ describe("PatternCard", () => {
       const card = wrapper.find('[data-test="pattern-card-0"]');
       // Check that the component has the hover styles applied
       expect(card.exists()).toBe(true);
-      // The actual transition is defined in scoped SCSS
-      // We verify the element exists and has the class
-      expect(card.classes()).toContain("table-row-hover");
+      // The transition is defined via Tailwind utility classes.
+      expect(card.classes()).toContain("transition-colors");
+      expect(card.classes()).toContain("duration-150");
     });
   });
 
   describe("wrap prop", () => {
-    it("should apply tw:flex-nowrap class on template when wrap is false (default)", () => {
+    it("should render a single truncated line when wrap is false (default)", () => {
       const template = wrapper.find('[data-test="pattern-card-0-template"]');
-      expect(template.classes()).toContain("tw:flex-nowrap");
-      expect(template.classes()).toContain("tw:overflow-hidden");
-      expect(template.classes()).not.toContain("tw:flex-wrap");
+      // Continuous message line: whitespace preserved, ellipsis on overflow.
+      expect(template.classes()).toContain("whitespace-pre");
+      expect(template.classes()).toContain("overflow-hidden");
+      expect(template.classes()).not.toContain("flex-wrap");
     });
 
-    it("should apply tw:flex-wrap and tw:break-all class on template when wrap is true", async () => {
+    it("should apply break-all class on template when wrap is true", async () => {
       await wrapper.setProps({ wrap: true });
       const template = wrapper.find('[data-test="pattern-card-0-template"]');
-      expect(template.classes()).toContain("tw:flex-wrap");
-      expect(template.classes()).toContain("tw:break-all");
-      expect(template.classes()).not.toContain("tw:flex-nowrap");
+      expect(template.classes()).toContain("break-all");
+      expect(template.classes()).toContain("whitespace-pre-wrap");
     });
 
-    it("should revert to tw:flex-nowrap when wrap is toggled back to false", async () => {
+    it("should revert to single-line when wrap is toggled back to false", async () => {
       await wrapper.setProps({ wrap: true });
       await wrapper.setProps({ wrap: false });
       const template = wrapper.find('[data-test="pattern-card-0-template"]');
-      expect(template.classes()).toContain("tw:flex-nowrap");
+      expect(template.classes()).toContain("whitespace-pre");
     });
   });
 
-  describe("LogsHighLighting integration", () => {
-    it("should render a child component for the pattern template text", () => {
-      const template = wrapper.find('[data-test="pattern-card-0-template"]');
-      // LogsHighLighting is used to render the template; the container should exist
-      expect(template.exists()).toBe(true);
+  describe("Wildcard chip hover interactions", () => {
+    it("should render wildcard chips for each wildcard in the template", () => {
+      const chips = wrapper.findAll('[data-test="pattern-card-wildcard-chip"]');
+      expect(chips.length).toBeGreaterThan(0);
     });
 
-    it("should set title attribute on template div to the pattern template string", () => {
+    it("should still render the full template text including wildcard tokens", () => {
       const template = wrapper.find('[data-test="pattern-card-0-template"]');
-      expect(template.attributes("title")).toBe(mockPattern.template);
+      expect(template.text()).toContain("User");
+      expect(template.text()).toContain("logged in from IP");
     });
   });
-
 });
-

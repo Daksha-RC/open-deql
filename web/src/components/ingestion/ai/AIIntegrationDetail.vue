@@ -16,17 +16,28 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <script setup lang="ts">
 import { computed } from "vue";
+import { raw, useI18nTyped } from "@/types/i18n";
+import { useStore } from "vuex";
 import CopyContent from "@/components/CopyContent.vue";
 import useIngestion from "@/composables/useIngestion";
+import { b64EncodeStandard } from "@/utils/zincutils";
 import { aiCategories } from "./data";
 import type { AICategory, AIIntegration } from "./data";
+import { getAICardRaw } from "./content";
+import { safeHttpUrl, type CardSubstitutions } from "./content/renderMarkdown";
+import { getRichCardContent } from "./content/richCard/registry";
+import AIIntegrationCard from "./content/AIIntegrationCard.vue";
+import AIRichSetupCard from "@/components/ingestion/setupCard/SetupCardRenderer.vue";
+import OBanner from "@/lib/feedback/Banner/OBanner.vue";
 
 const props = defineProps<{
   categorySlug: string;
   integrationSlug: string;
 }>();
 
-const { aiContent } = useIngestion();
+const { t } = useI18nTyped();
+const store = useStore();
+const { aiContent, endpoint } = useIngestion();
 
 const category = computed<AICategory | undefined>(() =>
   aiCategories.find((c) => c.slug === props.categorySlug),
@@ -37,28 +48,78 @@ const integration = computed<AIIntegration | undefined>(() =>
 );
 
 const docURL = computed(() => integration.value?.docURL ?? "");
-const displayName = computed(
-  () => integration.value?.name ?? props.integrationSlug,
+// Rich card markdown sourced from o2-datasource (if this integration has it),
+// otherwise fall back to the legacy 3-line snippet + doc link.
+const cardContent = computed(() =>
+  getAICardRaw(integration.value?.contentSlug ?? integration.value?.slug),
+);
+
+// Per-org url/org/token used by the rich card's commands + .env download (mirrors
+// AIIntegrationCard.vue's substitutions). `token` is the base64 of
+// email:<org ingestion passcode> WITHOUT the "Basic " prefix — the snippets add
+// it. Same Basic-auth token as every other Data Sources card, not a login password.
+const subs = computed<CardSubstitutions>(() => {
+  const email = store.state.userInfo?.email ?? "";
+  const passcode = store.state.organizationData?.organizationPasscode ?? "";
+  return {
+    url: endpoint.value?.url ?? "",
+    org: store.state.selectedOrganization?.identifier ?? "",
+    token: b64EncodeStandard(`${email}:${passcode}`) ?? "",
+  };
+});
+
+const passcodeForbidden = computed(
+  () => !!store.state.organizationData?.organizationPasscodeForbidden,
+);
+
+// must test the RAW markdown: richContent has already had {token} substituted away
+const richContentNeedsPasscode = computed(() =>
+  String(getAICardRaw(integration.value?.contentSlug ?? integration.value?.slug) ?? "").includes(
+    "{token}",
+  ),
+);
+
+// Rich, stepped setup card for integrations that have it (registry-driven, keyed
+// by content slug — e.g. "anthropic"). Falls back to the markdown card otherwise.
+const richContent = computed(() =>
+  getRichCardContent(integration.value?.contentSlug ?? integration.value?.slug, subs.value, t),
 );
 </script>
 
 <template>
-  <div v-if="integration" class="q-pa-sm">
-    <div class="tw:text-[16px]">
-      <CopyContent :content="aiContent" />
-      <div class="tw:pt-6">
+  <div v-if="integration" class="p-2">
+    <OBanner
+      v-if="passcodeForbidden && richContent && richContentNeedsPasscode"
+      variant="warning"
+      data-test="ai-integration-detail-passcode-forbidden"
+      :content="t('ingestion.passcodeForbiddenMessage')"
+    />
+    <AIRichSetupCard
+      v-else-if="richContent"
+      :key="integrationSlug"
+      :content="richContent"
+      :subs="subs"
+      :logo-url="integration.logo"
+      :logo-url-dark="integration.logoDark"
+    />
+    <AIIntegrationCard v-else-if="cardContent" :content="raw(cardContent)" :doc-url="docURL" />
+    <div v-else class="text-base">
+      <CopyContent :content="raw(aiContent)" />
+      <div class="pt-6 pb-2 font-bold">
+        {{ t("ingestion.ai.viewDocsPrefix") }}
         <a
-          :href="docURL"
+          :href="safeHttpUrl(docURL)"
           target="_blank"
           rel="noopener noreferrer"
-          class="text-blue-500 tw:underline"
+          class="text-text-link hover:text-text-link-hover"
+          style="text-decoration: underline"
+          >{{ t("ingestion.ai.viewDocsLinkLabel") }}</a
         >
-          Click here to check further documentation.
-        </a>
+        {{ t("ingestion.ai.viewDocsSuffix") }}
       </div>
     </div>
   </div>
-  <div v-else class="q-pa-sm">
-    <p>Select an integration to view details.</p>
+  <div v-else class="p-2">
+    <p>{{ t("ingestion.ai.selectIntegrationPrompt") }}</p>
   </div>
 </template>

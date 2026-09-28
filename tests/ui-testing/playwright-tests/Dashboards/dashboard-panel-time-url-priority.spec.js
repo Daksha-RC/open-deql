@@ -1,4 +1,5 @@
 const { test, expect, navigateToBase } = require("../utils/enhanced-baseFixtures.js");
+const testLogger = require('../utils/test-logger.js');
 import { ingestion } from "./utils/dashIngestion.js";
 import PageManager from "../../pages/page-manager.js";
 import { waitForDashboardPage, deleteDashboard } from "./utils/dashCreation.js";
@@ -22,7 +23,8 @@ const {  safeWaitForNetworkIdle } = require("../utils/wait-helpers.js");
 test.describe.configure({ mode: "parallel" });
 
 test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority", () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    testLogger.testStart(testInfo.title, testInfo.file);
     await navigateToBase(page);
     await ingestion(page);
   });
@@ -41,6 +43,15 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
       panelTimeRange: "1-h"
     });
 
+    // Wait for initial pt-period URL param to land before interacting — ensures
+    // panelsInitializing guard in RenderDashboardCharts has cleared (500ms timeout).
+    // Use 20 s in CI — panel data fetches can re-arm the guard under load.
+    await page.waitForFunction(
+      (pid) => window.location.href.includes(`pt-period.${pid}`),
+      panelId,
+      { timeout: 20000 }
+    );
+
     // Step 2: Change Panel time to "Last 6d" and Apply
     await pm.dashboardPanelTime.changePanelTimeInView(panelId, "6-d", true);
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
@@ -52,9 +63,13 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
     const currentURL = page.url();
     const newPage = await page.context().newPage();
     await newPage.goto(currentURL);
-    await newPage.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
+    await newPage.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
 
     // Step 5: Verify Panel shows "Last 6d" in new tab
+    // Wait explicitly for the picker to be visible before reading its text —
+    // networkidle alone is not enough on a loaded server; the panel may still
+    // be rendering its time picker element when networkidle fires.
+    await newPage.locator(`[data-test="panel-time-picker-${panelId}"]`).waitFor({ state: "visible", timeout: 20000 });
     const pickerText = await newPage.locator(`[data-test="panel-time-picker-${panelId}"]`).textContent();
     expect(pickerText).toContain("6");
 
@@ -88,6 +103,14 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
 
     const panelAId = panelIds[0];
     const panelBId = panelIds[1];
+
+    // Wait for URL to be populated with panel time params before asserting
+    // Use 20 s in CI — panel data fetches can re-arm the panelsInitializing guard.
+    await page.waitForFunction(
+      (ids) => ids.every(pid => window.location.href.includes(`pt-period.${pid}`)),
+      [panelAId, panelBId],
+      { timeout: 20000 }
+    );
 
     // Step 2: Verify initial URL contains both panel times
     await assertPanelTimeInURL(page, panelAId, "1h");
@@ -194,7 +217,7 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
     await waitForDashboardPage(page);
     await pm.dashboardCreate.waitForDashboardUIStable();
     await pm.dashboardCreate.createDashboard(dashboardName);
-    await page.locator('[data-test="dashboard-if-no-panel-add-panel-btn"]').waitFor({ state: "visible" });
+    await pm.dashboardCreate.waitForAddPanelIfEmptyVisible();
 
     // Panel A: config "1h"
     const panelAId = await addPanelWithPanelTime(page, pm, {
@@ -214,12 +237,15 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
     await assertPanelTimeInURL(page, panelAId, "1h");
 
     // Step 4: Verify Panel B has no picker (uses global)
-    const panelBPicker = page.locator(`[data-test="panel-time-picker-${panelBId}"]`);
+    const panelBPicker = pm.dashboardPanelTime.panelTimePicker(panelBId);
     expect(await panelBPicker.isVisible().catch(() => false)).toBe(false);
 
     // Step 6: Load with URL override for Panel A
     const dashboardId = getDashboardIdFromURL(page);
-    const urlWithParams = `${page.url().split('?')[0]}?dashboard=${dashboardId}&pt-period.${panelAId}=1m`;
+    // org_identifier must survive the rebuild: without it the app loads the account's
+    // default org (_meta), fails the dashboard GET there and bounces to the list.
+    const orgId = new URL(page.url()).searchParams.get('org_identifier');
+    const urlWithParams = `${page.url().split('?')[0]}?org_identifier=${orgId}&dashboard=${dashboardId}&folder=default&pt-period.${panelAId}=1m`;
     await page.goto(urlWithParams);
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
 
@@ -240,7 +266,7 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
     await waitForDashboardPage(page);
     await pm.dashboardCreate.waitForDashboardUIStable();
     await pm.dashboardCreate.createDashboard(dashboardName);
-    await page.locator('[data-test="dashboard-if-no-panel-add-panel-btn"]').waitFor({ state: "visible" });
+    await pm.dashboardCreate.waitForAddPanelIfEmptyVisible();
 
     // Panel A: useDefaultTime enabled but panel_time_range is null (follows global)
     // v4.0: toggle ON but no +Set done yet = follows global time as-is
@@ -259,13 +285,14 @@ test.describe("Dashboard Panel Time - Part 2: URL Synchronization and Priority",
     });
 
     // Step 2: Verify Panel A shows picker and follows global (panel_time_range is null)
-    const panelAPicker = page.locator(`[data-test="panel-time-picker-${panelAId}"]`);
+    const panelAPicker = pm.dashboardPanelTime.panelTimePicker(panelAId);
     expect(await panelAPicker.isVisible()).toBe(true);
 
     // Step 3: Load with URL param for Panel A
     // v4.0: URL still has highest priority even when panel_time_range is null
     const dashboardId = getDashboardIdFromURL(page);
-    const urlWithParams = `${page.url().split('?')[0]}?dashboard=${dashboardId}&pt-period.${panelAId}=1d`;
+    const orgId = new URL(page.url()).searchParams.get('org_identifier');
+    const urlWithParams = `${page.url().split('?')[0]}?org_identifier=${orgId}&dashboard=${dashboardId}&folder=default&pt-period.${panelAId}=1d`;
     await page.goto(urlWithParams);
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
 

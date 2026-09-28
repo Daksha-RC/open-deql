@@ -15,12 +15,8 @@
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
-
-installQuasar({ plugins: [Dialog, Notify] });
 
 const mockPush = vi.fn();
 vi.mock("vue-router", () => ({
@@ -28,18 +24,21 @@ vi.mock("vue-router", () => ({
   useRoute: () => ({ params: {}, query: {} }),
 }));
 
-vi.mock("@/services/alerts", () => ({
-  default: {
-    listByFolderId: vi.fn().mockResolvedValue({
-      data: {
-        list: [
-          { alert_id: "a1", name: "TestAlert", folder_id: "default" },
-          { alert_id: "a2", name: "OtherAlert", folder_id: "default" },
-        ],
-      },
-    }),
-  },
-}));
+vi.mock("@/services/alerts", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      listByFolderId: vi.fn().mockResolvedValue({
+        data: {
+          list: [
+            { alert_id: "a1", name: "TestAlert", folder_id: "default" },
+            { alert_id: "a2", name: "OtherAlert", folder_id: "default" },
+          ],
+        },
+      }),
+    },
+  });
+});
 
 vi.mock("@/composables/useAlertInsights", async () => {
   const { ref } = await import("vue");
@@ -71,7 +70,9 @@ vi.mock("@/utils/alerts/insights-metrics.json", () => ({
           {
             id: "p1",
             title: "Overview Panel",
-            queries: [{ query: "SELECT [WHERE_CLAUSE]", fields: { stream: "logs", stream_type: "logs" } }],
+            queries: [
+              { query: "SELECT [WHERE_CLAUSE]", fields: { stream: "logs", stream_type: "logs" } },
+            ],
           },
         ],
       },
@@ -201,9 +202,7 @@ describe("AlertInsights - goBack", () => {
   it("calls router.push with alertList", async () => {
     const w = await mountComp();
     (w.vm as any).goBack();
-    expect(mockPush).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "alertList" }),
-    );
+    expect(mockPush).toHaveBeenCalledWith(expect.objectContaining({ name: "alertList" }));
   });
 
   it("clicking back button calls goBack", async () => {
@@ -292,7 +291,10 @@ describe("AlertInsights - handleEditAlert", () => {
     await flushPromises();
     await (w.vm as any).handleEditAlert("TestAlert");
     expect(mockPush).toHaveBeenCalledWith(
-      expect.objectContaining({ name: "alertList", query: expect.objectContaining({ action: "update" }) }),
+      expect.objectContaining({
+        name: "alertList",
+        query: expect.objectContaining({ action: "update" }),
+      }),
     );
   });
 });

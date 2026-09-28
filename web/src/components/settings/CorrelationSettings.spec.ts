@@ -15,16 +15,17 @@
 
 import { describe, expect, it, afterEach, vi } from "vitest";
 import { mount, VueWrapper, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import { createStore } from "vuex";
 import { createI18n } from "vue-i18n";
 import CorrelationSettings from "./CorrelationSettings.vue";
-
-installQuasar();
+import { queryClient } from "@/composables/query/queryClient";
+import serviceStreamsService from "@/services/service_streams";
+import { serviceStreamKeys } from "@/services/service_streams.querykeys";
 
 vi.mock("vue-router", () => ({
   useRoute: () => ({ params: {}, query: {} }),
   useRouter: () => ({ push: vi.fn(), replace: vi.fn() }),
+  onBeforeRouteLeave: vi.fn(),
 }));
 
 vi.mock("@/services/service_streams", () => ({
@@ -56,7 +57,7 @@ vi.mock("@/components/settings/ServiceIdentitySetup.vue", () => ({
     name: "ServiceIdentitySetup",
     template: '<div data-test="service-identity-setup" />',
     props: ["orgIdentifier", "semanticGroups"],
-    emits: ["navigate-to-aliases", "navigate-to-services", "update-service-fields"],
+    emits: ["navigate-to-aliases", "navigate-to-services"],
   },
 }));
 
@@ -72,7 +73,7 @@ vi.mock("@/components/alerts/SemanticFieldGroupsConfig.vue", () => ({
 vi.mock("@/components/common/AppTabs.vue", () => ({
   default: {
     name: "AppTabs",
-    template: '<div><slot /></div>',
+    template: "<div><slot /></div>",
   },
 }));
 
@@ -110,8 +111,16 @@ function mountComponent() {
       plugins: [mockI18n],
       provide: { store: mockStore },
       stubs: {
-        "q-tabs": { template: '<div class="q-tabs"><slot /></div>', props: ["modelValue"], emits: ["update:modelValue"] },
-        "q-tab": { template: '<div class="q-tab" :data-test="`tab-${name}`" :data-name="name"><slot /></div>', props: ["name", "label", "noCaps"] },
+        OTabs: {
+          template: '<div class="o-tabs"><slot /></div>',
+          props: ["modelValue", "dense"],
+          emits: ["update:modelValue"],
+        },
+        OTab: {
+          template:
+            '<div class="o-tab" :data-test="`tab-${name}`" :data-name="name"><slot /></div>',
+          props: ["name", "label", "noCaps", "icon"],
+        },
       },
     },
   });
@@ -131,9 +140,9 @@ describe("CorrelationSettings", () => {
       expect(wrapper.exists()).toBe(true);
     });
 
-    it("should display the title", () => {
+    it("should render the section (title is provided by the Settings shell)", () => {
       wrapper = mountComponent();
-      expect(wrapper.text()).toContain("Correlation Settings");
+      expect(wrapper.find('[data-test="correlation-settings-tabs"]').exists()).toBe(true);
     });
 
     it("should default to services tab", () => {
@@ -245,6 +254,36 @@ describe("CorrelationSettings", () => {
       wrapper.vm.activeTab = "discovery";
       await wrapper.vm.$nextTick();
       expect(wrapper.vm.store.state.selectedOrganization.identifier).toBe("test-org");
+    });
+  });
+
+  // The groups are cached, and dimension analytics is computed from them, so a save expires the whole scope.
+  describe("saving field aliases", () => {
+    const scope = { queryKey: serviceStreamKeys.all("test-org") };
+
+    it("expires the service-correlation cache after a successful save", async () => {
+      const spy = vi.spyOn(queryClient, "invalidateQueries");
+      wrapper = mountComponent();
+      await flushPromises();
+      (wrapper.vm as any).draftSemanticGroups = [{ display: "Host", group: "", fields: ["host"] }];
+      await (wrapper.vm as any).saveSemanticGroups();
+
+      expect(spy).toHaveBeenCalledWith(scope);
+      spy.mockRestore();
+    });
+
+    it("leaves the cache alone when the save fails", async () => {
+      vi.mocked(serviceStreamsService.updateSemanticGroups).mockRejectedValueOnce(
+        new Error("boom"),
+      );
+      const spy = vi.spyOn(queryClient, "invalidateQueries");
+      wrapper = mountComponent();
+      await flushPromises();
+      (wrapper.vm as any).draftSemanticGroups = [{ display: "Host", group: "", fields: ["host"] }];
+      await (wrapper.vm as any).saveSemanticGroups();
+
+      expect(spy).not.toHaveBeenCalledWith(scope);
+      spy.mockRestore();
     });
   });
 });

@@ -252,8 +252,8 @@ fn fix_schema(schema: Schema, stream_type: StreamType) -> Schema {
                     false,
                 ))
             } else if stream_type == StreamType::Metrics
-                && x.data_type() == &DataType::Int64
                 && x.name() == HASH_LABEL
+                && matches!(x.data_type(), &DataType::Int64 | &DataType::Float64)
             {
                 Arc::new(Field::new(x.name().clone(), DataType::UInt64, false))
             } else {
@@ -281,6 +281,21 @@ pub fn format_partition_key(input: &str) -> String {
 
 // format stream name
 pub fn format_stream_name(stream_name: String) -> String {
+    // the regex dominates this call, and one byte scan settles the common untouched name
+    if stream_name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b':')
+    {
+        if crate::get_config().common.format_stream_name_to_lower
+            && stream_name.bytes().any(|b| b.is_ascii_uppercase())
+        {
+            let mut owned = stream_name;
+            owned.make_ascii_lowercase();
+            return owned;
+        }
+        return stream_name;
+    }
+
     let replaced = RE_CORRECT_STREAM_NAME.replace_all(&stream_name, "_");
 
     // Check if any replacements were made
@@ -616,7 +631,7 @@ mod tests {
     fn test_infer_json_schema_from_values_non_object_returns_error() {
         use serde_json::Value;
         // Passing a non-Object value (Array) should hit the `_` branch → error
-        let vals = vec![Value::Array(vec![Value::from(1), Value::from(2)])];
+        let vals = [Value::Array(vec![Value::from(1), Value::from(2)])];
         let result = infer_json_schema_from_values("test_stream", StreamType::Logs, vals.iter());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -629,11 +644,27 @@ mod tests {
         // An object containing an array field hits `_` in infer_json_schema_from_object
         let mut obj = Map::new();
         obj.insert("items".to_string(), Value::Array(vec![Value::from(1)]));
-        let vals = vec![Value::Object(obj)];
+        let vals = [Value::Object(obj)];
         let result = infer_json_schema_from_values("test_stream", StreamType::Logs, vals.iter());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("non-basic type"), "unexpected error: {msg}");
+    }
+
+    #[test]
+    fn test_metrics_hash_above_i64_max_is_uint64() {
+        let json = format!(r#"{{"{HASH_LABEL}":{},"value":1.5}}"#, u64::MAX);
+        let schema =
+            infer_json_schema(std::io::Cursor::new(json), None, StreamType::Metrics).unwrap();
+
+        assert_eq!(
+            schema.field_with_name(HASH_LABEL).unwrap().data_type(),
+            &DataType::UInt64
+        );
+        assert_eq!(
+            schema.field_with_name("value").unwrap().data_type(),
+            &DataType::Float64
+        );
     }
 
     #[test]

@@ -20,7 +20,10 @@ import { nextTick } from "vue";
 vi.mock("@/views/HomeView.vue", () => ({ default: {} }));
 vi.mock("@/plugins/logs/Index.vue", () => ({ default: {} }));
 vi.mock("@/plugins/logs/SearchResult.vue", () => ({ default: {} }));
-vi.mock("@/plugins/metrics/Index.vue", () => ({ default: {} }));
+vi.mock("@/plugins/metrics/Index.vue", () => ({ default: { chunk: "editor" } }));
+vi.mock("@/plugins/metrics/explorer/MetricsExplorer.vue", () => ({
+  default: { chunk: "explorer" },
+}));
 vi.mock("@/plugins/traces/Index.vue", () => ({ default: {} }));
 vi.mock("@/views/RUM/RealUserMonitoring.vue", () => ({ default: {} }));
 vi.mock("@/views/Dashboards/Dashboards.vue", () => ({ default: {} }));
@@ -29,7 +32,6 @@ vi.mock("@/views/AppAlerts.vue", () => ({ default: {} }));
 vi.mock("@/views/Ingestion.vue", () => ({ default: {} }));
 vi.mock("@/views/IdentityAccessManagement.vue", () => ({ default: {} }));
 vi.mock("@/components/reports/ReportList.vue", () => ({ default: {} }));
-vi.mock("@/components/actionScripts/ActionScripts.vue", () => ({ default: {} }));
 vi.mock("@/components/settings/index.vue", () => ({ default: {} }));
 
 import useRoutePrefetch from "./useRoutePrefetch";
@@ -62,9 +64,7 @@ describe("useRoutePrefetch", () => {
       await composable.prefetchRoute("/metrics");
       await nextTick();
       // Set.size must still be 1
-      expect(
-        [...composable.prefetchedRoutes].filter((r) => r === "/metrics").length
-      ).toBe(1);
+      expect([...composable.prefetchedRoutes].filter((r) => r === "/metrics").length).toBe(1);
     });
 
     it("does nothing for an unknown route path", async () => {

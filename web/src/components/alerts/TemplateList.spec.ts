@@ -15,12 +15,11 @@
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises, DOMWrapper } from "@vue/test-utils";
-import { Dialog, Notify } from "quasar";
 import TemplateList from "./TemplateList.vue";
 import { http, HttpResponse } from "msw";
 import templateService from "@/services/alert_templates";
+import alertsFixture from "@/test/unit/mockData/alerts";
 import router from "@/test/unit/helpers/router";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
 
@@ -28,14 +27,18 @@ const node = document.createElement("div");
 node.setAttribute("id", "app");
 document.body.appendChild(node);
 
-installQuasar({
-  plugins: [Dialog, Notify],
-});
+// OTable holds the skeleton visible for MIN_SKELETON_MS = 2000ms via setTimeout.
+// Use fake timers so we can advance past that hold without real waits.
+const SKELETON_HOLD_MS = 2100;
 
 describe("Alert List", async () => {
   let wrapper: any;
   beforeEach(async () => {
-    
+    // Install fake timers before mounting so OTable's skeleton-hold setTimeout
+    // is registered as a fake timer. Only fake setTimeout/clearTimeout/Date to
+    // keep MSW's fetch/http machinery on real timers.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+
     wrapper = mount(TemplateList, {
       attachTo: "#app",
       global: {
@@ -45,26 +48,32 @@ describe("Alert List", async () => {
         plugins: [i18n, router],
       },
     });
+
+    // Let MSW respond and the component finish its initial data fetch.
+    await flushPromises();
+    // Advance past OTable's 2-second skeleton hold timer so real rows are visible.
+    vi.advanceTimersByTime(SKELETON_HOLD_MS);
     await flushPromises();
   });
 
   afterEach(() => {
     wrapper.unmount();
+    vi.useRealTimers();
+    vi.clearAllMocks();
   });
 
-  it("Should render alerts title", () => {
-    expect(
-      wrapper.find('[data-test="alert-templates-list-title"]').text()
-    ).toBe("Templates");
+  it("titles itself with the SECTION, so the peer tabs never move", () => {
+    // All four alerting pages carry this identical string: the title block
+    // sizes to its content, so a per-page title would shift the tab strip
+    // horizontally on every navigation. The active tab says which page it is.
+    expect(wrapper.find(".app-page-header h1").text()).toBe("Alerts");
   });
+
   it("Should reder table with templates", () => {
-    expect(
-      wrapper.find('[data-test="alert-templates-list-table"]').exists()
-    ).toBeTruthy();
+    expect(wrapper.find('[data-test="alert-templates-list-table"]').exists()).toBeTruthy();
   });
 
   it("Should display table column headers", async () => {
-    await flushPromises();
     const tableData = wrapper
       .find('[data-test="alert-templates-list-table"]')
       .find("thead")
@@ -73,71 +82,234 @@ describe("Alert List", async () => {
     // Index 0 is the checkbox column, so actual columns start at index 1
     expect(tableData[1].text()).toBe("#");
     expect(tableData[2].text()).toContain("Name");
-    expect(tableData[3].text()).toContain("Actions");
+    // Action column headers are rendered empty by OTable for isAction columns
+    expect(tableData[3].exists()).toBe(true);
   });
 
   it("Should display table row data", async () => {
-    await flushPromises();
+    // Target the real data tbody (not the skeleton tbody).
     const tableData = wrapper
       .find('[data-test="alert-templates-list-table"]')
-      .find("tbody")
+      .find('[data-test="o2-table-body"]')
       .find("tr")
       .findAll("td");
-    // Index 0 is the checkbox column, so actual columns start at index 1
+    // Index 0 is the checkbox cell; actual data cells start at index 1.
     expect(tableData[1].text()).toBe("01");
-    expect(tableData[2].text()).toBe("Template2");
+    // The Name cell now includes a Prebuilt/Custom badge next to the name,
+    // so concat'd text() ends with the badge label (e.g. "Template2Custom").
+    expect(tableData[2].text()).toContain("Template2");
   });
-
 
   describe("When user clicks on delete alert", () => {
     const template_name = "Template2";
     const deleteAlert = vi.spyOn(templateService, "delete");
+    const listTemplates = vi.spyOn(templateService, "list");
+    let listCallsBeforeDelete = 0;
     beforeEach(async () => {
+      const templatesUrl = `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/alerts/templates`;
       global.server.use(
-        http.delete(
-          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/alerts/templates/${template_name}`,
-          () => {
-            return HttpResponse.json({ code: 200 });
-          }
-        )
+        http.delete(`${templatesUrl}/${template_name}`, () => {
+          return HttpResponse.json({ code: 200 });
+        }),
+        // The delete's invalidation refetches the list; the shared fixture would put the row back.
+        http.get(templatesUrl, () =>
+          HttpResponse.json(
+            alertsFixture.templates.get.filter((tpl: any) => tpl.name !== template_name),
+          ),
+        ),
       );
-      global.server.use(
-        http.get(
-          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/templates`,
-          () => {
-            return HttpResponse.json({
-              list: [
-                {
-                    name: "Template3",
-                    body: '\r\n[\r\n  {\r\n    "labels": {\r\n        "alertname": "{alert_name}",\r\n        "stream": "{stream_name}",\r\n        "organization": "{org_name}",\r\n        "alerttype": "{alert_type}",\r\n        "severity": "critical"\r\n    },\r\n    "annotations": {\r\n        "timestamp": "{timestamp}"\r\n    }\r\n  }\r\n]',
-                    isDefault: true,
-                  },
-                ],
-            });
-          }
-        )
-      );
+      listCallsBeforeDelete = listTemplates.mock.calls.length;
+
+      // Click the delete button — only visible once skeleton is cleared (done in outer beforeEach).
       await wrapper
-        .find(
-          `[data-test="alert-template-list-${template_name}-delete-template"]`
-        )
+        .find(`[data-test="alert-template-list-${template_name}-delete-template"]`)
         .trigger("click");
+      await flushPromises();
+
+      // Confirm the deletion in the dialog.
       const mainWrapper = new DOMWrapper(document.body);
-      await mainWrapper.find('[data-test="confirm-button"]').trigger("click");
+      await mainWrapper.find('[data-test="o-dialog-primary-btn"]').trigger("click");
       await flushPromises();
     });
 
     it("Should delete alert from the list", () => {
       expect(deleteAlert).toHaveBeenCalledTimes(1);
     });
-    it("Should refetch all alerts", () => {
-      const tableRows = wrapper
+
+    it("drops the deleted row in place, leaving the rest of the list alone", () => {
+      // The mutation's invalidation refetches the mounted list in the background; the splice keeps the row gone meanwhile.
+      expect(listTemplates.mock.calls.length).toBe(listCallsBeforeDelete + 1);
+      const body = wrapper
         .find('[data-test="alert-templates-list-table"]')
-        .find("thead")
-        .findAll("tr");
-      expect(tableRows.length).toBe(1);
-      expect(tableRows[0].html()).not.toContain(template_name);
+        .find('[data-test="o2-table-body"]');
+      expect(body.findAll("tr").length).toBe(2);
+      expect(body.text()).not.toContain(template_name);
+      expect(body.text()).toContain("Template3");
     });
   });
 });
 
+// ── pagination restoration ────────────────────────────────────────────────
+// This spec mounts the real OTable (not stubbed), so the TanStack pageIndex
+// restoration itself (setTimeout(0) + OTable restorePage) isn't exercised
+// end-to-end here. These tests cover what IS reachable: seeding currentPage
+// from the URL, and that navigating to/from the add/edit/clone/import views
+// preserves the `page` query param instead of stripping it.
+describe("TemplateList pagination persistence", () => {
+  let wrapper: any;
+
+  const mountComponent = () =>
+    mount(TemplateList, {
+      attachTo: "#app",
+      global: {
+        provide: { store },
+        plugins: [i18n, router],
+      },
+    });
+
+  afterEach(() => {
+    wrapper?.unmount();
+    vi.clearAllMocks();
+  });
+
+  it("seeds currentPage from the URL's page query param", async () => {
+    (router as any).currentRoute.value.query = { page: "3" };
+    // Mocked so the clamp's own URL rewrite (covered below) never becomes a real navigation that leaks into later tests.
+    const replaceSpy = vi
+      .spyOn(router, "replace")
+      .mockImplementation((() => Promise.resolve()) as any);
+    wrapper = mountComponent();
+
+    // Read before the fetch settles: once it does, a page past the end is clamped.
+    expect((wrapper.vm as any).currentPage).toBe(3);
+
+    await vi.waitFor(() => expect((wrapper.vm as any).currentPage).toBe(1));
+    replaceSpy.mockRestore();
+  });
+
+  it("falls back to page 1 once the list loads shorter than the URL's page", async () => {
+    (router as any).currentRoute.value.query = { page: "3" };
+    const replaceSpy = vi
+      .spyOn(router, "replace")
+      .mockImplementation((() => Promise.resolve()) as any);
+    wrapper = mountComponent();
+    // The restore runs in a setTimeout(0) after the fetch lands, so poll rather than guess the delay.
+    await vi.waitFor(() => expect((wrapper.vm as any).currentPage).toBe(1));
+
+    expect(replaceSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ query: expect.objectContaining({ page: "1" }) }),
+    );
+    replaceSpy.mockRestore();
+  });
+
+  it("defaults currentPage to 1 when no page query param is present", async () => {
+    (router as any).currentRoute.value.query = {};
+    wrapper = mountComponent();
+    await flushPromises();
+
+    expect((wrapper.vm as any).currentPage).toBe(1);
+  });
+
+  it("onPageChange updates currentPage and replaces the URL, preserving other query params", async () => {
+    (router as any).currentRoute.value.query = { org_identifier: "test-org" };
+    wrapper = mountComponent();
+    await flushPromises();
+    const replaceSpy = vi.spyOn(router, "replace");
+
+    (wrapper.vm as any).onPageChange(3);
+
+    expect((wrapper.vm as any).currentPage).toBe(3);
+    expect(replaceSpy).toHaveBeenCalledWith({
+      query: { org_identifier: "test-org", page: "3" },
+    });
+  });
+
+  it("onPageChange is a no-op on the URL when the page hasn't actually changed", async () => {
+    (router as any).currentRoute.value.query = { page: "1" };
+    wrapper = mountComponent();
+    await flushPromises();
+    const replaceSpy = vi.spyOn(router, "replace");
+
+    (wrapper.vm as any).onPageChange(1);
+
+    expect(replaceSpy).not.toHaveBeenCalled();
+  });
+
+  it("editTemplate(null) preserves the page query param when opening the add form", async () => {
+    (router as any).currentRoute.value.query = {};
+    wrapper = mountComponent();
+    await flushPromises();
+    (router as any).currentRoute.value.query = { page: "3", org_identifier: "test-org" };
+    const pushSpy = vi.spyOn(router, "push");
+
+    (wrapper.vm as any).editTemplate(null);
+
+    const pushedQuery = pushSpy.mock.calls[0][0].query;
+    expect(pushedQuery.page).toBe("3");
+    expect(pushedQuery.action).toBe("add");
+  });
+
+  it("editTemplate(row) preserves the page query param when opening the edit form", async () => {
+    (router as any).currentRoute.value.query = {};
+    wrapper = mountComponent();
+    await flushPromises();
+    (router as any).currentRoute.value.query = { page: "3", org_identifier: "test-org" };
+    const pushSpy = vi.spyOn(router, "push");
+
+    (wrapper.vm as any).editTemplate({ name: "Template2" });
+
+    const pushedQuery = pushSpy.mock.calls[0][0].query;
+    expect(pushedQuery.page).toBe("3");
+    expect(pushedQuery.action).toBe("update");
+    expect(pushedQuery.name).toBe("Template2");
+  });
+
+  it("cloneTemplate preserves the page query param", async () => {
+    (router as any).currentRoute.value.query = {};
+    wrapper = mountComponent();
+    await flushPromises();
+    (router as any).currentRoute.value.query = { page: "3", org_identifier: "test-org" };
+    const pushSpy = vi.spyOn(router, "push");
+
+    (wrapper.vm as any).cloneTemplate({ name: "Template2" });
+
+    const pushedQuery = pushSpy.mock.calls[0][0].query;
+    expect(pushedQuery.page).toBe("3");
+    expect(pushedQuery.action).toBe("add");
+  });
+
+  it("importTemplate preserves the page query param", async () => {
+    (router as any).currentRoute.value.query = {};
+    wrapper = mountComponent();
+    await flushPromises();
+    (router as any).currentRoute.value.query = { page: "3", org_identifier: "test-org" };
+    const pushSpy = vi.spyOn(router, "push");
+
+    (wrapper.vm as any).importTemplate();
+
+    const pushedQuery = pushSpy.mock.calls[0][0].query;
+    expect(pushedQuery.page).toBe("3");
+    expect(pushedQuery.action).toBe("import");
+  });
+
+  it("toggleTemplateEditor drops action/name but keeps page when closing the editor", async () => {
+    (router as any).currentRoute.value.query = {};
+    wrapper = mountComponent();
+    await flushPromises();
+    (wrapper.vm as any).showTemplateEditor = true;
+    (router as any).currentRoute.value.query = {
+      action: "update",
+      name: "Template2",
+      page: "3",
+      org_identifier: "test-org",
+    };
+    const pushSpy = vi.spyOn(router, "push");
+
+    (wrapper.vm as any).toggleTemplateEditor();
+
+    const pushedQuery = pushSpy.mock.calls[0][0].query;
+    expect(pushedQuery.page).toBe("3");
+    expect(pushedQuery.action).toBeUndefined();
+    expect(pushedQuery.name).toBeUndefined();
+  });
+});

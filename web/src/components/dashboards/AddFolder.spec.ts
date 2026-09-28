@@ -13,14 +13,33 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+// AddFolder is single-source-of-truth: the OForm holds name/description (seeded
+// via `:default-values`), and `folderId` comes from the prop. There is no local
+// `folderData` mirror and no manual reset on save. Tests drive submit via the
+// @submit handler (`vm.onSubmit(value)`); the validated value is the source of
+// truth.
+
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import AddFolder from "./AddFolder.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import i18n from "@/locales";
 import { createStore } from "vuex";
 
-installQuasar();
+// OForm stub: renders the form + slot and captures `defaultValues` so prefill
+// can be asserted without mounting the real TanStack-powered OForm.
+const OFormStub = {
+  name: "OForm",
+  template: '<form class="o-form-stub" @submit.prevent><slot /></form>',
+  props: ["defaultValues", "schema", "greedy"],
+  emits: ["submit", "reset"],
+};
+
+// OFormInput stub: a basic input so the parent renders without the real wrapper.
+const OFormInputStub = {
+  name: "OFormInput",
+  template: '<input class="o-form-input-stub" :data-test="$attrs[\'data-test\']" />',
+  props: ["name", "label", "required"],
+};
 
 // Mock the utils functions
 vi.mock("@/utils/commons", () => ({
@@ -51,13 +70,26 @@ vi.mock("@/services/reodotdev_analytics", () => ({
 describe("AddFolder", () => {
   let store: any;
 
+  const createWrapper = (props: Record<string, any> = {}) =>
+    mount(AddFolder, {
+      props,
+      global: {
+        plugins: [i18n, store],
+        stubs: { OForm: OFormStub, OFormInput: OFormInputStub },
+      },
+    });
+
   beforeEach(() => {
     store = createStore({
       state: {
         theme: "light",
         organizationData: {
           folders: [
-            { folderId: "folder1", name: "Test Folder", description: "Test description" },
+            {
+              folderId: "folder1",
+              name: "Test Folder",
+              description: "Test description",
+            },
           ],
         },
       },
@@ -67,216 +99,149 @@ describe("AddFolder", () => {
   });
 
   it("should render the component", () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+    const wrapper = createWrapper();
 
     expect(wrapper.exists()).toBe(true);
   });
 
-  it("should display new folder title when not in edit mode", () => {
-    const wrapper = mount(AddFolder, {
-      props: {
-        editMode: false,
-      },
-      global: {
-        plugins: [i18n, store],
-      },
-    });
-
-    expect(wrapper.text()).toContain("New Folder");
-  });
-
-  it("should display update folder title when in edit mode", () => {
-    const wrapper = mount(AddFolder, {
-      props: {
-        editMode: true,
-        folderId: "folder1",
-      },
-      global: {
-        plugins: [i18n, store],
-      },
-    });
-
-    expect(wrapper.text()).toContain("Update Folder");
-  });
-
   it("should render name input field", () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+    const wrapper = createWrapper();
 
     const nameInput = wrapper.find('[data-test="dashboard-folder-add-name"]');
     expect(nameInput.exists()).toBe(true);
   });
 
   it("should render description input field", () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+    const wrapper = createWrapper();
 
     const descInput = wrapper.find('[data-test="dashboard-folder-add-description"]');
     expect(descInput.exists()).toBe(true);
   });
 
-  it("should render cancel button", () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+  it("should expose onSubmit as a plain async handler", () => {
+    const wrapper = createWrapper();
 
-    const cancelButton = wrapper.find('[data-test="dashboard-folder-add-cancel"]');
-    expect(cancelButton.exists()).toBe(true);
+    expect(typeof wrapper.vm.onSubmit).toBe("function");
   });
 
-  it("should render save button", () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
-
-    const saveButton = wrapper.find('[data-test="dashboard-folder-add-save"]');
-    expect(saveButton.exists()).toBe(true);
+  it("exposes t, schema and onSubmit (no local folderData mirror)", () => {
+    const wrapper = createWrapper();
+    const vm = wrapper.vm as any;
+    expect(vm.t).toBeInstanceOf(Function);
+    expect(vm.addFolderSchema).toBeDefined();
+    expect(typeof vm.onSubmit).toBe("function");
+    // The old local model + form ref were removed (single source of truth).
+    expect(vm.folderData).toBeUndefined();
+    expect(vm.addFolderForm).toBeUndefined();
   });
 
-  it("should disable save button when name is empty", async () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+  it("seeds blank default-values in create mode", () => {
+    const wrapper = createWrapper({ editMode: false });
 
-    wrapper.vm.folderData.name = "";
-    await wrapper.vm.$nextTick();
-
-    const saveButton = wrapper.find('[data-test="dashboard-folder-add-save"]');
-    const qBtn = saveButton.findComponent({ name: "QBtn" });
-    expect(qBtn.props("disable")).toBe(true);
+    const defaults = wrapper.findComponent(OFormStub).props("defaultValues");
+    expect(defaults).toEqual({ name: "", description: "", icon: null });
   });
 
-  it("should enable save button when name is provided", async () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
+  it("seeds the folder's values as default-values in edit mode", () => {
+    const wrapper = createWrapper({ editMode: true, folderId: "folder1" });
+
+    const defaults = wrapper.findComponent(OFormStub).props("defaultValues");
+    // No icon stored for this folder, so it seeds blank rather than guessing.
+    expect(defaults).toEqual({
+      name: "Test Folder",
+      description: "Test description",
+      icon: null,
     });
-
-    wrapper.vm.folderData.name = "Valid Folder Name";
-    await wrapper.vm.$nextTick();
-
-    const saveButton = wrapper.find('[data-test="dashboard-folder-add-save"]');
-    expect(saveButton.attributes("disable")).toBeUndefined();
   });
 
-  it("should initialize with empty folder data in create mode", () => {
-    const wrapper = mount(AddFolder, {
-      props: {
-        editMode: false,
-      },
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+  it("falls back to blank default-values when the folder can't be found", () => {
+    const wrapper = createWrapper({ editMode: true, folderId: "missing" });
 
-    expect(wrapper.vm.folderData.name).toBe("");
-    expect(wrapper.vm.folderData.description).toBe("");
-  });
-
-  it("should initialize with existing folder data in edit mode", () => {
-    const wrapper = mount(AddFolder, {
-      props: {
-        editMode: true,
-        folderId: "folder1",
-      },
-      global: {
-        plugins: [i18n, store],
-      },
-    });
-
-    expect(wrapper.vm.folderData.name).toBe("Test Folder");
-    expect(wrapper.vm.folderData.description).toBe("Test description");
-  });
-
-  it("should update folder name when input changes", async () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
-
-    const nameInput = wrapper.find('[data-test="dashboard-folder-add-name"]');
-    await nameInput.setValue("My New Folder");
-
-    expect(wrapper.vm.folderData.name).toBe("My New Folder");
-  });
-
-  it("should update folder description when input changes", async () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
-
-    const descInput = wrapper.find('[data-test="dashboard-folder-add-description"]');
-    await descInput.setValue("My folder description");
-
-    expect(wrapper.vm.folderData.description).toBe("My folder description");
+    const defaults = wrapper.findComponent(OFormStub).props("defaultValues");
+    expect(defaults).toEqual({ name: "", description: "", icon: null });
   });
 
   it("should emit update:modelValue on successful folder creation", async () => {
-    const wrapper = mount(AddFolder, {
-      props: {
-        editMode: false,
-      },
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+    const wrapper = createWrapper({ editMode: false });
 
-    wrapper.vm.folderData.name = "Test Folder";
-    await flushPromises();
-
-    const form = wrapper.find("form");
-    await form.trigger("submit");
+    await wrapper.vm.onSubmit({ name: "Test Folder", description: "" });
     await flushPromises();
 
     expect(wrapper.emitted("update:modelValue")).toBeTruthy();
   });
 
-  it("should validate that name is required", async () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
+  it("should emit update:modelValue on successful folder update in edit mode", async () => {
+    const wrapper = createWrapper({ editMode: true, folderId: "folder1" });
+
+    await wrapper.vm.onSubmit({ name: "Test Folder", description: "Test description" });
+    await flushPromises();
+
+    expect(wrapper.emitted("update:modelValue")).toBeTruthy();
+  });
+
+  it("creates the folder with a trimmed name", async () => {
+    const { createFolder } = await import("@/utils/commons");
+    const wrapper = createWrapper({ editMode: false });
+
+    await wrapper.vm.onSubmit({ name: "  Valid Name  ", description: "" });
+    await flushPromises();
+
+    expect(createFolder).toHaveBeenCalled();
+    expect((createFolder as any).mock.calls[0][1].name).toBe("Valid Name");
+  });
+
+  it("updates with the prop folderId and emits", async () => {
+    const { updateFolder } = await import("@/utils/commons");
+    const wrapper = createWrapper({ editMode: true, folderId: "folder1" });
+
+    await wrapper.vm.onSubmit({ name: "Test Folder", description: "Test description" });
+    await flushPromises();
+
+    expect(updateFolder).toHaveBeenCalled();
+    expect((updateFolder as any).mock.calls[0][1]).toBe("folder1"); // folderId arg
+    const modelEvents = wrapper.emitted("update:modelValue");
+    expect(modelEvents![0][0]).toMatchObject({
+      folderId: "folder1",
+      name: "Test Folder",
     });
+  });
 
-    wrapper.vm.folderData.name = "";
+  it("valid input submits through the form (@submit → onSubmit) and emits", async () => {
+    const wrapper = createWrapper({ editMode: false });
+
+    // Drive the real @submit path: the OForm stub emits `submit` with the
+    // validated value, which the parent routes to onSubmit.
+    await wrapper.findComponent(OFormStub).vm.$emit("submit", {
+      name: "Programmatic Folder",
+      description: "",
+    });
     await flushPromises();
 
-    const form = wrapper.find("form");
-    await form.trigger("submit");
+    expect(wrapper.emitted("update:modelValue")).toBeTruthy();
+  });
+
+  it("should handle folder creation error gracefully", async () => {
+    const commons = await import("@/utils/commons");
+    (commons.createFolder as any).mockRejectedValueOnce(new Error("Folder creation failed"));
+
+    const wrapper = createWrapper({ editMode: false });
+
+    await wrapper.vm.onSubmit({ name: "Valid Folder", description: "" });
     await flushPromises();
 
-    // Form validation should prevent submission
+    // No update:modelValue should be emitted on failure
     expect(wrapper.emitted("update:modelValue")).toBeFalsy();
   });
 
-  it("should accept whitespace-trimmed name", () => {
-    const wrapper = mount(AddFolder, {
-      global: {
-        plugins: [i18n, store],
-      },
-    });
+  it("should handle folder update error gracefully", async () => {
+    const commons = await import("@/utils/commons");
+    (commons.updateFolder as any).mockRejectedValueOnce(new Error("Folder updation failed"));
 
-    wrapper.vm.folderData.name = "  Valid Name  ";
-    expect(wrapper.vm.folderData.name.trim()).toBe("Valid Name");
+    const wrapper = createWrapper({ editMode: true, folderId: "folder1" });
+
+    await wrapper.vm.onSubmit({ name: "Test Folder", description: "Test description" });
+    await flushPromises();
+
+    expect(wrapper.emitted("update:modelValue")).toBeFalsy();
   });
 });

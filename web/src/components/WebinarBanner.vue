@@ -1,4 +1,4 @@
-<!-- Copyright 2026 OpenObserve Inc.
+﻿<!-- Copyright 2026 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,17 +15,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <!-- Header variant: full-width top bar above the toolbar -->
-  <div
+  <!-- Header variant: w-full top bar above the toolbar -->
+  <OBanner
     v-if="webinarData && !isExpired && !isDismissed && variant === 'header'"
-    class="webinar-top-bar"
-    data-test="webinar-header-banner"
+    bar
+    dense
+    center
+    variant="promo"
     role="banner"
+    data-test="webinar-header-banner"
   >
-    <div class="webinar-top-bar-content">
-      <span class="webinar-top-bar-text">
+    <div class="flex flex-wrap items-center justify-center gap-2">
+      <span class="webinar-top-bar-text text-center font-bold">
         <strong>{{ webinarData.tag }}:</strong> {{ webinarData.title }}
-        <span v-if="webinarData.date" class="webinar-top-bar-date">
+        <span v-if="webinarData.date" class="webinar-top-bar-date font-medium">
           {{ formattedDate }}
         </span>
       </span>
@@ -35,66 +38,88 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :href="webinarData.primaryButton.link"
         target="_blank"
         rel="noopener noreferrer"
-        class="webinar-top-bar-link"
+        class="webinar-top-bar-link text-promo-webinar-link hover:text-promo-webinar-link-hover font-bold whitespace-nowrap underline"
         data-test="webinar-top-bar-register-link"
       >
         {{ webinarData.primaryButton.text }}
       </a>
 
-      <span class="webinar-top-bar-sep" aria-hidden="true">|</span>
+      <span
+        class="webinar-top-bar-sep text-promo-webinar-sep font-normal opacity-60 select-none"
+        aria-hidden="true"
+        >|</span
+      >
 
-      <button
-        class="webinar-top-bar-link webinar-top-bar-dismiss"
-        aria-label="Dismiss webinar banner"
+      <OButton
+        variant="webinar-dismiss"
+        :aria-label="t('components.webinarBanner.dismissBannerAriaLabel')"
         @click="dismiss"
         data-test="webinar-top-bar-dismiss-btn"
       >
-        Dismiss
-      </button>
+        {{ t("components.webinarBanner.dismiss") }}
+      </OButton>
     </div>
-  </div>
+  </OBanner>
 
   <!-- Home variant: larger banner -->
   <div
     v-else-if="webinarData && !isExpired && variant === 'home'"
-    class="webinar-home-banner q-mb-md"
+    class="webinar-home-banner rounded-default border-promo-webinar-accent/35 relative mb-3 overflow-hidden border bg-[linear-gradient(120deg,color-mix(in_srgb,var(--color-promo-webinar-accent)_14%,var(--color-surface-base))_0%,var(--color-surface-base)_55%,color-mix(in_srgb,var(--color-promo-webinar-accent)_7%,var(--color-surface-base))_100%)]"
     data-test="webinar-home-banner"
   >
     <!-- Decorative blobs -->
-    <div class="webinar-home-blob webinar-home-blob--1" aria-hidden="true" />
-    <div class="webinar-home-blob webinar-home-blob--2" aria-hidden="true" />
+    <div
+      class="bg-promo-webinar-accent pointer-events-none absolute top-[-3rem] left-[-2rem] h-40 w-40 rounded-full opacity-[0.18] blur-[2.5rem]"
+      aria-hidden="true"
+    />
+    <div
+      class="bg-promo-webinar-accent pointer-events-none absolute right-24 bottom-[-2.5rem] h-32 w-32 rounded-full opacity-[0.18] blur-[2.5rem]"
+      aria-hidden="true"
+    />
 
     <!-- Content row -->
-    <div class="webinar-home-content">
-      <div class="webinar-home-left">
+    <div
+      class="webinar-home-content relative z-1 flex flex-wrap items-center justify-between gap-3 p-4 pe-[1.375rem]"
+    >
+      <div class="webinar-home-left flex flex-col gap-[0.3rem]">
         <!-- Live badge -->
-        <div class="webinar-home-badge">
-          <span class="webinar-home-badge-dot" />
+        <div
+          class="webinar-home-badge text-2xs text-promo-webinar-accent-text inline-flex items-center gap-1.5 font-bold tracking-[0.06em] uppercase"
+        >
+          <span
+            class="webinar-home-badge-dot bg-promo-webinar-accent h-2 w-2 shrink-0 rounded-full"
+          />
           {{ webinarData.tag }}
         </div>
 
-        <div class="webinar-home-title">{{ webinarData.title }}</div>
+        <div
+          class="webinar-home-title text-text-heading max-w-[36rem] text-base leading-[1.35] font-bold"
+        >
+          {{ webinarData.title }}
+        </div>
 
-        <div v-if="webinarData.date" class="webinar-home-meta">
-          <q-icon name="schedule" size="0.875rem" />
-          <span>{{ formattedDate }}</span>
+        <div
+          v-if="webinarData.date"
+          class="webinar-home-meta text-compact text-text-secondary flex items-center gap-[0.3rem] leading-none"
+        >
+          <OIcon name="schedule" size="xs" />
+          <span class="[line-height:1]">{{ formattedDate }}</span>
         </div>
       </div>
 
-      <q-btn
+      <OButton
         v-if="webinarData.primaryButton"
-        no-caps
-        color="secondary"
-        class="webinar-home-register-btn"
+        variant="secondary"
+        size="sm"
+        as="a"
         :href="webinarData.primaryButton.link"
         target="_blank"
         rel="noopener noreferrer"
         data-test="webinar-home-register-btn"
       >
         {{ webinarData.primaryButton.text }}
-        <q-icon name="arrow_forward" class="q-ml-sm"
-size="1rem" />
-      </q-btn>
+        <OIcon name="arrow-forward" size="sm" class="ms-2" />
+      </OButton>
     </div>
   </div>
 </template>
@@ -102,8 +127,13 @@ size="1rem" />
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from "vue";
 import { useStore } from "vuex";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OBanner from "@/lib/feedback/Banner/OBanner.vue";
+import { useI18nTyped, type I18nText } from "@/types/i18n";
 
 const store = useStore();
+const { t } = useI18nTyped();
 
 const props = defineProps<{
   variant: "header" | "home";
@@ -121,14 +151,13 @@ interface WebinarData {
   id: number;
   documentId: string;
   tag: string;
-  title: string;
+  title: I18nText;
   date: string;
   primaryButton: PrimaryButton;
 }
 
 const WEBINAR_JSON_URL =
-  import.meta.env.VITE_WEBINAR_JSON_URL ??
-  "https://openobserve.ai/webinar.json";
+  import.meta.env.VITE_WEBINAR_JSON_URL ?? "https://openobserve.ai/webinar.json";
 
 const webinarData = ref<WebinarData | null>(null);
 const isDismissed = ref(false);
@@ -139,11 +168,7 @@ const isExpired = computed(() => {
 });
 
 const isBannerVisible = computed(
-  () =>
-    props.variant === "header" &&
-    !!webinarData.value &&
-    !isExpired.value &&
-    !isDismissed.value,
+  () => props.variant === "header" && !!webinarData.value && !isExpired.value && !isDismissed.value,
 );
 
 watch(isBannerVisible, (visible) => {
@@ -178,139 +203,11 @@ onMounted(async () => {
 });
 </script>
 
-<style scoped lang="scss">
-/* ── Top bar (header variant) ───────────────────────────── */
-.webinar-top-bar {
-  width: 100%;
-  background: #fbbf24;
-  color: #1a1a1a;
-}
-
-.webinar-top-bar-content {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  padding: 0.2rem 1rem;
-  flex-wrap: wrap;
-  position: relative;
-}
-
-.webinar-top-bar-text {
-  font-size: 0.8125rem;
-  font-weight: 700;
-  color: #1a1a1a;
-  text-align: center;
-
-  strong {
-    font-weight: 800;
-  }
-}
-
-.webinar-top-bar-date {
-  font-weight: 500;
-}
-
-.webinar-top-bar-sep {
-  color: #374151;
-  font-weight: 400;
-  opacity: 0.6;
-  user-select: none;
-}
-
-.webinar-top-bar-link {
-  font-size: 0.8125rem;
-  font-weight: 700;
-  color: #1e3a8a;
-  text-decoration: underline;
-  white-space: nowrap;
-
-  &:hover {
-    color: #1e40af;
-  }
-}
-
-.webinar-top-bar-dismiss {
-  background: none;
-  border: none;
-  cursor: pointer;
-  padding: 0;
-}
-
-/* ── Home variant ───────────────────────────────────────── */
-.webinar-home-banner {
-  position: relative;
-  overflow: hidden;
-  border-radius: 0.625rem;
-  border: 1px solid color-mix(in srgb, var(--q-secondary) 35%, transparent);
-  background: linear-gradient(
-    120deg,
-    color-mix(in srgb, var(--q-secondary) 14%, var(--o2-primary-background)) 0%,
-    var(--o2-primary-background) 55%,
-    color-mix(in srgb, var(--q-secondary) 7%, var(--o2-primary-background)) 100%
-  );
-}
-
-/* Decorative background blobs */
-.webinar-home-blob {
-  position: absolute;
-  border-radius: 50%;
-  pointer-events: none;
-  opacity: 0.18;
-  background: var(--q-secondary);
-  filter: blur(2.5rem);
-}
-
-.webinar-home-blob--1 {
-  width: 10rem;
-  height: 10rem;
-  top: -3rem;
-  left: -2rem;
-}
-
-.webinar-home-blob--2 {
-  width: 8rem;
-  height: 8rem;
-  bottom: -2.5rem;
-  right: 6rem;
-}
-
-/* Inner content sits above blobs */
-.webinar-home-content {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-  padding: 1rem 1.375rem;
-}
-
-.webinar-home-left {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-}
-
-/* Animated "live" badge */
-.webinar-home-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.375rem;
-  font-size: 0.7rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--q-secondary);
-}
-
+<style scoped>
+/* keep(keyframes): the "live" badge dot pulse is used only by this banner. The
+   `animation` is declared here, not as a template `[animation:…]` utility, so
+   Vue's scoped compiler renames the keyframe and this reference together. */
 .webinar-home-badge-dot {
-  width: 0.5rem;
-  height: 0.5rem;
-  border-radius: 50%;
-  background: var(--q-secondary);
-  flex-shrink: 0;
   animation: badge-pulse 1.8s ease-in-out infinite;
 }
 
@@ -320,47 +217,9 @@ onMounted(async () => {
     transform: scale(1);
     opacity: 1;
   }
-
   50% {
     transform: scale(1.5);
     opacity: 0.5;
   }
-}
-
-.webinar-home-title {
-  font-size: 1rem;
-  font-weight: 700;
-  color: var(--o2-text-primary);
-  line-height: 1.35;
-  max-width: 36rem;
-}
-
-.webinar-home-meta {
-  display: flex;
-  align-items: center;
-  gap: 0.3rem;
-  font-size: 0.8125rem;
-  line-height: 1;
-  color: var(--o2-text-secondary);
-
-  .q-icon {
-    flex-shrink: 0;
-    position: relative;
-    top: 0;
-  }
-
-  span {
-    line-height: 1;
-  }
-}
-
-.webinar-home-register-btn {
-  flex-shrink: 0;
-  border-radius: 0.25rem !important;
-  font-size: 0.875rem !important;
-  padding: 0 1.25rem !important;
-  height: 2.375rem !important;
-  min-height: 2.375rem !important;
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--q-secondary) 35%, transparent) !important;
 }
 </style>

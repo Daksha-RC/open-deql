@@ -16,7 +16,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { createI18n } from "vue-i18n";
-import { Quasar, Notify } from "quasar";
 import TelemetryCorrelationDashboard from "./TelemetryCorrelationDashboard.vue";
 import store from "@/test/unit/helpers/store";
 import { nextTick } from "vue";
@@ -68,33 +67,38 @@ vi.mock("@/utils/metrics/metricGrouping", async (importOriginal) => {
       return {
         byGroup: { infra: infraStreams, network: [], others: [] },
         groups: [
-          { id: "infra", label: "Infrastructure", icon: "computer", streams: infraStreams },
-          { id: "network", label: "Network", icon: "network_check", streams: [] },
-          { id: "others", label: "Others", icon: "category", streams: [] },
+          {
+            id: "infra",
+            labelKey: "metrics.groups.compute",
+            icon: "computer",
+            streams: infraStreams,
+          },
+          { id: "network", labelKey: "metrics.groups.network", icon: "network_check", streams: [] },
+          { id: "others", labelKey: "metrics.groups.others", icon: "category", streams: [] },
         ],
       };
     }),
   };
 });
 
-vi.mock("@/services/stream", () => ({
-  default: {
-    nameList: vi.fn(() =>
-      Promise.resolve({ data: { list: [] } })
-    ),
-  },
-}));
+vi.mock("@/services/stream", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      nameList: vi.fn(() => Promise.resolve({ data: { list: [] } })),
+    },
+  });
+});
 
-vi.mock("@/services/search", () => ({
-  default: {
-    search: vi.fn(() =>
-      Promise.resolve({ data: { hits: [], total: 0, took: 0 } })
-    ),
-    get_traces: vi.fn(() =>
-      Promise.resolve({ data: { hits: [], total: 0 } })
-    ),
-  },
-}));
+vi.mock("@/services/search", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      search: vi.fn(() => Promise.resolve({ data: { hits: [], total: 0, took: 0 } })),
+      get_traces: vi.fn(() => Promise.resolve({ data: { hits: [], total: 0 } })),
+    },
+  });
+});
 
 vi.mock("@/utils/zincutils", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
@@ -128,8 +132,12 @@ vi.mock("@/views/Dashboards/RenderDashboardCharts.vue", () => ({
 }));
 
 const mockTranslations = {
+  "correlation.correlatedStreamsFor": "Correlated Streams - {service}",
+  "correlation.noMetricStreamsFor": "No metric streams found for this {kind}",
   "correlation.filters": "Filters",
   "correlation.all": "All",
+  "correlation.currentValueOption": "{value} (current)",
+  "correlation.timeRangeWithDuration": "{start} - {end} ({minutes} min)",
   "correlation.loadingLogs": "Loading logs...",
   "correlation.loadingMetrics": "Loading metrics...",
   "correlation.loadingTraces": "Loading traces...",
@@ -165,6 +173,97 @@ const i18n = createI18n({
   messages: { en: mockTranslations },
 });
 
+// ---------------------------------------------------------------------------
+// ODrawer stub — the dialog-mode overlay.
+// Renders header/default/footer slots and exposes migrated props/emits so we
+// can assert wiring without going through the real Reka portal/teleport.
+// ---------------------------------------------------------------------------
+const ODrawerStub = {
+  name: "ODrawer",
+  inheritAttrs: false,
+  props: [
+    "open",
+    "side",
+    "persistent",
+    "size",
+    "width",
+    "title",
+    "subTitle",
+    "showClose",
+    "seamless",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test="o-drawer-stub"
+      :data-open="String(open)"
+      :data-side="side"
+      :data-width="width"
+      :data-title="title"
+      :data-sub-title="subTitle"
+    >
+      <slot name="header-left" />
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+    </div>
+  `,
+};
+
+// ---------------------------------------------------------------------------
+// ODialog stub — the metric selector dialog.
+// ---------------------------------------------------------------------------
+const ODialogStub = {
+  name: "ODialog",
+  inheritAttrs: false,
+  props: [
+    "open",
+    "size",
+    "title",
+    "subTitle",
+    "persistent",
+    "showClose",
+    "width",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test="o-dialog-stub"
+      :data-open="String(open)"
+      :data-size="size"
+      :data-title="title"
+    >
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+    </div>
+  `,
+};
+
 const SOURCE_TS = 1704110400000000;
 const FIVE_MIN_US = 5 * 60 * 1000 * 1000;
 
@@ -199,16 +298,14 @@ describe("TelemetryCorrelationDashboard.vue", () => {
         ...props,
       },
       global: {
-        plugins: [
-          [Quasar, { plugins: { Notify } }],
-          i18n,
-          store,
-        ],
+        plugins: [i18n, store],
         stubs: {
           TraceDetails: true,
           TracesSearchResultList: true,
           RenderDashboardCharts: true,
           DimensionFiltersBar: true,
+          ODrawer: ODrawerStub,
+          ODialog: ODialogStub,
         },
       },
     });
@@ -421,12 +518,13 @@ describe("TelemetryCorrelationDashboard.vue", () => {
       wrapper = createWrapper({ metricStreams: [] });
       const stream = { stream_name: "new_metric", stream_type: "metrics", filters: {} };
 
-      const initialCount = wrapper.vm.selectedMetricStreams.length;
       wrapper.vm.selectedMetricStreams = [];
       wrapper.vm.toggleMetricStream(stream);
       await nextTick();
 
-      expect(wrapper.vm.selectedMetricStreams.some((s: any) => s.stream_name === "new_metric")).toBe(true);
+      expect(
+        wrapper.vm.selectedMetricStreams.some((s: any) => s.stream_name === "new_metric"),
+      ).toBe(true);
     });
 
     it("should remove stream when already selected", async () => {
@@ -438,7 +536,48 @@ describe("TelemetryCorrelationDashboard.vue", () => {
       wrapper.vm.toggleMetricStream(mockMetricStreams[0]);
       await nextTick();
 
-      expect(wrapper.vm.selectedMetricStreams.some((s: any) => s.stream_name === streamName)).toBe(false);
+      expect(wrapper.vm.selectedMetricStreams.some((s: any) => s.stream_name === streamName)).toBe(
+        false,
+      );
+    });
+  });
+
+  describe("clearing the metric selection", () => {
+    // Regression (o2-enterprise#2188): deselecting the last checked metric left
+    // its chart on screen. Both reload paths were gated on a non-empty
+    // selection, so nothing ever tore the rendered dashboard down.
+    it("should drop the rendered charts when the last metric is deselected", async () => {
+      vi.useFakeTimers();
+      try {
+        wrapper = createWrapper();
+
+        // Stand in for a loaded dashboard with one metric charted.
+        wrapper.vm.initialLoadCompleted = true;
+        wrapper.vm.selectedMetricStreams = [...mockMetricStreams.slice(0, 1)];
+        await nextTick();
+        wrapper.vm.dashboardData = {
+          tabs: [{ panels: [{ id: `${mockMetricStreams[0].stream_name}_1` }] }],
+        };
+        wrapper.vm.groupedDashboardData = {
+          compute: { tabs: [{ panels: [{ id: "p1" }] }] },
+        };
+        await nextTick();
+
+        // Uncheck it — the selection is now empty.
+        wrapper.vm.toggleMetricStream(mockMetricStreams[0]);
+        await nextTick();
+        expect(wrapper.vm.selectedMetricStreams.length).toBe(0);
+
+        // The stream watcher debounces before acting.
+        vi.advanceTimersByTime(500);
+        await flushPromises();
+
+        expect(wrapper.vm.dashboardData).toBeNull();
+        expect(wrapper.vm.groupedDashboardData).toEqual({});
+        expect(wrapper.vm.activeDashboardForGroup).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
@@ -593,7 +732,9 @@ describe("TelemetryCorrelationDashboard.vue", () => {
       });
 
       wrapper = createWrapper({
-        traceStreams: [{ stream_name: "traces", stream_type: "traces", filters: { service: "api" } }],
+        traceStreams: [
+          { stream_name: "traces", stream_type: "traces", filters: { service: "api" } },
+        ],
       });
 
       await wrapper.vm.fetchTracesByDimensions();
@@ -612,14 +753,42 @@ describe("TelemetryCorrelationDashboard.vue", () => {
       });
 
       wrapper = createWrapper({
-        traceStreams: [{ stream_name: "traces", stream_type: "traces", filters: { service: "api", env: "prod" } }],
+        traceStreams: [
+          {
+            stream_name: "traces",
+            stream_type: "traces",
+            filters: { service: "api", env: "prod" },
+          },
+        ],
       });
 
       await wrapper.vm.fetchTracesByDimensions();
 
       const callArg = mockFetchQueryDataWithHttpStream.mock.calls[0][0];
-      expect(callArg.queryReq.filter).toContain("service='api'");
-      expect(callArg.queryReq.filter).toContain("env='prod'");
+      // Identifiers and values are escaped via buildSqlCondition (F2/F38)
+      expect(callArg.queryReq.filter).toContain("\"service\" = 'api'");
+      expect(callArg.queryReq.filter).toContain("\"env\" = 'prod'");
+    });
+
+    it("should escape single quotes in trace filter values", async () => {
+      mockFetchQueryDataWithHttpStream.mockImplementation((_payload: any, handlers: any) => {
+        handlers.complete();
+      });
+
+      wrapper = createWrapper({
+        traceStreams: [
+          {
+            stream_name: "traces",
+            stream_type: "traces",
+            filters: { service: "a' OR 1=1 --" },
+          },
+        ],
+      });
+
+      await wrapper.vm.fetchTracesByDimensions();
+
+      const callArg = mockFetchQueryDataWithHttpStream.mock.calls[0][0];
+      expect(callArg.queryReq.filter).toBe("\"service\" = 'a'' OR 1=1 --'");
     });
 
     it("should accumulate and return hits from streaming data callback", async () => {
@@ -658,6 +827,133 @@ describe("TelemetryCorrelationDashboard.vue", () => {
       await wrapper.vm.fetchTracesByDimensions();
 
       expect(mockCancelStreamQueryBasedOnRequestId).toHaveBeenCalledOnce();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Dialog-mode ODrawer wiring
+  // -------------------------------------------------------------------------
+  describe("ODrawer wiring (dialog mode)", () => {
+    it("should render an ODrawer when mode is dialog", () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      expect(drawer.exists()).toBe(true);
+    });
+
+    it("should not render an ODrawer when mode is embedded-tabs", () => {
+      wrapper = createWrapper({ mode: "embedded-tabs" });
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      expect(drawer.exists()).toBe(false);
+    });
+
+    it("should forward side='right' to ODrawer", () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      expect(drawer.attributes("data-side")).toBe("right");
+    });
+
+    it("should forward width to ODrawer", () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      expect(drawer.attributes("data-width")).toBe("90");
+    });
+
+    it("should compose ODrawer title with serviceName", () => {
+      wrapper = createWrapper({ mode: "dialog", serviceName: "checkout" });
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      expect(drawer.attributes("data-title")).toBe("Correlated Streams - checkout");
+    });
+
+    it("should pass formatted time range as sub-title", () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      const subTitle = drawer.attributes("data-sub-title");
+      expect(subTitle).toBeTruthy();
+      expect(subTitle).toContain(" - ");
+    });
+
+    it("should reflect isOpen state via data-open attribute", async () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      // isOpen is initialised to true for dialog rendering to be visible
+      wrapper.vm.isOpen = true;
+      await nextTick();
+      const drawer = wrapper.find("[data-test='o-drawer-stub']");
+      expect(drawer.attributes("data-open")).toBe("true");
+    });
+
+    it("should close drawer and emit close when ODrawer emits update:open=false", async () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      wrapper.vm.isOpen = true;
+      await nextTick();
+
+      const drawer = wrapper.findComponent({ name: "ODrawer" });
+      drawer.vm.$emit("update:open", false);
+      await nextTick();
+
+      expect(wrapper.vm.isOpen).toBe(false);
+      expect(wrapper.emitted("close")).toBeTruthy();
+    });
+
+    it("should not call onClose when ODrawer emits update:open=true", async () => {
+      wrapper = createWrapper({ mode: "dialog" });
+      wrapper.vm.isOpen = false;
+      await nextTick();
+
+      const drawer = wrapper.findComponent({ name: "ODrawer" });
+      drawer.vm.$emit("update:open", true);
+      await nextTick();
+
+      // close should NOT be emitted when opening
+      expect(wrapper.emitted("close")).toBeFalsy();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Metric selector ODialog wiring
+  // -------------------------------------------------------------------------
+  describe("ODialog wiring (metric selector)", () => {
+    it("should render an ODialog stub for the metric selector", () => {
+      wrapper = createWrapper();
+      const dialog = wrapper.find("[data-test='o-dialog-stub']");
+      expect(dialog.exists()).toBe(true);
+    });
+
+    it("should pass the localized title to the metric selector ODialog", () => {
+      wrapper = createWrapper();
+      const dialog = wrapper.find("[data-test='o-dialog-stub']");
+      expect(dialog.attributes("data-title")).toBe("Select Metrics");
+    });
+
+    it("should set ODialog size to md", () => {
+      wrapper = createWrapper();
+      const dialog = wrapper.find("[data-test='o-dialog-stub']");
+      expect(dialog.attributes("data-size")).toBe("md");
+    });
+
+    it("should default showMetricSelector (data-open) to false", () => {
+      wrapper = createWrapper();
+      const dialog = wrapper.find("[data-test='o-dialog-stub']");
+      expect(dialog.attributes("data-open")).toBe("false");
+    });
+
+    it("should open the metric selector when showMetricSelector becomes true", async () => {
+      wrapper = createWrapper();
+      wrapper.vm.showMetricSelector = true;
+      await nextTick();
+      const dialog = wrapper.find("[data-test='o-dialog-stub']");
+      expect(dialog.attributes("data-open")).toBe("true");
+    });
+
+    it("should close metric selector when ODialog emits update:open=false", async () => {
+      wrapper = createWrapper();
+      wrapper.vm.showMetricSelector = true;
+      await nextTick();
+
+      const dialog = wrapper.findComponent({ name: "ODialog" });
+      dialog.vm.$emit("update:open", false);
+      await nextTick();
+
+      expect(wrapper.vm.showMetricSelector).toBe(false);
     });
   });
 });

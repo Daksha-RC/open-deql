@@ -17,56 +17,86 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <template>
   <div>
     <!-- Loading state -->
-    <div v-if="isLoadingTranslation" class="loading-container q-pa-xl text-center">
-      <q-spinner-dots color="primary" size="3em" />
-      <div class="q-mt-md text-grey-7" style="font-size: 14px; font-weight: 500;">
-        Translating stack trace with source maps...
+    <!-- eslint-disable local/no-hardcoded-px -- 1px container border — a border width, optical not layout; scaling it with text thickens the rule -->
+    <div
+      v-if="isLoadingTranslation"
+      data-test="rum-pretty-stack-trace-loading"
+      class="loading-container rounded-default flex min-h-50 flex-col items-center justify-center p-6 text-center"
+      :style="{ 'background-color': backgroundColor, border: `1px solid ${borderColor}` }"
+    >
+      <!-- eslint-enable local/no-hardcoded-px -->
+      <OSpinner variant="dots" size="lg" />
+      <div class="text-text-secondary mt-3 font-medium" style="font-size: var(--text-sm)">
+        {{ t("rum.translatingStackTrace") }}
       </div>
-      <div class="q-mt-xs text-grey-6" style="font-size: 12px;">
-        This may take a few moments
+      <div class="text-text-secondary mt-1" style="font-size: var(--text-xs)">
+        {{ t("rum.translatingStackTraceHint") }}
       </div>
     </div>
 
     <!-- No source maps available message -->
-    <div v-else-if="allSourceInfoNull" class="no-source-maps-container q-pa-md text-center">
-      <q-icon name="code_off" size="2em" color="grey-6" class="q-mb-sm" />
-      <div class="text-subtitle1 text-grey-8 q-mb-xs" style="font-weight: 500;">
-        Source Maps Not Available
+    <!-- eslint-disable local/no-hardcoded-px -- 1px container border — a border width, optical not layout; it must not thicken with the message text -->
+    <div
+      v-else-if="allSourceInfoNull"
+      data-test="rum-pretty-stack-trace-unavailable"
+      class="no-source-maps-container rounded-default flex flex-col items-center justify-center p-3 px-6 py-5 text-center"
+      :style="{ 'background-color': backgroundColor, border: `1px solid ${borderColor}` }"
+    >
+      <!-- eslint-enable local/no-hardcoded-px -->
+      <OIcon name="code-off" size="lg" class="mb-2" />
+      <div class="text-text-secondary mb-1 text-base font-medium">
+        {{ t("rum.sourceMapsNotAvailable") }}
       </div>
-      <div class="text-body2 text-grey-6" style="max-width: 500px; margin: 0 auto; font-size: 13px;">
-        To view detailed stack traces with original source code and line numbers, please upload source maps for this application.
+      <div
+        class="text-text-secondary text-sm"
+        style="max-width: 31.25rem; margin: 0 auto; font-size: var(--text-compact)"
+      >
+        {{ t("rum.sourceMapsNotAvailableBody") }}
       </div>
-      <div v-if="props.error.service || props.error.version" class="tw:flex tw:items-center tw:justify-center tw:gap-2 tw:mt-2 tw:mb-2">
-        <span v-if="props.error.service" class="service-version-badge service-badge">
-          <span class="badge-label">Service:</span>
-          <span class="badge-value">{{ props.error.service }}</span>
+      <div
+        v-if="props.error.service || props.error.version"
+        class="mt-2 mb-2 flex items-center justify-center gap-2"
+      >
+        <span
+          v-if="props.error.service"
+          class="service-version-badge service-badge rounded-default bg-badge-purple-soft-bg text-badge-purple-soft-text inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+        >
+          <span class="badge-label opacity-80">{{ t("rum.serviceBadge") }}</span>
+          <span class="badge-value font-semibold">{{ props.error.service }}</span>
         </span>
-        <span v-if="props.error.version" class="service-version-badge version-badge">
-          <span class="badge-label">Version:</span>
-          <span class="badge-value">{{ props.error.version }}</span>
+        <span
+          v-if="props.error.version"
+          class="service-version-badge version-badge rounded-default bg-badge-blue-soft-bg text-badge-blue-soft-text inline-flex items-center gap-1 px-2.5 py-1 text-xs font-medium"
+        >
+          <span class="badge-label opacity-80">{{ t("rum.versionBadge") }}</span>
+          <span class="badge-value font-semibold">{{ props.error.version }}</span>
         </span>
       </div>
-      <q-btn
-        unelevated
-        no-caps
-        label="Upload Source Maps"
-        icon="cloud_upload"
-        class="o2-primary-button tw:my-2"
-        size="sm"
+      <OButton
+        variant="primary"
+        size="sm-action"
+        icon-left="upload"
+        class="my-2"
         @click="navigateToUpload"
-      />
+      >
+        {{ t("rum.uploadSourceMaps") }}
+      </OButton>
     </div>
 
     <!-- Pretty formatted view -->
-    <div v-else-if="translatedStackTrace.length > 0" class="pretty-stack-container">
+    <div
+      v-else-if="translatedStackTrace.length > 0"
+      data-test="rum-pretty-stack-trace-container"
+      class="pretty-stack-container"
+    >
       <template v-for="(stackTrace, traceIndex) in translatedStackTrace" :key="traceIndex">
         <!-- Error message -->
         <div
           v-if="stackTrace.error"
-          class="error-header q-px-md q-py-sm text-weight-bold"
+          class="error-header rounded-t-default -mb-px border border-solid !px-4 px-3 !py-2.5 py-2 text-sm font-bold font-semibold [letter-spacing:0.01em] shadow-sm"
           :style="{
             'background-color': errorHeaderBackground,
-            'color': errorHeaderColor,
+            color: errorHeaderColor,
             'border-color': borderColor,
           }"
         >
@@ -74,32 +104,35 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         </div>
 
         <!-- First stack frame - expandable/collapsible -->
+        <!-- eslint-disable local/no-hardcoded-px -- 1px frame borders plus a box-shadow offset and blur — optical effects, not layout; scaling them with text thickens the rule and makes elevation bloom -->
         <div
           v-if="stackTrace.stack.length > 0"
-          class="stack-frame-wrapper"
+          class="stack-frame-wrapper rounded-b-default mt-0 overflow-hidden shadow-sm"
           :style="{
             'border-top': `1px solid ${borderColor}`,
             'border-bottom': `1px solid ${borderColor}`,
             'border-left': `1px solid ${borderColor}`,
             'border-right': `1px solid ${borderColor}`,
-            'border-radius': stackTrace.stack.length === 1 ? '0 0 4px 4px' : '',
+            'border-radius': stackTrace.stack.length === 1 ? '0 0 0.25rem 0.25rem' : '',
             'background-color': backgroundColor,
           }"
         >
+          <!-- eslint-enable local/no-hardcoded-px -->
           <!-- Frame header - clickable -->
           <div
-            class="frame-header q-px-md q-py-sm cursor-pointer"
+            class="frame-header hover:bg-surface-subtle cursor-pointer !px-4 px-3 !py-3 py-2 transition-all duration-200 ease-in-out"
             @click="toggleFrame(traceIndex, 0)"
           >
-            <div class="frame-header-content">
-              <q-icon
-                :name="isFrameExpanded(traceIndex, 0) ? 'expand_more' : 'chevron_right'"
+            <div class="frame-header-content flex items-center gap-2">
+              <OIcon
+                :name="isFrameExpanded(traceIndex, 0) ? 'expand-more' : 'chevron-right'"
                 size="xs"
-                class="q-mr-xs text-grey-7"
+                class="text-icon-color me-1"
               />
               <div
                 v-if="stackTrace.stack[0].line"
-                class="stack-line-header"
+                data-test="rum-pretty-stack-trace-frame-line"
+                class="stack-line-header text-compact flex-1 font-mono [line-height:1.5] font-medium break-all"
                 :style="{ color: textColor }"
               >
                 {{ stackTrace.stack[0].line }}
@@ -110,83 +143,98 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           <!-- Expandable source code context -->
           <div
             v-if="isFrameExpanded(traceIndex, 0) && stackTrace.stack[0].source_info"
-            class="source-context q-px-md q-pb-sm"
-            :style="{ 'background-color': isDarkMode ? '#0d0d0d' : '#f8f9fa' }"
+            data-test="rum-pretty-stack-trace-source-context"
+            class="source-context bg-code-block-bg !px-4 !pt-0 !pb-4"
           >
             <!-- File location -->
-            <div class="source-location-header text-grey-7 text-caption q-mb-xs">
-              Line {{ stackTrace.stack[0].source_info.stack_line }}:{{ stackTrace.stack[0].source_info.stack_col }}
-              <span class="q-ml-xs">
-                (Lines {{ stackTrace.stack[0].source_info.source_line_start }}-{{ stackTrace.stack[0].source_info.source_line_end }})
+            <div
+              class="source-location-header text-text-secondary text-2xs !mb-2.5 text-xs font-semibold [letter-spacing:0.02em] opacity-80"
+            >
+              {{ t("rum.stackLine") }} {{ stackTrace.stack[0].source_info.stack_line }}:{{
+                stackTrace.stack[0].source_info.stack_col
+              }}
+              <span class="ms-1">
+                ({{ t("rum.stackLines") }}
+                {{ stackTrace.stack[0].source_info.source_line_start }}-{{
+                  stackTrace.stack[0].source_info.source_line_end
+                }})
               </span>
             </div>
 
             <!-- Source code snippet with syntax highlighting -->
-            <div class="source-code-box" :style="{ 'border-color': borderColor }">
+            <div
+              class="source-code-box rounded-default h-50 overflow-hidden border border-solid shadow-sm"
+              :style="{ 'border-color': borderColor }"
+            >
               <CodeQueryEditor
                 :ref="(el: any) => setEditorRef(traceIndex, 0, el)"
                 :editor-id="`source-frame-${traceIndex}-0`"
                 :query="stackTrace.stack[0].source_info.source"
                 :read-only="true"
                 language="javascript"
-                style="height: 200px;"
+                style="height: 12.5rem"
               />
             </div>
           </div>
         </div>
 
         <!-- Remaining frames - collapsed by default -->
+        <!-- eslint-disable local/no-hardcoded-px -- 1px bottom/side borders plus a box-shadow offset and blur — optical effects, not layout; the collapsed panel must not gain weight with its text -->
         <div
           v-if="stackTrace.stack.length > 1"
-          class="remaining-frames"
+          class="remaining-frames rounded-b-default shadow-sm"
           :style="{
             'border-bottom': `1px solid ${borderColor}`,
             'border-left': `1px solid ${borderColor}`,
             'border-right': `1px solid ${borderColor}`,
-            'border-radius': '0 0 4px 4px',
+            'border-radius': '0 0 0.25rem 0.25rem',
             'background-color': backgroundColor,
           }"
         >
+          <!-- eslint-enable local/no-hardcoded-px -->
           <!-- Show more button - only visible when frames are hidden -->
+          <!-- eslint-disable local/no-hardcoded-px -- hairline: a 1-device-pixel top rule must not scale with text or it smears at fractional zoom -->
           <div
             v-if="!expandedTraces[traceIndex]"
-            class="show-more-button q-px-md q-py-sm cursor-pointer"
+            class="show-more-button hover:bg-surface-subtle flex cursor-pointer items-center gap-1.5 !px-4 px-3 !py-2.5 py-2 text-xs font-medium transition-all duration-200 ease-in-out"
             :style="{ 'border-top': `1px solid ${borderColor}` }"
             @click="showFrames(traceIndex)"
           >
-            <q-icon
-              name="expand_more"
-              size="xs"
-              class="q-mr-xs"
-            />
-            <span class="text-caption text-grey-7">
-              Show {{ stackTrace.stack.length - 1 }} more frame{{ stackTrace.stack.length - 1 > 1 ? 's' : '' }}
+            <!-- eslint-enable local/no-hardcoded-px -->
+            <OIcon name="expand-more" size="xs" class="me-1" />
+            <span class="text-text-secondary text-xs">
+              {{ t("rum.showMoreFrame", { count: stackTrace.stack.length - 1 }) }}
             </span>
           </div>
 
           <!-- Collapsed frames - shown after clicking show more -->
           <div v-if="expandedTraces[traceIndex]">
+            <!-- eslint-disable local/no-hardcoded-px -- 1px divider border between collapsed frames — a border width, optical not layout; it must not thicken with the frame text -->
             <div
               v-for="(frame, frameIndex) in stackTrace.stack.slice(1)"
               :key="frameIndex + 1"
               class="collapsed-frame-wrapper"
               :style="{ 'border-top': `1px solid ${borderColor}` }"
             >
+              <!-- eslint-enable local/no-hardcoded-px -->
               <!-- Frame header - clickable -->
               <div
-                class="collapsed-frame-header q-px-md q-py-xs cursor-pointer"
+                class="collapsed-frame-header hover:bg-surface-subtle cursor-pointer !px-4 px-3 !py-2.5 py-1 transition-all duration-200 ease-in-out"
                 :style="{ 'background-color': backgroundColor }"
                 @click="toggleFrame(traceIndex, frameIndex + 1)"
               >
-                <div class="collapsed-frame-content">
-                  <q-icon
-                    :name="isFrameExpanded(traceIndex, frameIndex + 1) ? 'expand_more' : 'chevron_right'"
+                <div class="collapsed-frame-content flex items-center gap-2">
+                  <OIcon
+                    :name="
+                      isFrameExpanded(traceIndex, frameIndex + 1) ? 'expand-more' : 'chevron-right'
+                    "
                     size="xs"
-                    class="q-mr-xs text-grey-5"
+                    class="text-icon-color me-1"
                   />
                   <div
                     v-if="frame.line"
-                    class="stack-line-collapsed"
+                    data-test="rum-pretty-stack-trace-frame-line"
+                    class="stack-line-collapsed text-2xs flex-1 font-mono [line-height:1.5] break-all opacity-85"
                     :style="{ color: mutedTextColor }"
                   >
                     {{ frame.line }}
@@ -197,24 +245,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               <!-- Expandable source code context -->
               <div
                 v-if="isFrameExpanded(traceIndex, frameIndex + 1) && frame.source_info"
-                class="source-context q-px-md q-pb-sm q-pt-xs"
-                :style="{ 'background-color': isDarkMode ? '#0d0d0d' : '#f8f9fa' }"
+                class="source-context bg-code-block-bg !px-4 !pt-0 !pb-4"
               >
-                <div class="source-location-header text-grey-7 text-caption q-mb-xs q-ml-lg">
-                  Line {{ frame.source_info.stack_line }}:{{ frame.source_info.stack_col }}
-                  <span class="q-ml-xs">
-                    (Lines {{ frame.source_info.source_line_start }}-{{ frame.source_info.source_line_end }})
+                <div
+                  class="source-location-header text-text-secondary text-2xs ms-4 !mb-2.5 text-xs font-semibold [letter-spacing:0.02em] opacity-80"
+                >
+                  {{ t("rum.stackLine") }} {{ frame.source_info.stack_line }}:{{
+                    frame.source_info.stack_col
+                  }}
+                  <span class="ms-1">
+                    ({{ t("rum.stackLines") }} {{ frame.source_info.source_line_start }}-{{
+                      frame.source_info.source_line_end
+                    }})
                   </span>
                 </div>
 
-                <div class="source-code-box q-ml-lg" :style="{ 'border-color': borderColor }">
+                <div
+                  class="source-code-box rounded-default ms-4 h-50 overflow-hidden border border-solid shadow-sm"
+                  :style="{ 'border-color': borderColor }"
+                >
                   <CodeQueryEditor
                     :ref="(el: any) => setEditorRef(traceIndex, frameIndex + 1, el)"
                     :editor-id="`source-frame-${traceIndex}-${frameIndex + 1}`"
                     :query="frame.source_info.source"
                     :read-only="true"
                     language="javascript"
-                    style="height: 200px;"
+                    style="height: 12.5rem"
                   />
                 </div>
               </div>
@@ -225,12 +281,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     </div>
 
     <!-- Error state -->
-    <div v-else class="q-pa-md text-center text-grey-7">
-      <div v-if="translationError" class="text-negative">
+    <div v-else data-test="rum-pretty-stack-trace-error" class="text-text-muted p-3 text-center">
+      <div v-if="translationError" class="text-status-error-text">
         {{ translationError }}
       </div>
       <div v-else>
-        Unable to translate stack trace. Source maps may not be available.
+        {{ t("rum.unableToTranslateStackTrace") }}
       </div>
     </div>
   </div>
@@ -240,26 +296,31 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import { ref, watch, onMounted, nextTick, computed } from "vue";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
+import { useI18nTyped } from "@/types/i18n";
 import sourcemapsService from "@/services/sourcemaps";
 import CodeQueryEditor from "@/components/CodeQueryEditor.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+
 import {
   generateCacheKey,
   getCachedTranslation,
   setCachedTranslation,
 } from "@/utils/stackTraceCache";
+import OSpinner from "@/lib/feedback/Spinner/OSpinner.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
 
 const store = useStore();
 const router = useRouter();
+const { t } = useI18nTyped();
 
-const isDarkMode = computed(() => store.state.theme === "dark");
-
-const borderColor = computed(() => isDarkMode.value ? "#424242" : "#e0e0e0");
-const backgroundColor = computed(() => isDarkMode.value ? "#1e1e1e" : "#fafafa");
-const hoverBackgroundColor = computed(() => isDarkMode.value ? "#2a2a2a" : "#f0f0f0");
-const errorHeaderBackground = computed(() => isDarkMode.value ? "#3e2723" : "#fff3e0");
-const errorHeaderColor = computed(() => isDarkMode.value ? "#ff6b6b" : "#d32f2f");
-const textColor = computed(() => isDarkMode.value ? "#e0e0e0" : "#333");
-const mutedTextColor = computed(() => isDarkMode.value ? "#b0b0b0" : "#666");
+// Theme-reactive colors as CSS custom properties — the browser resolves them per
+// theme (light/dark) via dark.css, so no JS theme read is needed here.
+const borderColor = "var(--color-border-default)";
+const backgroundColor = "var(--color-surface-base)";
+const errorHeaderBackground = "var(--color-banner-warning-bg)";
+const errorHeaderColor = "var(--color-status-error-text)";
+const textColor = "var(--color-text-body)";
+const mutedTextColor = "var(--color-text-secondary)";
 
 const props = defineProps({
   error_stack: {
@@ -305,7 +366,7 @@ const allSourceInfoNull = computed(() => {
   if (translatedStackTrace.value.length === 0) return false;
 
   return translatedStackTrace.value.every((trace) =>
-    trace.stack.every((frame) => !frame.source_info)
+    trace.stack.every((frame) => !frame.source_info),
   );
 });
 
@@ -363,21 +424,21 @@ const highlightErrorLine = (traceIndex: number, frameIndex: number) => {
   if (!frame?.source_info) return;
 
   // Calculate the relative line number within the displayed source snippet
-  const { stack_line, source_line_start, source_line_end } = frame.source_info;
+  const { stack_line, source_line_start } = frame.source_info;
 
   // Monaco editor is 1-indexed
   // The source snippet starts at source_line_start and the error is at stack_line
   // Relative position = stack_line - source_line_start + 1
   const relativeLineNumber = stack_line - source_line_start;
 
-  console.log(`Highlighting line - stack_line: ${stack_line}, source_line_start: ${source_line_start}, source_line_end: ${source_line_end}, relativeLineNumber: ${relativeLineNumber}`);
-
   // Use the decorateRanges method to highlight the error line
   if (editorComponent.decorateRanges) {
-    editorComponent.decorateRanges([{
-      startLine: relativeLineNumber,
-      endLine: relativeLineNumber,
-    }]);
+    editorComponent.decorateRanges([
+      {
+        startLine: relativeLineNumber,
+        endLine: relativeLineNumber,
+      },
+    ]);
   }
 };
 
@@ -406,7 +467,7 @@ const translateStackTrace = async () => {
       store.state.selectedOrganization.identifier,
       service,
       version,
-      env
+      env,
     );
 
     // Check cache first
@@ -443,16 +504,11 @@ const translateStackTrace = async () => {
       payload.env = env;
     }
 
-    console.log("Translating stack trace with payload:", payload);
-    console.log("Organization identifier:", store.state.selectedOrganization.identifier);
-
     // Call the API
     const response = await sourcemapsService.translateStackTrace(
       store.state.selectedOrganization.identifier,
-      payload
+      payload,
     );
-
-    console.log("Translation response:", response);
 
     if (response.data && response.data.stacktrace) {
       // Check if stacktrace is already an array, if not wrap it in an array
@@ -464,19 +520,6 @@ const translateStackTrace = async () => {
 
       // Store in cache
       setCachedTranslation(cacheKey, translatedData);
-
-      console.log("Translated stack trace:", translatedStackTrace.value);
-
-      // Log each frame for debugging
-      translatedStackTrace.value.forEach((trace, idx) => {
-        console.log(`Stack trace ${idx}:`, trace.error);
-        trace.stack.forEach((frame, frameIdx) => {
-          console.log(`  Frame ${frameIdx}:`, frame.line);
-          if (frame.source_info) {
-            console.log(`    Source: ${frame.source_info.source.substring(0, 100)}...`);
-          }
-        });
-      });
 
       // Highlight the first frame after the editors are mounted
       await nextTick();
@@ -495,9 +538,7 @@ const translateStackTrace = async () => {
     console.error("Error response:", error?.response);
     console.error("Error response data:", error?.response?.data);
     translationError.value =
-      error?.response?.data?.message ||
-      error?.message ||
-      "Failed to translate stack trace. Source maps may not be available.";
+      error?.response?.data?.message || error?.message || t("rum.failedToTranslateStackTrace");
   } finally {
     isLoadingTranslation.value = false;
   }
@@ -536,202 +577,6 @@ watch(
   () => props.error_stack,
   () => {
     translateStackTrace();
-  }
+  },
 );
 </script>
-
-<style lang="scss" scoped>
-.loading-container {
-  min-height: 200px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background-color: v-bind(backgroundColor);
-  border: 1px solid v-bind(borderColor);
-  border-radius: 6px;
-}
-
-.no-source-maps-container {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  background-color: v-bind(backgroundColor);
-  border: 1px solid v-bind(borderColor);
-  border-radius: 6px;
-  padding: 20px 24px !important;
-
-  .service-version-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 12px;
-    font-weight: 500;
-
-    .badge-label {
-      opacity: 0.8;
-    }
-
-    .badge-value {
-      font-weight: 600;
-    }
-  }
-
-  .service-badge {
-    background-color: rgba(103, 58, 183, 0.12);
-    color: #5e35b1;
-  }
-
-  .version-badge {
-    background-color: rgba(25, 118, 210, 0.12);
-    color: #1976d2;
-  }
-}
-
-:deep(.q-dark) {
-  .no-source-maps-container {
-    .service-badge {
-      background-color: rgba(149, 117, 205, 0.2);
-      color: #b39ddb;
-    }
-
-    .version-badge {
-      background-color: rgba(66, 165, 245, 0.2);
-      color: #90caf9;
-    }
-  }
-}
-
-.pretty-stack-container {
-  .error-header {
-    border: 1px solid;
-    border-radius: 6px 6px 0 0;
-    font-size: 14px;
-    font-weight: 600;
-    letter-spacing: 0.01em;
-    padding: 10px 16px !important;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
-    margin-bottom: -1px;
-  }
-
-  .stack-frame-wrapper {
-    border-radius: 0 0 6px 6px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-    overflow: hidden;
-    margin-top: 0;
-
-    .frame-header {
-      transition: all 0.2s ease;
-      padding: 12px 16px !important;
-
-      &:hover {
-        background-color: v-bind(hoverBackgroundColor);
-      }
-
-      .frame-header-content {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-
-        .stack-line-header {
-          font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", "Droid Sans Mono", monospace;
-          font-size: 12.5px;
-          font-weight: 500;
-          word-break: break-all;
-          flex: 1;
-          line-height: 1.5;
-        }
-      }
-    }
-
-    .source-context {
-      padding: 0px 16px 16px 16px !important;
-
-      .source-location-header {
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.02em;
-        margin-bottom: 10px !important;
-        opacity: 0.8;
-      }
-
-      .source-code-box {
-        border: 1px solid;
-        border-radius: 6px;
-        height: 200px;
-        overflow: hidden;
-        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-      }
-    }
-  }
-
-  .remaining-frames {
-    border-radius: 0 0 6px 6px;
-    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
-
-    .show-more-button {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      transition: all 0.2s ease;
-      padding: 10px 16px !important;
-      font-size: 12px;
-      font-weight: 500;
-
-      &:hover {
-        background-color: v-bind(hoverBackgroundColor);
-      }
-    }
-
-    .collapsed-frame-wrapper {
-      .collapsed-frame-header {
-        transition: all 0.2s ease;
-        padding: 10px 16px !important;
-
-        &:hover {
-          background-color: v-bind(hoverBackgroundColor);
-        }
-
-        .collapsed-frame-content {
-          display: flex;
-          align-items: center;
-          gap: 8px;
-
-          .stack-line-collapsed {
-            font-family: "SF Mono", "Monaco", "Inconsolata", "Fira Code", "Droid Sans Mono", monospace;
-            font-size: 11.5px;
-            line-height: 1.5;
-            word-break: break-all;
-            flex: 1;
-            opacity: 0.85;
-          }
-        }
-      }
-
-      .source-context {
-        padding: 0px 16px 16px 16px !important;
-
-        .source-location-header {
-          font-size: 11px;
-          font-weight: 600;
-          letter-spacing: 0.02em;
-          margin-bottom: 10px !important;
-          opacity: 0.8;
-        }
-
-        .source-code-box {
-          border: 1px solid;
-          border-radius: 6px;
-          height: 200px;
-          overflow: hidden;
-          box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
-          margin-left: 28px !important;
-        }
-      }
-    }
-  }
-}
-</style>

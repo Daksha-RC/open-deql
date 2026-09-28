@@ -26,13 +26,30 @@ use config::meta::system_settings::{SettingScope, SystemSetting};
 use sea_orm::{
     ActiveModelTrait,
     ActiveValue::{NotSet, Set},
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
+    ColumnTrait, ConnectionTrait, EntityTrait, QueryFilter, QueryOrder, Schema,
 };
 
 use crate::{
-    db::{ORM_CLIENT, connect_to_orm},
+    db::{get_orm_client_ro, get_orm_client_rw},
     table::entity::system_settings::{ActiveModel, Column, Entity, Model},
 };
+
+/// Create the table from the entity, for callers that stand up a schema without running the
+/// migrations that own it in production.
+pub async fn create_table() -> Result<(), anyhow::Error> {
+    let client = get_orm_client_rw().await;
+    let builder = client.get_database_backend();
+
+    let schema = Schema::new(builder);
+    let create_table_stmt = schema
+        .create_table_from_entity(Entity)
+        .if_not_exists()
+        .take();
+
+    client.execute(builder.build(&create_table_stmt)).await?;
+
+    Ok(())
+}
 
 /// Get a single setting by scope, org_id, user_id, and key
 pub async fn get(
@@ -41,7 +58,7 @@ pub async fn get(
     user_id: Option<&str>,
     key: &str,
 ) -> Result<Option<SystemSetting>, anyhow::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
 
     let mut query = Entity::find()
         .filter(Column::Scope.eq(scope.as_str()))
@@ -115,7 +132,7 @@ pub async fn list(
     user_id: Option<&str>,
     category: Option<&str>,
 ) -> Result<Vec<SystemSetting>, anyhow::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
 
     let mut query = Entity::find().order_by_asc(Column::SettingKey);
 
@@ -181,7 +198,7 @@ pub async fn list_resolved(
 pub async fn set(setting: &SystemSetting) -> Result<SystemSetting, anyhow::Error> {
     setting.validate().map_err(|e| anyhow!(e))?;
 
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     let now = chrono::Utc::now().timestamp_micros();
 
     // Check if setting already exists
@@ -249,7 +266,7 @@ pub async fn delete(
     user_id: Option<&str>,
     key: &str,
 ) -> Result<bool, anyhow::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
 
     let mut query = Entity::delete_many()
         .filter(Column::Scope.eq(scope.as_str()))
@@ -293,7 +310,7 @@ pub async fn delete(
 
 /// Delete all settings for an organization
 pub async fn delete_org_settings(org_id: &str) -> Result<u64, anyhow::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
 
     let result = Entity::delete_many()
         .filter(Column::OrgId.eq(org_id))
@@ -306,7 +323,7 @@ pub async fn delete_org_settings(org_id: &str) -> Result<u64, anyhow::Error> {
 
 /// Delete all settings for a user in an organization
 pub async fn delete_user_settings(org_id: &str, user_id: &str) -> Result<u64, anyhow::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
 
     let result = Entity::delete_many()
         .filter(Column::OrgId.eq(org_id))

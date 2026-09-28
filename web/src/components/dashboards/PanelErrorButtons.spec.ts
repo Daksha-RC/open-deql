@@ -13,13 +13,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
 import PanelErrorButtons from "./PanelErrorButtons.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import { createStore } from "vuex";
-
-installQuasar();
+import i18n from "@/locales";
 
 // Create a mock Vuex store with timezone state
 const mockStore = createStore({
@@ -35,6 +33,7 @@ describe("PanelErrorButtons", () => {
   const mountComponent = (options = {}) => {
     return mount(PanelErrorButtons, {
       global: {
+        plugins: [i18n],
         provide: {
           store: mockStore,
         },
@@ -99,7 +98,9 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const warningButton = wrapper.find('[data-test="panel-is-cached-data-differ-with-current-time-range-warning"]');
+    const warningButton = wrapper.find(
+      '[data-test="panel-is-cached-data-differ-with-current-time-range-warning"]',
+    );
     expect(warningButton.exists()).toBe(true);
   });
 
@@ -135,7 +136,7 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const lastRefreshed = wrapper.find('.lastRefreshedAt');
+    const lastRefreshed = wrapper.find('[data-test="panel-last-refreshed-at"]');
     expect(lastRefreshed.exists()).toBe(true);
   });
 
@@ -147,7 +148,7 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const lastRefreshed = wrapper.find('.lastRefreshedAt');
+    const lastRefreshed = wrapper.find('[data-test="panel-last-refreshed-at"]');
     expect(lastRefreshed.exists()).toBe(false);
   });
 
@@ -159,7 +160,7 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const lastRefreshed = wrapper.find('.lastRefreshedAt');
+    const lastRefreshed = wrapper.find('[data-test="panel-last-refreshed-at"]');
     expect(lastRefreshed.exists()).toBe(false);
   });
 
@@ -193,7 +194,7 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const lastRefreshed = wrapper.find('.lastRefreshedAt');
+    const lastRefreshed = wrapper.find('[data-test="panel-last-refreshed-at"]');
     expect(lastRefreshed.exists()).toBe(false);
   });
 
@@ -205,7 +206,7 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const lastRefreshed = wrapper.find('.lastRefreshedAt');
+    const lastRefreshed = wrapper.find('[data-test="panel-last-refreshed-at"]');
     expect(lastRefreshed.exists()).toBe(true);
   });
 
@@ -217,7 +218,69 @@ describe("PanelErrorButtons", () => {
       },
     });
 
-    const lastRefreshed = wrapper.find('.lastRefreshedAt');
+    const lastRefreshed = wrapper.find('[data-test="panel-last-refreshed-at"]');
     expect(lastRefreshed.exists()).toBe(true);
+  });
+
+  /**
+   * viewOnly gates ONLY the last-refreshed chip, so a read-only embedding (the
+   * curated host drawer) still surfaces every warning. Gating a warning on it
+   * would silence exactly the surfaces that cannot open a panel editor to find out.
+   */
+  describe("a viewOnly embedding still surfaces every warning", () => {
+    it("renders the range and partial-data warnings under viewOnly", () => {
+      const wrapper = mountComponent({
+        props: {
+          maxQueryRangeWarning: "range shortened",
+          isPartialData: true,
+          isPanelLoading: false,
+          viewOnly: true,
+        },
+      });
+
+      expect(wrapper.find('[data-test="panel-max-duration-warning"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="panel-partial-data-warning"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="panel-last-refreshed-at"]').exists()).toBe(false);
+    });
+
+    // isPartialData means the LOAD was cut short (cancelled or unmounted mid-flight),
+    // never that the returned rows fail to cover the window — so it stays hidden
+    // while loading and says nothing about a host that started reporting late.
+    it("hides the partial-data warning while the panel is still loading", () => {
+      const wrapper = mountComponent({
+        props: { isPartialData: true, isPanelLoading: true, viewOnly: true },
+      });
+
+      expect(wrapper.find('[data-test="panel-partial-data-warning"]').exists()).toBe(false);
+    });
+  });
+
+  describe("exemplar error", () => {
+    const tooltipStub = {
+      OTooltip: {
+        props: ["content"],
+        template: "<div><slot name='content' />{{ content }}</div>",
+      },
+    };
+
+    it("shows the warning with the server message and emits retry", async () => {
+      const wrapper = mount(PanelErrorButtons, {
+        props: { exemplarError: "scan exploded" },
+        global: { plugins: [i18n], provide: { store: mockStore }, stubs: tooltipStub },
+      });
+      expect(wrapper.find('[data-test="dashboard-panel-exemplars-error"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-panel-exemplars-error-message"]').text()).toBe(
+        "scan exploded",
+      );
+      await wrapper.find('[data-test="dashboard-panel-exemplars-retry"]').trigger("click");
+      expect(wrapper.emitted("retry-exemplars")).toHaveLength(1);
+    });
+
+    it("renders nothing for exemplars without an error", () => {
+      const wrapper = mount(PanelErrorButtons, {
+        global: { plugins: [i18n], provide: { store: mockStore } },
+      });
+      expect(wrapper.find('[data-test="dashboard-panel-exemplars-error"]').exists()).toBe(false);
+    });
   });
 });

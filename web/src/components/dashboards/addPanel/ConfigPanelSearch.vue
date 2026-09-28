@@ -1,7 +1,8 @@
 <script lang="ts" setup>
-import { useI18n } from "vue-i18n";
+import { useI18nTyped } from "@/types/i18n";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
 
-const { t } = useI18n();
+const { t } = useI18nTyped();
 
 interface Props {
   modelValue: string;
@@ -9,24 +10,21 @@ interface Props {
 
 const props = defineProps<Props>();
 
-const emit = defineEmits<{
+defineEmits<{
   (e: "update:modelValue", value: string): void;
 }>();
 </script>
 
 <template>
-  <q-input
+  <OSearchInput
+    id="dashboard-config-panel-search-input"
+    data-test="dashboard-config-panel-search"
     :model-value="props.modelValue"
     @update:model-value="$emit('update:modelValue', String($event || ''))"
-    dense
-    borderless
     :placeholder="t('dashboard.configPanelSearchPlaceholder')"
-    class="col config-panel-search"
+    class="config-panel-search flex flex-col"
+    size="xs"
     clearable
     autofocus
-  >
-    <template #prepend>
-      <q-icon name="search" size="xs" class="q-ml-xs text-grey-6" />
-    </template>
-  </q-input>
+  />
 </template>

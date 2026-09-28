@@ -15,8 +15,6 @@
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, flushPromises, VueWrapper } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import * as quasar from "quasar";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import router from "@/test/unit/helpers/router";
@@ -27,11 +25,6 @@ node.setAttribute("id", "app");
 node.style.height = "1024px";
 document.body.appendChild(node);
 
-// Install Quasar plugins
-installQuasar({
-  plugins: [quasar.Dialog, quasar.Notify],
-});
-
 // ── vi.mock calls must be at the top level so Vitest can hoist them ──────────
 
 // Mock useTraces composable — vi.mock (not vi.doMock) so it is hoisted
@@ -41,32 +34,21 @@ vi.mock("@/composables/useTraces", () => ({
     updatedLocalLogFilterField: vi.fn(),
   }),
   DEFAULT_TRACE_COLUMNS: {
-    traces: [
-      "service_name",
-      "operation_name",
-      "duration",
-      "spans",
-      "status",
-      "service_latency",
-    ],
-    spans: [
-      "service_name",
-      "operation_name",
-      "duration",
-      "status",
-      "status_code",
-      "method",
-    ],
+    traces: ["service_name", "operation_name", "duration", "spans", "status", "service_latency"],
+    spans: ["service_name", "operation_name", "duration", "status", "status_code", "method"],
   },
 }));
 
 // Mock stream service
-vi.mock("@/services/stream", () => ({
-  default: {
-    tracesFieldValues: vi.fn(),
-    fieldValues: vi.fn(),
-  },
-}));
+vi.mock("@/services/stream", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      tracesFieldValues: vi.fn(),
+      fieldValues: vi.fn(),
+    },
+  });
+});
 
 // Mock SQL parser
 vi.mock("@/composables/useParser", () => ({
@@ -103,22 +85,7 @@ vi.mock("@/utils/zincutils", async (importOriginal: any) => {
     b64EncodeUnicode: vi.fn().mockImplementation((str: string) => btoa(str)),
     mergeRoutes: vi
       .fn()
-      .mockImplementation((route1: any, route2: any) => [
-        ...(route1 || []),
-        ...(route2 || []),
-      ]),
-  };
-});
-
-// Mock Quasar notify
-const mockNotify = vi.fn();
-vi.mock("quasar", async () => {
-  const actual = await vi.importActual("quasar");
-  return {
-    ...actual,
-    useQuasar: () => ({
-      notify: mockNotify,
-    }),
+      .mockImplementation((route1: any, route2: any) => [...(route1 || []), ...(route2 || [])]),
   };
 });
 
@@ -226,9 +193,31 @@ function mountIndexList(props: Record<string, unknown> = {}) {
       plugins: [i18n, router],
       provide: { store },
       stubs: {
-        // FieldRow stub exposes the expansion slot so BasicValuesFilter renders
+        // GroupedFieldList stub renders the field-row slot for each field
+        GroupedFieldList: {
+          template: `<div data-test="grouped-field-list">
+            <slot
+              v-for="(row, idx) in fields"
+              :key="idx"
+              name="field-row"
+              :row="row"
+            />
+            <slot name="after-list" :currentPage="1" :totalPages="1" :isFirstPage="true" :isLastPage="true" />
+            <slot name="loading" />
+          </div>`,
+          props: [
+            "fields",
+            "search",
+            "loading",
+            "theme",
+            "showPagination",
+            "pageSize",
+            "currentPage",
+          ],
+        },
+        // FieldRow stub exposes the expansion slot so FieldExpansion renders
         FieldRow: {
-          template: '<div><slot name="expansion" :field="field" /></div>',
+          template: '<div class="field_list"><slot name="expansion" :field="field" /></div>',
           props: [
             "field",
             "selectedFields",
@@ -238,16 +227,29 @@ function mountIndexList(props: Record<string, unknown> = {}) {
             "showVisibilityToggle",
           ],
         },
-        BasicValuesFilter: {
-          template:
-            '<div data-test="basic-values-filter">Basic Values Filter</div>',
+        FieldExpansion: {
+          template: '<div data-test="field-expansion">Field Expansion</div>',
           props: [
-            "row",
+            "field",
+            "fieldValues",
             "activeIncludeValues",
             "activeExcludeValues",
             "selectedFields",
             "showVisibilityToggle",
+            "showFilterIcon",
+            "showQuickMode",
+            "valueMapper",
           ],
+        },
+        OTable: {
+          template: `<div data-test-stub='o-table' :data-test='$attrs["data-test"]'>
+            <div data-test="table-top"><slot name="top"></slot></div>
+            <div data-test="table-body">
+              <slot name="cell-name" v-for="row in data" :key="row.name" v-bind="{row: row}"></slot>
+            </div>
+          </div>`,
+          props: ["data", "columns", "rowKey", "pagination", "showGlobalFilter", "rowClass"],
+          emits: ["row-click"],
         },
       },
     },
@@ -260,7 +262,6 @@ describe("IndexList Component", () => {
 
   beforeEach(async () => {
     vi.clearAllMocks();
-    mockNotify.mockClear();
 
     // Reset shared mock state to known defaults before each test
     mockSearchObj.data.stream.selectedStream = {
@@ -323,24 +324,18 @@ describe("IndexList Component", () => {
     });
 
     it("should render stream select dropdown", () => {
-      const streamSelect = wrapper.find(
-        '[data-test="log-search-index-list-select-stream"]',
-      );
+      const streamSelect = wrapper.find('[data-test="log-search-index-list-select-stream"]');
       expect(streamSelect.exists()).toBe(true);
     });
 
     it("should render fields table", () => {
-      const fieldsTable = wrapper.find(
-        '[data-test="log-search-index-list-fields-table"]',
-      );
+      const fieldsTable = wrapper.find('[data-test="log-search-index-list-fields-table"]');
       expect(fieldsTable.exists()).toBe(true);
     });
 
-    it("should render field search input", () => {
-      const searchInput = wrapper.find(
-        '[data-test="log-search-index-list-field-search-input"]',
-      );
-      expect(searchInput.exists()).toBe(true);
+    it("should render GroupedFieldList for field display", () => {
+      const groupedFieldList = wrapper.find('[data-test="grouped-field-list"]');
+      expect(groupedFieldList.exists()).toBe(true);
     });
   });
 
@@ -348,9 +343,7 @@ describe("IndexList Component", () => {
     it("should receive fieldList prop correctly", () => {
       expect(wrapper.props("fieldList")).toHaveLength(4);
       expect((wrapper.props("fieldList") as any[])[0].name).toBe("field1");
-      expect((wrapper.props("fieldList") as any[])[1].name).toBe(
-        "service_name",
-      );
+      expect((wrapper.props("fieldList") as any[])[1].name).toBe("service_name");
     });
 
     it("should have searchObj available", () => {
@@ -370,41 +363,33 @@ describe("IndexList Component", () => {
       expect(fieldCells.length).toBeGreaterThan(0);
     });
 
-    it("should show BasicValuesFilter for fields with showValues=true", () => {
-      const basicFilters = wrapper.findAll('[data-test="basic-values-filter"]');
+    it("should show FieldExpansion for fields with showValues=true", () => {
+      const basicFilters = wrapper.findAll('[data-test="field-expansion"]');
       expect(basicFilters.length).toBeGreaterThan(0);
     });
   });
 
   describe("Stream Selection", () => {
     it("should show correct stream in dropdown", () => {
-      const streamSelect = wrapper.find(
-        '[data-test="log-search-index-list-select-stream"]',
-      );
+      const streamSelect = wrapper.find('[data-test="log-search-index-list-select-stream"]');
       expect(streamSelect.exists()).toBe(true);
     });
   });
 
   describe("Field Search", () => {
-    it("should update filter field when searching", async () => {
-      const searchInput = wrapper.find(
-        '[data-test="log-search-index-list-field-search-input"]',
-      );
-      expect(searchInput.exists()).toBe(true);
-      await searchInput.setValue("service");
+    it("should update filterField in searchObj when GroupedFieldList emits update:search", async () => {
+      // The search is now managed by GroupedFieldList internally and exposed via
+      // the @update:search event which writes to searchObj.data.stream.filterField
+      expect(wrapper.vm.searchObj.data.stream.filterField).toBe("");
+      wrapper.vm.searchObj.data.stream.filterField = "service";
       await wrapper.vm.$nextTick();
-      expect(searchInput.exists()).toBe(true);
+      expect(wrapper.vm.searchObj.data.stream.filterField).toBe("service");
     });
 
-    it("should filter fields using filterFieldFn", () => {
-      const testRows = [
-        { name: "service_name" },
-        { name: "operation_name" },
-        { name: "custom_field" },
-      ];
-      const result = wrapper.vm.filterFieldFn(testRows, "service");
-      expect(result).toHaveLength(1);
-      expect(result[0].name).toBe("service_name");
+    it("should pass filterField from searchObj to GroupedFieldList as search prop", () => {
+      // filterField is now managed by GroupedFieldList internally via the search prop
+      mockSearchObj.data.stream.filterField = "service";
+      expect(wrapper.vm.searchObj.data.stream.filterField).toBe("service");
     });
   });
 
@@ -487,27 +472,15 @@ describe("IndexList Component", () => {
 
   describe("Accessibility — data-test attributes", () => {
     it("should have data-test on stream select", () => {
-      expect(
-        wrapper
-          .find('[data-test="log-search-index-list-select-stream"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="log-search-index-list-select-stream"]').exists()).toBe(true);
     });
 
     it("should have data-test on fields table", () => {
-      expect(
-        wrapper
-          .find('[data-test="log-search-index-list-fields-table"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="log-search-index-list-fields-table"]').exists()).toBe(true);
     });
 
-    it("should have data-test on field search input", () => {
-      expect(
-        wrapper
-          .find('[data-test="log-search-index-list-field-search-input"]')
-          .exists(),
-      ).toBe(true);
+    it("should have data-test on GroupedFieldList", () => {
+      expect(wrapper.find('[data-test="grouped-field-list"]').exists()).toBe(true);
     });
   });
 
@@ -553,9 +526,7 @@ describe("IndexList Component", () => {
 
     it("should set enableVisibility: false for service_name (locked trace column)", () => {
       const normalized: any[] = wrapper.vm.normalizedFieldList;
-      const serviceNameField = normalized.find(
-        (f: any) => f.name === "service_name",
-      );
+      const serviceNameField = normalized.find((f: any) => f.name === "service_name");
       expect(serviceNameField).toBeDefined();
       expect(serviceNameField.enableVisibility).toBe(false);
     });
@@ -618,15 +589,11 @@ describe("IndexList Component", () => {
     });
 
     it("should lock service_name", () => {
-      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("service_name")).toBe(
-        true,
-      );
+      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("service_name")).toBe(true);
     });
 
     it("should lock operation_name", () => {
-      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("operation_name")).toBe(
-        true,
-      );
+      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("operation_name")).toBe(true);
     });
 
     it("should lock duration", () => {
@@ -639,9 +606,7 @@ describe("IndexList Component", () => {
 
     it("should lock span_status (mapped from 'status' column ID)", () => {
       // The column ID "status" maps to field name "span_status"
-      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("span_status")).toBe(
-        true,
-      );
+      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("span_status")).toBe(true);
     });
 
     it("should NOT lock the raw 'status' column ID — only span_status", () => {
@@ -649,15 +614,11 @@ describe("IndexList Component", () => {
     });
 
     it("should lock service_latency", () => {
-      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("service_latency")).toBe(
-        true,
-      );
+      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("service_latency")).toBe(true);
     });
 
     it("should NOT lock an arbitrary custom field", () => {
-      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("custom_field")).toBe(
-        false,
-      );
+      expect(wrapper.vm.TRACES_LOCKED_FIELD_NAMES.has("custom_field")).toBe(false);
     });
   });
 
@@ -761,6 +722,38 @@ describe("IndexList Component", () => {
     });
   });
 
+  // ─── handleAddSearchTerm / handleAddMultipleSearchTerms quote escaping ────
+
+  describe("handleAddSearchTerm value escaping", () => {
+    it("escapes an embedded single quote when including a value", () => {
+      wrapper.vm.handleAddSearchTerm("service_name", "notificationHandling's", "include");
+      expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
+        "service_name='notificationHandling''s'",
+      );
+    });
+
+    it("escapes an embedded single quote when excluding a value", () => {
+      wrapper.vm.handleAddSearchTerm("service_name", "notificationHandling's", "exclude");
+      expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
+        "service_name!='notificationHandling''s'",
+      );
+    });
+
+    it("leaves the numeric comparison untouched for the duration field", () => {
+      wrapper.vm.handleAddSearchTerm("duration", "100", "include");
+      expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe("duration>=100");
+    });
+  });
+
+  describe("handleAddMultipleSearchTerms value escaping", () => {
+    it("escapes an embedded single quote in each OR'd include expression", () => {
+      wrapper.vm.handleAddMultipleSearchTerms("service_name", ["o'brien", "plain"], "include");
+      expect(wrapper.vm.searchObj.data.stream.addToFilter).toBe(
+        "(service_name='o''brien' or service_name='plain')",
+      );
+    });
+  });
+
   // ─── onStreamChange side-effects ──────────────────────────────────────────
 
   describe("onStreamChange side-effects", () => {
@@ -783,11 +776,12 @@ describe("IndexList Component", () => {
     });
 
     it("should update selectedStream on stream change", async () => {
+      // onStreamChange now takes a string value (post OSelect migration)
+      // and looks up the stream from streamLists
       const newStream = { label: "new_stream", value: "new_stream" };
-      await wrapper.vm.onStreamChange(newStream);
-      expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual(
-        newStream,
-      );
+      wrapper.vm.searchObj.data.stream.streamLists = [newStream];
+      await wrapper.vm.onStreamChange("new_stream");
+      expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual(newStream);
     });
   });
 
@@ -807,41 +801,6 @@ describe("IndexList Component", () => {
       mockSearchObj.loadingStream = false;
       await wrapper.vm.$nextTick();
       expect(wrapper.exists()).toBe(true);
-    });
-  });
-
-  // ─── filterFieldFn — edge cases ───────────────────────────────────────────
-
-  describe("filterFieldFn — edge cases", () => {
-    it("should return all rows when terms is empty string", () => {
-      const rows = [{ name: "field_a" }, { name: "field_b" }];
-      const result = wrapper.vm.filterFieldFn(rows, "");
-      expect(result).toEqual(rows);
-    });
-
-    it("should perform case-insensitive match", () => {
-      const rows = [{ name: "ServiceName" }, { name: "operation" }];
-      const result = wrapper.vm.filterFieldFn(rows, "servicename");
-      expect(result).toHaveLength(1);
-      expect(result[0].name).toBe("ServiceName");
-    });
-
-    it("should return multiple matches when several rows match", () => {
-      const rows = [
-        { name: "span_id" },
-        { name: "span_name" },
-        { name: "duration" },
-      ];
-      const result = wrapper.vm.filterFieldFn(rows, "span");
-      expect(result).toHaveLength(2);
-    });
-
-    it("should return sentinel row when no rows match", () => {
-      const rows = [{ name: "field_a" }, { name: "field_b" }];
-      const result = wrapper.vm.filterFieldFn(rows, "xyz_no_match");
-      expect(result).toHaveLength(1);
-      expect(result[0].label).toBe(true);
-      expect(result[0].name).toBe("No matching fields found");
     });
   });
 

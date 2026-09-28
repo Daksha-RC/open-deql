@@ -19,6 +19,8 @@
  * Helper functions for parsing and formatting LLM trace data enriched by the backend.
  */
 
+import type { TranslateFn } from "@/types/i18n";
+
 export interface UsageDetails {
   input: number;
   output: number;
@@ -61,6 +63,8 @@ export interface LLMData {
   userId: string | null;
   sessionId: string | null;
   promptName: string | null;
+  promptVersion: number | null;
+  promptLabel: string | null;
   inputPreview: string;
   evaluation: EvaluationScores | null;
 }
@@ -88,30 +92,27 @@ export function isLLMTrace(data: any): boolean {
   if (hasValue(data.gen_ai_system)) return true;
   if (hasValue(data.gen_ai_response_model)) return true;
   if (hasValue(data.gen_ai_request_model)) return true;
-
-  // Check custom llm.* fields (stored with underscores after flatten)
-  if (hasValue(data.llm_input)) return true;
-  if (hasValue(data.llm_output)) return true;
-  if (hasValue(data.llm_usage)) return true;
-  if (hasValue(data.llm_cost)) return true;
-  if (hasValue(data.llm_observation_type)) return true;
-
-  // Check usage fields (OTEL standard, stored with underscores after flatten)
+  if (hasValue(data.gen_ai_operation_name)) return true;
+  if (hasValue(data.gen_ai_input_messages)) return true;
+  if (hasValue(data.gen_ai_output_messages)) return true;
   if (hasValue(data.gen_ai_usage_input_tokens)) return true;
   if (hasValue(data.gen_ai_usage_output_tokens)) return true;
+  if (hasValue(data.gen_ai_usage_cost)) return true;
+  if (hasValue(data.llm_request_parameters)) return true;
 
-  // Check custom usage fields (stored with underscores after flatten)
-  if (hasValue(data.llm_usage_tokens)) return true;
-
-  // Backward compatibility: Check legacy llm_* fields
-  if (hasValue(data.llm_provider_name)) return true;
-  if (hasValue(data.llm_input)) return true;
-  if (hasValue(data.llm_output)) return true;
-  if (hasValue(data.llm_usage_details_input)) return true;
-  if (hasValue(data.llm_usage_details_output)) return true;
-  if (hasValue(data.llm_usage_details_total)) return true;
+  // Check formatted span fields (added by getFormattedSpan in TraceDetails.vue)
+  if (hasValue(data.genAiUsage?.total)) return true;
+  if (hasValue(data.genAiCost?.total)) return true;
 
   return false;
+}
+
+/** Whether Trace Details can render a useful input/output preview for a span.
+ * Remote evaluator spans intentionally do not claim GenAI semantics, but they
+ * still persist their request and response on the evaluator attributes. */
+export function hasTracePreview(data: any): boolean {
+  if (!data) return false;
+  return isLLMTrace(data) || hasValue(data.attributes_prompt) || hasValue(data.attributes_response);
 }
 
 /**
@@ -123,22 +124,9 @@ export function parseUsageDetails(value: any): UsageDetails {
     // Handle if already an object
     const data = typeof value === "string" ? JSON.parse(value) : value || {};
 
-    // Try new OTEL-compliant names first (flattened), then legacy llm_* names
-    const input =
-      Number(data.gen_ai_usage_input_tokens) ||
-      Number(data.input) ||
-      Number(data.llm_usage_details_input) ||
-      0;
-    const output =
-      Number(data.gen_ai_usage_output_tokens) ||
-      Number(data.output) ||
-      Number(data.llm_usage_details_output) ||
-      0;
-    const total =
-      Number(data.gen_ai_usage_total_tokens) ||
-      Number(data.total) ||
-      Number(data.llm_usage_details_total) ||
-      input + output;
+    const input = Number(data.gen_ai_usage_input_tokens) || 0;
+    const output = Number(data.gen_ai_usage_output_tokens) || 0;
+    const total = Number(data.gen_ai_usage_total_tokens) || input + output;
 
     return {
       input,
@@ -163,10 +151,9 @@ export function parseCostDetails(value: any): CostDetails {
   try {
     const data = typeof value === "string" ? JSON.parse(value) : value || {};
 
-    // Parse from llm.usage.cost bundle or legacy llm_cost_details_* fields
-    const input = data.input || data.llm_cost_details_input || 0;
-    const output = data.output || data.llm_cost_details_output || 0;
-    const total = data.total || data.llm_cost_details_total || input + output;
+    const input = data.gen_ai_usage_cost_input || 0;
+    const output = data.gen_ai_usage_cost_output || 0;
+    const total = data.gen_ai_usage_cost || input + output;
 
     return {
       input,
@@ -238,8 +225,7 @@ function extractMessageContent(content: any): string {
   if (Array.isArray(content)) {
     // Find first text content
     const textPart = content.find(
-      (part: any) =>
-        part && typeof part === "object" && part.type === "text" && part.text,
+      (part: any) => part && typeof part === "object" && part.type === "text" && part.text,
     );
     if (textPart) {
       return textPart.text;
@@ -275,10 +261,7 @@ function extractMessageContent(content: any): string {
  * - Simple arrays: [{}] or ["text"]
  * - Plain strings
  */
-export function truncateLLMContent(
-  content: string | object,
-  maxLength: number = 100,
-): string {
+export function truncateLLMContent(content: string | object, maxLength: number = 100): string {
   if (!content) return "N/A";
 
   let text: string = "";
@@ -308,9 +291,7 @@ export function truncateLLMContent(
         text = parsed.inputs.query;
       } else {
         // Try to get first string value from inputs
-        const firstValue = Object.values(parsed.inputs).find(
-          (v) => typeof v === "string",
-        );
+        const firstValue = Object.values(parsed.inputs).find((v) => typeof v === "string");
         if (firstValue) {
           text = firstValue as string;
         }
@@ -320,9 +301,7 @@ export function truncateLLMContent(
     // Handle message arrays: [{role: "user", content: "text"}, ...]
     else if (Array.isArray(parsed)) {
       // Look for user messages
-      const userMsg = parsed.find(
-        (m: any) => m && m.role === "user" && m.content,
-      );
+      const userMsg = parsed.find((m: any) => m && m.role === "user" && m.content);
       if (userMsg) {
         text = extractMessageContent(userMsg.content);
       } else {
@@ -332,9 +311,7 @@ export function truncateLLMContent(
           text = extractMessageContent(anyMsg.content);
         } else {
           // Look for first string in array
-          const firstString = parsed.find(
-            (item: any) => typeof item === "string",
-          );
+          const firstString = parsed.find((item: any) => typeof item === "string");
           if (firstString) {
             text = firstString;
           } else if (parsed.length > 0 && parsed[0]) {
@@ -351,9 +328,7 @@ export function truncateLLMContent(
 
     // Handle object with nested messages array: {tools: [...], messages: [...]}
     else if (parsed.messages && Array.isArray(parsed.messages)) {
-      const userMsg = parsed.messages.find(
-        (m: any) => m && m.role === "user" && m.content,
-      );
+      const userMsg = parsed.messages.find((m: any) => m && m.role === "user" && m.content);
       if (userMsg) {
         text = extractMessageContent(userMsg.content);
       } else {
@@ -367,13 +342,7 @@ export function truncateLLMContent(
     // Handle other object formats
     else {
       // Try common fields
-      text =
-        parsed.input ||
-        parsed.query ||
-        parsed.question ||
-        parsed.prompt ||
-        parsed.text ||
-        "";
+      text = parsed.input || parsed.query || parsed.question || parsed.prompt || parsed.text || "";
 
       // If still no text, stringify the object
       if (!text) {
@@ -402,27 +371,17 @@ export function truncateLLMContent(
  * Parse evaluation scores from span attributes
  */
 export function parseEvaluationScores(data: any): EvaluationScores | null {
-  // Use flattened attribute names (dots converted to underscores) with fallback to legacy llm_* names
-  const quality =
-    data.llm_evaluation_quality_score || data.llm_evaluation_quality;
-  const relevance =
-    data.llm_evaluation_relevance || data.llm_evaluation_relevance;
-  const completeness =
-    data.llm_evaluation_completeness || data.llm_evaluation_completeness;
-  const toolEffectiveness =
-    data.llm_evaluation_tool_effectiveness ||
-    data.llm_evaluation_tool_effectiveness;
-  const groundedness =
-    data.llm_evaluation_groundedness || data.llm_evaluation_groundedness;
-  const safety = data.llm_evaluation_safety || data.llm_evaluation_safety;
-  const durationMs =
-    data.llm_evaluation_duration_ms || data.llm_evaluation_duration_ms;
-  const commentary =
-    data.llm_evaluation_commentary || data.llm_evaluation_commentary;
-  const evaluatorName = data.llm_evaluator_name || data.llm_evaluator_name;
-  const evaluatorVersion =
-    data.llm_evaluator_version || data.llm_evaluator_version;
-  const evaluatorType = data.llm_evaluator_type || data.llm_evaluator_type;
+  const quality = data.llm_evaluation_quality_score;
+  const relevance = data.llm_evaluation_relevance;
+  const completeness = data.llm_evaluation_completeness;
+  const toolEffectiveness = data.llm_evaluation_tool_effectiveness;
+  const groundedness = data.llm_evaluation_groundedness;
+  const safety = data.llm_evaluation_safety;
+  const durationMs = data.llm_evaluation_duration_ms;
+  const commentary = data.llm_evaluation_commentary;
+  const evaluatorName = data.llm_evaluator_name;
+  const evaluatorVersion = data.llm_evaluator_version;
+  const evaluatorType = data.llm_evaluator_type;
 
   // Return null if no evaluation data present
   if (
@@ -449,8 +408,7 @@ export function parseEvaluationScores(data: any): EvaluationScores | null {
     qualityScore: quality != null ? Number(quality) : null,
     relevance: relevance != null ? Number(relevance) : null,
     completeness: completeness != null ? Number(completeness) : null,
-    toolEffectiveness:
-      toolEffectiveness != null ? Number(toolEffectiveness) : null,
+    toolEffectiveness: toolEffectiveness != null ? Number(toolEffectiveness) : null,
     groundedness: groundedness != null ? Number(groundedness) : null,
     safety: safety != null ? Number(safety) : null,
     durationMs: durationMs != null ? Number(durationMs) : null,
@@ -481,21 +439,26 @@ export function getQualityScoreColor(score: number | null): string {
 /**
  * Get color for observation type badge
  */
-export function getObservationTypeColor(type: string): string {
+export function getObservationTypeColor(type: string | null | undefined): string {
+  if (!type) return "grey";
+
   const colorMap: Record<string, string> = {
-    GENERATION: "green",
-    EMBEDDING: "blue",
-    AGENT: "purple",
-    TOOL: "orange",
-    CHAIN: "indigo",
-    RETRIEVER: "cyan",
-    TASK: "teal",
-    EVALUATOR: "pink",
-    WORKFLOW: "deep-purple",
-    RERANK: "light-blue",
-    GUARDRAIL: "red",
-    SPAN: "grey",
-    EVENT: "amber",
+    chat: "green",
+    text_completion: "green",
+    generate_content: "green",
+    embeddings: "blue",
+    invoke_agent: "purple",
+    create_agent: "purple",
+    execute_tool: "orange",
+    chain: "indigo",
+    retrieval: "cyan",
+    task: "teal",
+    evaluator: "pink",
+    invoke_workflow: "deep-purple",
+    rerank: "light-blue",
+    guardrail: "red",
+    span: "grey",
+    event: "amber",
   };
   return colorMap[type] || "grey";
 }
@@ -503,48 +466,35 @@ export function getObservationTypeColor(type: string): string {
 /**
  * Extract and parse all LLM data from a span or trace list item
  * Returns null if not an LLM span/trace
- *
- * Handles two formats:
- * 1. Trace list items:
- *   llm_usage_details_input, llm_usage_details_output, llm_usage_details_total,
- *   llm_cost_details_input, llm_cost_details_output, llm_cost_details_total,
- *   llm_input
  */
 export function extractLLMData(span: any): LLMData | null {
   if (!isLLMTrace(span)) {
     return null;
   }
 
-  // Parse using OTEL-compliant attribute names with legacy fallbacks
-  const modelParams = parseModelParameters(
-    span.llm_request_parameters || span.llm_model_parameters,
-  );
+  const modelParams = parseModelParameters(span.llm_request_parameters);
   const usage = parseUsageDetails(span);
   const cost = parseCostDetails(span);
   const evaluation = parseEvaluationScores(span);
+  const parsedPromptVersion = Number(span.gen_ai_prompt_version);
+  const promptVersion =
+    Number.isInteger(parsedPromptVersion) && parsedPromptVersion > 0 ? parsedPromptVersion : null;
 
   return {
-    provider:
-      span.gen_ai_system ||
-      span.gen_ai_provider_name ||
-      span.llm_provider_name ||
-      "unknown",
-    observationType:
-      span.llm_observation_type || span.llm_observation_type || "SPAN",
-    modelName:
-      span.gen_ai_response_model ||
-      span.gen_ai_request_model ||
-      span.llm_model_name ||
-      "unknown",
-    input: span.llm_input || span.llm_input,
-    output: span.llm_output || span.llm_output,
+    provider: span.gen_ai_system || span.gen_ai_provider_name || "unknown",
+    observationType: span.gen_ai_operation_name || "span",
+    modelName: span.gen_ai_response_model || span.gen_ai_request_model || "unknown",
+    input: span.gen_ai_input_messages,
+    output: span.gen_ai_output_messages,
     modelParameters: modelParams,
     usage,
     cost,
-    userId: span.user_id || span.llm_user_id || null,
-    sessionId: span.session_id || span.llm_session_id || null,
-    promptName: span.gen_ai_prompt_name || span.llm_prompt_name || null,
-    inputPreview: truncateLLMContent(span.llm_input || span.llm_input, 100),
+    userId: span.user_id || null,
+    sessionId: span.gen_ai_conversation_id || span.session_id || null,
+    promptName: span.gen_ai_prompt_name || null,
+    promptVersion,
+    promptLabel: span.gen_ai_prompt_label || null,
+    inputPreview: truncateLLMContent(span.gen_ai_input_messages, 100),
     evaluation,
   };
 }
@@ -552,9 +502,9 @@ export function extractLLMData(span: any): LLMData | null {
 /**
  * Format model parameters for display
  */
-export function formatModelParameters(params: Record<string, any>): string {
+export function formatModelParameters(params: Record<string, any>, t: TranslateFn): string {
   if (!params || Object.keys(params).length === 0) {
-    return "No parameters";
+    return t("common.noParameters");
   }
 
   return Object.entries(params)
@@ -565,10 +515,7 @@ export function formatModelParameters(params: Record<string, any>): string {
 /**
  * Truncate session ID for display
  */
-export function truncateSessionId(
-  sessionId: string,
-  maxLength: number = 16,
-): string {
+export function truncateSessionId(sessionId: string, maxLength: number = 16): string {
   if (!sessionId) return "N/A";
   if (sessionId.length <= maxLength) return sessionId;
 

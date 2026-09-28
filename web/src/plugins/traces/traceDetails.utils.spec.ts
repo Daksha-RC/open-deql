@@ -1,0 +1,168 @@
+// Copyright 2026 OpenObserve Inc.
+//
+// Tests for `resolveSessionId` — the helper that picks the conversation/
+// session ID to display in the trace-details header.
+
+import { describe, it, expect } from "vitest";
+import { resolveReplaySpan, resolveSessionId, resolveUrlTimeRange } from "./traceDetails.utils";
+
+describe("resolveSessionId", () => {
+  // Empty / null / undefined inputs → "" so the header template hides
+  // the chip via v-if instead of showing an empty cell.
+  it.each([[null], [undefined], [[]]])("returns empty string for %j", (input) => {
+    expect(resolveSessionId(input as any)).toBe("");
+  });
+
+  // Preferred path: OTEL gen_ai_conversation_id on any span.
+  it("returns gen_ai_conversation_id when present on any span", () => {
+    const spans = [
+      { trace_id: "t-1", span_id: "s-1" },
+      { gen_ai_conversation_id: "conv-abc", span_id: "s-2" },
+    ];
+    expect(resolveSessionId(spans)).toBe("conv-abc");
+  });
+
+  // Legacy fallback: session_id when gen_ai_conversation_id isn't set.
+  it("falls back to legacy session_id when gen_ai_conversation_id is absent", () => {
+    const spans = [{ trace_id: "t-1" }, { session_id: "legacy-sess-42" }];
+    expect(resolveSessionId(spans)).toBe("legacy-sess-42");
+  });
+
+  // Both fields present on the same span: prefer gen_ai (OTEL spec).
+  it("prefers gen_ai_conversation_id over session_id on the same span", () => {
+    const spans = [{ gen_ai_conversation_id: "new-id", session_id: "old-id" }];
+    expect(resolveSessionId(spans)).toBe("new-id");
+  });
+
+  // First span with EITHER field wins — even if a later span has a
+  // different value. Scanning order matches the array order, which
+  // matches the trace's ingestion order.
+  it("returns the first span's value when multiple spans have IDs", () => {
+    const spans = [{ gen_ai_conversation_id: "first" }, { gen_ai_conversation_id: "second" }];
+    expect(resolveSessionId(spans)).toBe("first");
+  });
+
+  // Spans WITHOUT either field are skipped during the find.
+  it("skips spans without either field", () => {
+    const spans = [
+      { trace_id: "t-1" },
+      { trace_id: "t-2" },
+      { trace_id: "t-3", session_id: "found-it" },
+    ];
+    expect(resolveSessionId(spans)).toBe("found-it");
+  });
+
+  // No span carries either field → "".
+  it("returns empty string when no span has session/conversation id", () => {
+    const spans = [{ trace_id: "t-1" }, { trace_id: "t-2", operation_name: "GET /api" }];
+    expect(resolveSessionId(spans)).toBe("");
+  });
+
+  // Numeric / non-string IDs are coerced to string (the header chip
+  // uses the result as a `:title` and inside a `<span>{{ ... }}</span>`).
+  it("stringifies numeric IDs", () => {
+    const spans = [{ session_id: 12345 }];
+    expect(resolveSessionId(spans)).toBe("12345");
+  });
+
+  // Defensive: spans that are themselves null/undefined inside the
+  // array don't crash the find — the optional chains in the predicate
+  // skip them. This shouldn't happen in practice but better to be safe.
+  it("tolerates null / undefined spans in the array", () => {
+    const spans = [null, undefined, { gen_ai_conversation_id: "ok" }];
+    expect(resolveSessionId(spans as any)).toBe("ok");
+  });
+
+  // Empty-string IDs are treated as "no value" because both branches
+  // of the predicate use `||` (truthy check). This means a span with
+  // explicit empty session_id is skipped. Pin this behaviour.
+  it("treats empty-string IDs as missing", () => {
+    const spans = [{ session_id: "" }, { session_id: "real" }];
+    expect(resolveSessionId(spans)).toBe("real");
+  });
+});
+
+describe("resolveUrlTimeRange", () => {
+  // 0/0 is the endpoint's "no caller range", so an absent window lets the
+  // trace time index derive it from the trace itself.
+  it.each([
+    [undefined, undefined],
+    ["", ""],
+    ["abc", "def"],
+  ])("collapses unusable bounds %j / %j to 0/0", (from, to) => {
+    expect(resolveUrlTimeRange(from, to)).toEqual({ from: 0, to: 0 });
+  });
+
+  // Half a window is its own 400 ("must be provided together" / "must both be
+  // zero or non-zero"), so one good bound must never survive on its own.
+  it.each([
+    ["1752490492843", undefined],
+    [undefined, "1752490493164"],
+    ["1752490492843", "0"],
+    ["0", "1752490493164"],
+  ])("collapses both bounds when only one is usable: %j / %j", (from, to) => {
+    expect(resolveUrlTimeRange(from, to)).toEqual({ from: 0, to: 0 });
+  });
+
+  // Inverted and non-positive pairs are 400s too.
+  it.each([
+    ["1752490493164", "1752490492843"],
+    ["-2", "-1"],
+  ])("collapses inverted or non-positive bounds %j / %j", (from, to) => {
+    expect(resolveUrlTimeRange(from, to)).toEqual({ from: 0, to: 0 });
+  });
+
+  it("passes a sane window through unchanged", () => {
+    expect(resolveUrlTimeRange("1752490492843", "1752490493164")).toEqual({
+      from: 1752490492843,
+      to: 1752490493164,
+    });
+  });
+});
+
+describe("resolveReplaySpan", () => {
+  it.each([[null], [undefined], [[]]])("returns null for %j", (input) => {
+    expect(resolveReplaySpan(input as any)).toBeNull();
+  });
+
+  it("returns null when spans carry a RUM session id but no replay flag", () => {
+    const spans = [{ span_id: "rum_view_v1", rum_session_id: "sess-1" }];
+    expect(resolveReplaySpan(spans)).toBeNull();
+  });
+
+  it("returns null when the replay flag is explicitly false", () => {
+    const spans = [
+      { span_id: "rum_view_v1", rum_session_id: "sess-1", rum_session_has_replay: false },
+    ];
+    expect(resolveReplaySpan(spans)).toBeNull();
+  });
+
+  it("returns null when a span has the replay flag but no RUM session id", () => {
+    const spans = [{ span_id: "rum_view_v1", rum_session_has_replay: true }];
+    expect(resolveReplaySpan(spans)).toBeNull();
+  });
+
+  // Backend spans carry the AI conversation id as session_id; it is not a RUM session.
+  it("ignores backend spans that carry session_id or gen_ai_conversation_id", () => {
+    const spans = [
+      { span_id: "s-1", session_id: "conv-1", gen_ai_conversation_id: "conv-1" },
+      { span_id: "s-2", session_id: "conv-1" },
+    ];
+    expect(resolveReplaySpan(spans)).toBeNull();
+  });
+
+  it("returns the first span that has both a RUM session id and the replay flag", () => {
+    const first = {
+      span_id: "rum_view_v1",
+      rum_session_id: "sess-1",
+      rum_session_has_replay: true,
+    };
+    const spans = [
+      { span_id: "s-0", session_id: "conv-1" },
+      { span_id: "rum_view_v0", rum_session_id: "sess-0", rum_session_has_replay: false },
+      first,
+      { span_id: "rum_action_a1", rum_session_id: "sess-1", rum_session_has_replay: true },
+    ];
+    expect(resolveReplaySpan(spans)).toBe(first);
+  });
+});

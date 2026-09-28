@@ -16,24 +16,18 @@
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { defineComponent } from "vue";
 import { mount } from "@vue/test-utils";
-import { Dialog, Notify } from "quasar";
 import { createI18n } from "vue-i18n";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import store from "@/test/unit/helpers/store";
+import enLocale from "@/locales/languages/en-US.json";
 
-installQuasar({
-  plugins: [Dialog, Notify],
-});
-
-// Create i18n instance
+// Create i18n instance. Uses the real `search` messages rather than a stub —
+// these tests pin the exact rendered en-US wording.
 const i18n = createI18n({
   legacy: false,
   locale: "en",
   messages: {
     en: {
-      search: {
-        queryRangeRestrictionMsg: "Query range restricted to {range}",
-      },
+      search: enLocale.search,
     },
   },
 });
@@ -167,12 +161,91 @@ describe("useHistogram Composable", () => {
       expect(typeof wrapper.vm.resetHistogramWithError).toBe("function");
     });
 
-    it("should have setMultiStreamHistogramQuery function", () => {
-      expect(typeof wrapper.vm.setMultiStreamHistogramQuery).toBe("function");
-    });
-
     it("should have isHistogramEnabled function", () => {
       expect(typeof wrapper.vm.isHistogramEnabled).toBe("function");
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // getHistogramTitle — pins the rendered en-US sentence
+  // --------------------------------------------------------------------------
+  describe("getHistogramTitle", () => {
+    beforeEach(() => {
+      mockState.searchObj.data.queryResults.total = 250;
+      mockState.searchObj.data.queryResults.took = 42;
+    });
+
+    it("renders the title with the scan size in logs mode", () => {
+      mockState.searchObj.meta.logsVisualizeToggle = "logs";
+
+      expect(wrapper.vm.getHistogramTitle()).toBe(
+        "Showing 1 to 100 out of 250 events in 42 ms. (Scan Size: 0 MB)",
+      );
+    });
+
+    it("labels the scan size as delta when a result cache ratio is present", () => {
+      mockState.searchObj.meta.logsVisualizeToggle = "logs";
+      mockState.searchObj.data.queryResults.result_cache_ratio = 50;
+
+      expect(wrapper.vm.getHistogramTitle()).toBe(
+        "Showing 1 to 100 out of 250 events in 42 ms. (Delta Scan Size: 0 MB)",
+      );
+    });
+
+    it("omits the scan size outside logs mode", () => {
+      mockState.searchObj.meta.logsVisualizeToggle = "visualize";
+
+      expect(wrapper.vm.getHistogramTitle()).toBe("Showing 1 to 100 out of 250 events in 42 ms.");
+    });
+
+    it("returns an empty title and sets a notification when it throws", () => {
+      // resultGrid is read first inside the try block — removing it forces the catch.
+      mockState.searchObj.data.resultGrid = undefined as any;
+
+      expect(wrapper.vm.getHistogramTitle()).toBe("");
+      expect(mockState.notificationMsg.value).toBe("Error while generating histogram title.");
+    });
+  });
+
+  // --------------------------------------------------------------------------
+  // getHistogramTitleParts — the structured contract SearchResult's chips
+  // consume. Chips MUST build from these values; deriving them by parsing the
+  // rendered title breaks in every non-English locale.
+  // --------------------------------------------------------------------------
+  describe("getHistogramTitleParts", () => {
+    beforeEach(() => {
+      mockState.searchObj.data.queryResults.total = 250;
+      mockState.searchObj.data.queryResults.took = 42;
+    });
+
+    it("includes the resolved scan label and size in logs mode", () => {
+      mockState.searchObj.meta.logsVisualizeToggle = "logs";
+
+      expect(wrapper.vm.getHistogramTitleParts()).toEqual({
+        start: 1,
+        end: 100,
+        total: "250",
+        took: 42,
+        scanLabel: "Scan Size",
+        scanSize: "0 MB",
+      });
+    });
+
+    it("omits the scan fields outside logs mode", () => {
+      mockState.searchObj.meta.logsVisualizeToggle = "visualize";
+
+      expect(wrapper.vm.getHistogramTitleParts()).toEqual({
+        start: 1,
+        end: 100,
+        total: "250",
+        took: 42,
+      });
+    });
+
+    it("returns null when the computation throws, so the chips hide", () => {
+      mockState.searchObj.data.resultGrid = undefined as any;
+
+      expect(wrapper.vm.getHistogramTitleParts()).toBeNull();
     });
   });
 
@@ -184,13 +257,9 @@ describe("useHistogram Composable", () => {
     const ts2 = "2026-04-24T10:01:00";
     const ts3 = "2026-04-24T10:02:00";
 
-    const setAggs = (
-      aggs: any[],
-      breakdownField: string | null = "severity",
-    ) => {
+    const setAggs = (aggs: any[], breakdownField: string | null = "severity") => {
       mockState.searchObj.data.queryResults.aggs = aggs;
-      mockState.searchObj.data.queryResults.histogram_breakdown_field =
-        breakdownField;
+      mockState.searchObj.data.queryResults.histogram_breakdown_field = breakdownField;
     };
 
     it("enters breakdown path and populates breakdownField + breakdownSeries", () => {
@@ -239,8 +308,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect([...series.keys()]).toEqual(["trace", "info", "warn", "error"]);
     });
@@ -252,8 +323,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect([...series.keys()]).toEqual(["Info", "ERROR"]);
     });
@@ -266,8 +339,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect([...series.keys()]).toEqual(["error", "alpha", "zeta"]);
     });
@@ -283,8 +358,10 @@ describe("useHistogram Composable", () => {
       );
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       // All keys are strings (alphabetical since none match severity)
       expect([...series.keys()]).toEqual(["200", "404", "500"]);
@@ -303,8 +380,10 @@ describe("useHistogram Composable", () => {
       );
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect(series.has("0")).toBe(true);
       expect(series.get("0")).toEqual([5]);
@@ -319,8 +398,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect([...series.keys()]).toEqual(["info"]);
       expect(series.get("info")).toEqual([3]);
@@ -336,8 +417,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect(series.get("info")).toEqual([12]);
     });
@@ -349,8 +432,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       // If parseInt was skipped we'd see "1020" → 1020 after final parse.
       expect(series.get("info")).toEqual([30]);
@@ -367,8 +452,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       // info at ts1 = 5 (seed) + 3 (page) = 8; error at ts2 = 4 (page only)
       expect(series.get("info")).toEqual([8, 0]);
@@ -384,9 +471,7 @@ describe("useHistogram Composable", () => {
         { zo_sql_key: ts1, zo_sql_num: 0 }, // skeleton
         { zo_sql_key: ts2, zo_sql_num: 0 }, // skeleton
       ];
-      setAggs([
-        { zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 4 },
-      ]);
+      setAggs([{ zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 4 }]);
 
       wrapper.vm.generateHistogramData();
       const hist = mockState.searchObj.data.histogram;
@@ -430,8 +515,10 @@ describe("useHistogram Composable", () => {
       ]);
 
       wrapper.vm.generateHistogramData();
-      const series = mockState.searchObj.data.histogram
-        .breakdownSeries as unknown as Map<string, number[]>;
+      const series = mockState.searchObj.data.histogram.breakdownSeries as unknown as Map<
+        string,
+        number[]
+      >;
 
       expect(series.get("info")).toEqual([3, 0]);
       expect(series.get("error")).toEqual([0, 7]);
@@ -455,9 +542,7 @@ describe("useHistogram Composable", () => {
 
     it("falls through to flat path when breakdownField is empty string", () => {
       setAggs(
-        [
-          { zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 3 },
-        ],
+        [{ zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 3 }],
         "", // falsy
       );
 
@@ -504,14 +589,10 @@ describe("useHistogram Composable", () => {
     });
 
     it("writes chartParams.timezone from the store", () => {
-      setAggs([
-        { zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 1 },
-      ]);
+      setAggs([{ zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 1 }]);
 
       wrapper.vm.generateHistogramData();
-      expect(
-        mockState.searchObj.data.histogram.chartParams.timezone,
-      ).toBe("UTC");
+      expect(mockState.searchObj.data.histogram.chartParams.timezone).toBe("UTC");
     });
 
     it("resets errorCode/errorMsg/errorDetail on successful breakdown build", () => {
@@ -519,9 +600,7 @@ describe("useHistogram Composable", () => {
       mockState.searchObj.data.histogram.errorMsg = "stale";
       mockState.searchObj.data.histogram.errorDetail = "stale detail";
 
-      setAggs([
-        { zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 1 },
-      ]);
+      setAggs([{ zo_sql_key: ts1, zo_sql_breakdown: "info", zo_sql_num: 1 }]);
 
       wrapper.vm.generateHistogramData();
       const hist = mockState.searchObj.data.histogram;
@@ -532,12 +611,8 @@ describe("useHistogram Composable", () => {
 
     it("handles empty aggs array — neither path sets histogram", () => {
       mockState.searchObj.data.queryResults.aggs = [];
-      mockState.searchObj.data.queryResults.histogram_breakdown_field =
-        "severity";
+      mockState.searchObj.data.queryResults.histogram_breakdown_field = "severity";
 
-      const before = JSON.stringify(
-        mockState.searchObj.data.histogram.breakdownField,
-      );
       wrapper.vm.generateHistogramData();
       // aggs is truthy (empty array) but .some() returns false → flat path,
       // flat path loops over empty data and still writes a histogram.

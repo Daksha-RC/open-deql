@@ -19,16 +19,18 @@ use config::{
 };
 use sea_orm::{
     ColumnTrait, EntityTrait, Order, PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Schema,
-    Set, entity::prelude::*, sea_query::Func,
+    Set,
+    entity::prelude::*,
+    sea_query::{Func, Query, SimpleExpr},
 };
 use serde::{Deserialize, Serialize};
 
-use super::{
-    entity::users::{ActiveModel, Column, Entity, Model},
-    get_lock,
+use super::entity::{
+    org_users,
+    users::{ActiveModel, Column, Entity, Model},
 };
 use crate::{
-    db::{ORM_CLIENT, connect_to_orm},
+    db::{get_orm_client_ro, get_orm_client_rw},
     errors::{self, DbError, Error},
 };
 
@@ -45,6 +47,10 @@ impl From<Model> for UserRecord {
             user_type: model.user_type.into(),
             created_at: model.created_at,
             updated_at: model.updated_at,
+            must_reset_password: model.must_reset_password,
+            password_reset_reason: model.password_reset_reason,
+            flagged_at: model.flagged_at,
+            password_updated_at: model.password_updated_at,
         }
     }
 }
@@ -62,6 +68,18 @@ pub struct UserRecord {
     pub user_type: UserType,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Set by the policy sweep; read by the access-time middleware straight from the users cache,
+    /// which is why it lives here rather than only on the entity model.
+    #[serde(default)]
+    pub must_reset_password: bool,
+    #[serde(default)]
+    pub password_reset_reason: Option<String>,
+    #[serde(default)]
+    pub flagged_at: Option<i64>,
+    /// NULL only between the schema migration and this user's first password change; the rotation
+    /// check reads that as never-expired rather than as the epoch.
+    #[serde(default)]
+    pub password_updated_at: Option<i64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +89,10 @@ pub struct UserUpdate {
     pub last_name: String,
     pub password: String,
     pub password_ext: Option<String>,
+    /// Whether `password` is a new password rather than an unchanged one carried along with an
+    /// edit to something else. Defaulted so a message from an older build still deserializes.
+    #[serde(default)]
+    pub password_changed: bool,
 }
 
 impl From<&DBUser> for UserRecord {
@@ -94,6 +116,12 @@ impl From<&DBUser> for UserRecord {
             },
             created_at: 0,
             updated_at: 0,
+            // DBUser is the API-facing shape and carries no policy state. A record built from one
+            // is only ever used to insert or look up, never to overwrite these columns.
+            must_reset_password: false,
+            password_reset_reason: None,
+            flagged_at: None,
+            password_updated_at: None,
         }
     }
 }
@@ -114,7 +142,7 @@ impl From<&UserRecord> for DBUser {
 }
 
 pub async fn create_table() -> Result<(), errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     let builder = client.get_database_backend();
 
     let schema = Schema::new(builder);
@@ -145,12 +173,13 @@ pub async fn add(user: UserRecord) -> Result<(), errors::Error> {
         created_at: Set(now),
         updated_at: Set(now),
         id: Set(ider::uuid()),
+        must_reset_password: Set(false),
+        password_reset_reason: Set(None),
+        flagged_at: Set(None),
+        password_updated_at: Set(Some(now)),
     };
 
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     match Entity::insert(record).exec(client).await {
         Ok(_) => Ok(()),
         Err(e) => match e.sql_err() {
@@ -160,24 +189,43 @@ pub async fn add(user: UserRecord) -> Result<(), errors::Error> {
     }
 }
 
+/// Update a user's profile fields.
+///
+/// `password_changed` says whether `password` is a genuinely new password. When it is, the columns
+/// that describe the password — the forced-reset flag and the rotation clock — are rewritten in the
+/// same statement, so a user can never hold a compliant password while still flagged for one. It
+/// must stay false for edits that merely carry the existing hash along, such as the `password_ext`
+/// backfill at login; restarting the rotation clock there would make expiry unreachable.
 pub async fn update(
     email: &str,
     first_name: &str,
     last_name: &str,
     password: &str,
     password_ext: Option<String>,
+    password_changed: bool,
 ) -> Result<u64, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
 
-    let result = Entity::update_many()
+    let now = chrono::Utc::now().timestamp_micros();
+    let mut stmt = Entity::update_many()
         .col_expr(Column::FirstName, Expr::value(first_name))
         .col_expr(Column::LastName, Expr::value(last_name))
         .col_expr(Column::Password, Expr::value(password))
         .col_expr(Column::PasswordExt, Expr::value(password_ext))
-        .col_expr(
-            Column::UpdatedAt,
-            Expr::value(chrono::Utc::now().timestamp_micros()),
-        )
+        .col_expr(Column::UpdatedAt, Expr::value(now));
+
+    if password_changed {
+        stmt = stmt
+            .col_expr(Column::MustResetPassword, Expr::value(false))
+            .col_expr(
+                Column::PasswordResetReason,
+                Expr::value(Option::<String>::None),
+            )
+            .col_expr(Column::FlaggedAt, Expr::value(Option::<i64>::None))
+            .col_expr(Column::PasswordUpdatedAt, Expr::value(now));
+    }
+
+    let result = stmt
         .filter(Expr::expr(Func::lower(Expr::col(Column::Email))).eq(email.to_lowercase()))
         .exec(client)
         .await
@@ -186,22 +234,47 @@ pub async fn update(
     Ok(result.rows_affected)
 }
 
-pub async fn remove(email: &str) -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
+/// Flag every interactive native user for a forced password reset.
+///
+/// Three groups are left alone: external users authenticate elsewhere, so the local password
+/// policy never applies to them; service accounts have no interactive password to reset, so
+/// flagging them would only break the automation using their tokens; and root is exempt so a
+/// tightened policy can never lock the instance out of its own recovery path.
+pub async fn flag_all_for_password_reset(reason: &str) -> Result<u64, errors::Error> {
+    let client = get_orm_client_rw().await;
+    let external: i16 = UserType::External.into();
+    let result = Entity::update_many()
+        .col_expr(Column::MustResetPassword, Expr::value(true))
+        .col_expr(Column::PasswordResetReason, Expr::value(reason))
+        .col_expr(
+            Column::FlaggedAt,
+            Expr::value(chrono::Utc::now().timestamp_micros()),
+        )
+        .filter(Column::UserType.ne(external))
+        .filter(Column::IsRoot.eq(false))
+        .filter(not_a_service_account())
+        .exec(client)
+        .await
+        .map_err(|e| Error::DbError(DbError::SeaORMError(e.to_string())))?;
 
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    Ok(result.rows_affected)
+}
+
+pub async fn remove(email: &str) -> Result<(), errors::Error> {
+    let client = get_orm_client_rw().await;
     Entity::delete_many()
         .filter(Expr::expr(Func::lower(Expr::col(Column::Email))).eq(email.to_lowercase()))
         .exec(client)
         .await
         .map_err(|e| Error::DbError(DbError::SeaORMError(e.to_string())))?;
 
+    drop_auth_side_tables(&[email.to_string()]).await;
+
     Ok(())
 }
 
 pub async fn get(email: &str) -> Result<UserRecord, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let record = Entity::find()
         .filter(Expr::expr(Func::lower(Expr::col(Column::Email))).eq(email.to_lowercase()))
         .one(client)
@@ -213,7 +286,7 @@ pub async fn get(email: &str) -> Result<UserRecord, errors::Error> {
 }
 
 pub async fn get_root_user() -> Result<UserRecord, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let record = Entity::find()
         .filter(Column::IsRoot.eq(true))
         .one(client)
@@ -225,7 +298,7 @@ pub async fn get_root_user() -> Result<UserRecord, errors::Error> {
 }
 
 pub async fn list(limit: Option<i64>) -> Result<Vec<UserRecord>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let mut res = Entity::find().order_by(Column::CreatedAt, Order::Desc);
     if let Some(limit) = limit {
         res = res.limit(limit as u64);
@@ -242,7 +315,7 @@ pub async fn list(limit: Option<i64>) -> Result<Vec<UserRecord>, errors::Error> 
 }
 
 pub async fn len() -> usize {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let len = Entity::find().count(client).await;
 
     match len {
@@ -255,10 +328,7 @@ pub async fn len() -> usize {
 }
 
 pub async fn clear() -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     Entity::delete_many()
         .exec(client)
         .await
@@ -272,10 +342,7 @@ pub async fn is_empty() -> bool {
 }
 
 pub async fn batch_remove(emails: Vec<String>) -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     let lowered_emails: Vec<String> = emails.iter().map(|e| e.to_lowercase()).collect();
     Entity::delete_many()
         .filter(Expr::expr(Func::lower(Expr::col(Column::Email))).is_in(lowered_emails))
@@ -283,7 +350,35 @@ pub async fn batch_remove(emails: Vec<String>) -> Result<(), errors::Error> {
         .await
         .map_err(|e| Error::DbError(DbError::SeaORMError(e.to_string())))?;
 
+    drop_auth_side_tables(&emails).await;
+
     Ok(())
+}
+
+async fn drop_auth_side_tables(emails: &[String]) {
+    for email in emails {
+        if let Err(e) = super::user_password_history::delete_all_for_user(email).await {
+            log::error!("Error deleting password history for {email}: {e}");
+        }
+        if let Err(e) = super::user_auth_state::delete(email).await {
+            log::error!("Error deleting lockout state for {email}: {e}");
+        }
+    }
+}
+
+/// Matches users that hold no service-account role in any organization. The role lives on
+/// `org_users`, not `users`, so this has to go through a subquery.
+fn not_a_service_account() -> SimpleExpr {
+    let service_account_roles: Vec<i16> =
+        vec![UserRole::ServiceAccount.into(), UserRole::SreAgent.into()];
+
+    Expr::expr(Func::lower(Expr::col(Column::Email))).not_in_subquery(
+        Query::select()
+            .expr(Func::lower(Expr::col(org_users::Column::Email)))
+            .from(org_users::Entity)
+            .and_where(org_users::Column::Role.is_in(service_account_roles))
+            .to_owned(),
+    )
 }
 
 #[cfg(test)]
@@ -291,6 +386,21 @@ mod tests {
     use config::meta::user::{DBUser, UserOrg, UserRole, UserType};
 
     use super::*;
+
+    #[test]
+    fn test_not_a_service_account_excludes_both_service_account_roles() {
+        let sql = Query::select()
+            .column(Column::Email)
+            .from(Entity)
+            .and_where(not_a_service_account())
+            .to_owned()
+            .to_string(sea_orm::sea_query::SqliteQueryBuilder);
+
+        assert!(sql.contains("NOT IN"), "{sql}");
+        assert!(sql.contains("org_users"), "{sql}");
+        // ServiceAccount = 5, SreAgent = 6
+        assert!(sql.contains("IN (5, 6)"), "{sql}");
+    }
 
     fn make_db_user(is_external: bool, role: UserRole) -> DBUser {
         DBUser {
@@ -359,6 +469,10 @@ mod tests {
             user_type: 0, // 0 = Internal
             created_at: 1_000_000,
             updated_at: 2_000_000,
+            must_reset_password: false,
+            password_reset_reason: None,
+            flagged_at: None,
+            password_updated_at: Some(1_000_000),
         };
         let rec = UserRecord::from(model);
         assert_eq!(rec.email, "model@example.com");

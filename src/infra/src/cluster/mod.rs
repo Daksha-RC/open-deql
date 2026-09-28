@@ -37,6 +37,7 @@ use crate::{
     errors::*,
 };
 
+pub mod ai_sessions;
 mod scheduler;
 
 pub use scheduler::select_best_node;
@@ -162,7 +163,7 @@ pub async fn get_node_from_consistent_hash_within(
         }
     }
     // Wrap around to the beginning of the ring.
-    for (_, name) in nodes.iter() {
+    for name in nodes.values() {
         if allowed.contains(name) {
             return Some(name.clone());
         }
@@ -209,7 +210,7 @@ pub async fn get_nodes_from_consistent_hash(
         }
     }
     // Wrap around to the beginning of the ring.
-    for (_, name) in nodes.iter() {
+    for name in nodes.values() {
         result.insert(name.to_string());
         if result.len() >= n {
             break;
@@ -542,6 +543,18 @@ pub async fn get_cached_online_querier_nodes(group: Option<RoleGroup>) -> Option
     let nodes =
         get_cached_nodes(|node| node.status == NodeStatus::Online && node.is_querier()).await;
     filter_nodes_with_group(nodes, group)
+}
+
+/// Online nodes carrying the `scheduler` role.
+///
+/// Exists because the maintenance sweeps have to elect their leader from the
+/// same set the job runs on. Electing from the querier list instead — which is
+/// what they did — is invisible on a single `all`-role node and permanently
+/// false anywhere `scheduler` is a role of its own, because such a node is
+/// never in that list and so can never be the first uuid in it.
+#[inline]
+pub async fn get_cached_online_alert_manager_nodes() -> Option<Vec<Node>> {
+    get_cached_nodes(|node| node.status == NodeStatus::Online && node.is_scheduler()).await
 }
 
 #[inline]

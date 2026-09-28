@@ -1,9 +1,8 @@
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { reactive } from "vue";
 import { usePanelFields } from "./usePanelFields";
 
 // Mock Vue to enable computed() in unit test context
-import { vi } from "vitest";
 
 vi.mock("vue", async () => {
   const actual = await vi.importActual("vue");
@@ -20,6 +19,7 @@ const makeStore = (timestampColumn = "_timestamp") => ({
 
 const makeDefaultQuery = () => ({
   query: "",
+  vrlFunctionFieldList: [] as any[],
   customQuery: false,
   fields: {
     stream: "",
@@ -53,6 +53,7 @@ const makePanelData = (type = "bar") =>
       currentQueryIndex: 0,
     },
     meta: {
+      queryFields: {} as Record<number, { customQueryFields: any[]; vrlFunctionFieldList: any[] }>,
       stream: {
         vrlFunctionFieldList: [] as any[],
         customQueryFields: [] as any[],
@@ -91,9 +92,7 @@ describe("usePanelFields", () => {
     });
 
     it("handles multi-word name with mixed separators", () => {
-      expect(fields.generateLabelFromName("request_count_total")).toBe(
-        "Request Count Total",
-      );
+      expect(fields.generateLabelFromName("request_count_total")).toBe("Request Count Total");
     });
   });
 
@@ -478,9 +477,16 @@ describe("usePanelFields", () => {
     it("clears vrlFunctionFieldList and customQueryFields", () => {
       panelData.meta.stream.vrlFunctionFieldList = [{ name: "vrl_field" }];
       panelData.meta.stream.customQueryFields = [{ name: "cq_field" }];
+      // Per-query field cache keyed by currentQueryIndex (cleared by removeXYFilters)
+      panelData.meta.queryFields[0] = {
+        customQueryFields: [{ name: "cq_q0" }],
+        vrlFunctionFieldList: [{ name: "vrl_q0" }],
+      };
       fields.removeXYFilters();
       expect(panelData.meta.stream.vrlFunctionFieldList).toHaveLength(0);
       expect(panelData.meta.stream.customQueryFields).toHaveLength(0);
+      expect(panelData.meta.queryFields[0].vrlFunctionFieldList).toHaveLength(0);
+      expect(panelData.meta.queryFields[0].customQueryFields).toHaveLength(0);
     });
 
     it("does not clear fields for custom query (fields are preserved)", () => {

@@ -4,6 +4,7 @@ const {
   navigateToBase,
 } = require("../utils/enhanced-baseFixtures.js");
 import PageManager from "../../pages/page-manager";
+import { ingestion } from "./utils/dashIngestion.js";
 import { cleanupTestDashboard, setupTestDashboard } from "./utils/dashCreation.js";
 import {
   generateDashboardName,
@@ -49,6 +50,12 @@ async function getPlottedPixelCount(page) {
 test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () => {
   test.beforeEach(async ({ page }) => {
     await navigateToBase(page);
+    // This file never sets an explicit panel time range, so every panel
+    // relies on the editor's default window covering whenever e2e_automate
+    // was last ingested. Ingest fresh data every test (matching every other
+    // dashboard spec file) instead of depending on another file's ingest
+    // still being within that window.
+    await ingestion(page);
   });
 
   // ---------------------------------------------------------------------------
@@ -103,7 +110,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await reopenPanelConfig(page, pm);
 
     // Verify chart type is still pie
-    const pieSelector = page.locator('[data-test="selected-chart-pie-item"]');
+    const pieSelector = pm.chartTypeSelector.getSelectedChartItem("pie");
     await expect(pieSelector).toBeVisible();
     testLogger.info("Pie chart type persisted after reopen");
 
@@ -129,7 +136,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.dashboardPanelActions.savePanel();
     await reopenPanelConfig(page, pm);
 
-    const donutSelector = page.locator('[data-test="selected-chart-donut-item"]');
+    const donutSelector = pm.chartTypeSelector.getSelectedChartItem("donut");
     await expect(donutSelector).toBeVisible();
     testLogger.info("Donut chart type persisted after reopen");
 
@@ -155,6 +162,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.chartTypeSelector.selectChartType("pie");
     await pm.chartTypeSelector.selectStreamType("logs");
     await pm.chartTypeSelector.selectStream("e2e_automate");
+    await pm.chartTypeSelector.removeField("y_axis_1", "y");
     await pm.chartTypeSelector.searchAndAddField("code", "y");
     await pm.dashboardPanelActions.addPanelName("Pie Aggregations");
 
@@ -187,7 +195,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.dashboardPanelActions.applyDashboardBtn();
     await pm.dashboardPanelActions.waitForChartToRender().catch((e) => testLogger.warn("waitForChartToRender:", e.message));
     await pm.dashboardPanelActions.verifyChartRenders(expect);
-    await expect(page.locator('[data-test="selected-chart-donut-item"]')).toBeVisible();
+    await expect(pm.chartTypeSelector.getSelectedChartItem("donut")).toBeVisible();
     testLogger.info("verifyChartRenders passed - donut after switch", { coloredPixels: await getPlottedPixelCount(page) });
 
     // Switch back to pie
@@ -195,7 +203,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.dashboardPanelActions.applyDashboardBtn();
     await pm.dashboardPanelActions.waitForChartToRender().catch((e) => testLogger.warn("waitForChartToRender:", e.message));
     await pm.dashboardPanelActions.verifyChartRenders(expect);
-    await expect(page.locator('[data-test="selected-chart-pie-item"]')).toBeVisible();
+    await expect(pm.chartTypeSelector.getSelectedChartItem("pie")).toBeVisible();
     testLogger.info("verifyChartRenders passed - pie after switch back", { coloredPixels: await getPlottedPixelCount(page) });
 
     await pm.dashboardPanelActions.savePanel();
@@ -214,6 +222,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.chartTypeSelector.selectChartType("line");
     await pm.chartTypeSelector.selectStreamType("logs");
     await pm.chartTypeSelector.selectStream("e2e_automate");
+    await pm.chartTypeSelector.removeField("y_axis_1", "y");
     await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
     await pm.dashboardPanelActions.addPanelName("Line To Pie");
     await pm.dashboardPanelActions.applyDashboardBtn();
@@ -276,8 +285,15 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     // Save panel first to access legend button on dashboard view
     await pm.dashboardPanelActions.savePanel();
 
+    // ShowLegendsPopup derives its legend list from the panel's live
+    // panelData/series prop — clicking the legend button before the
+    // freshly re-rendered dashboard-view panel has fully repainted can
+    // read a stale/empty series list even though the canvas already shows
+    // colored pixels. Wait for the chart to finish rendering post-save.
+    await pm.dashboardPanelActions.waitForChartToRender().catch(() => {});
+
     // Hover over panel bar to reveal legend button
-    const panelBar = page.locator('[data-test="dashboard-panel-bar"]').first();
+    const panelBar = pm.dashboardPanelTime.getPanelBar().first();
     await panelBar.waitFor({ state: "visible", timeout: 10000 });
     await panelBar.hover();
 
@@ -287,17 +303,17 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
 
     if (isLegendBtnVisible) {
       await legendBtn.click();
-      const legendPopup = page.locator('[data-test="dashboard-show-legends-popup"]');
+      const legendPopup = pm.dashboardLegendsCopy.getLegendsPopup();
       await expect(legendPopup).toBeVisible({ timeout: 5000 });
       testLogger.info("Legend popup is visible");
 
       // Verify at least one legend item exists
-      const legendItem = page.locator('[data-test^="dashboard-legend-item-"]');
+      const legendItem = pm.dashboardLegendsCopy.getLegendItems();
       expect(await legendItem.count()).toBeGreaterThan(0);
       testLogger.info("Legend items found in popup");
 
       // Close legend popup
-      await page.locator('[data-test="dashboard-show-legends-close"]').click();
+      await pm.dashboardLegendsCopy.closeBtn.click();
     } else {
       testLogger.info("Legend button not visible on panel — skipping popup check");
     }
@@ -318,6 +334,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.chartTypeSelector.selectStream("e2e_automate");
 
     // Add Y field, then switch to raw and enter custom SQL
+    await pm.chartTypeSelector.removeField("y_axis_1", "y");
     await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
 
     // Open Y-axis function popup and switch to raw tab
@@ -346,7 +363,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
 
     await setupPiePanelWithConfig(page, pm, dashboardName, "Pie Description");
 
-    const descriptionInput = page.locator('[data-test="dashboard-config-description"]');
+    const descriptionInput = pm.dashboardPanelConfigs.getDescriptionField();
     await expect(descriptionInput).toBeVisible();
     await descriptionInput.fill("Test pie chart description");
     testLogger.info("Description set");
@@ -357,7 +374,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.dashboardPanelActions.savePanel();
     await reopenPanelConfig(page, pm);
 
-    await expect(page.locator('[data-test="dashboard-config-description"]')).toHaveValue("Test pie chart description");
+    await expect(pm.dashboardPanelConfigs.getDescriptionField()).toHaveValue("Test pie chart description");
     testLogger.info("Description persisted after save and reopen");
 
     await pm.dashboardPanelActions.savePanel();
@@ -375,6 +392,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.chartTypeSelector.selectChartType("pie");
     await pm.chartTypeSelector.selectStreamType("logs");
     await pm.chartTypeSelector.selectStream("e2e_automate");
+    await pm.chartTypeSelector.removeField("y_axis_1", "y");
     await pm.chartTypeSelector.searchAndAddField("kubernetes_container_hash", "y");
 
     // Configure Y-axis with raw count query
@@ -408,6 +426,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.chartTypeSelector.selectStream("e2e_automate");
 
     // Y-axis: kubernetes_container_name with count aggregation (cross-field)
+    await pm.chartTypeSelector.removeField("y_axis_1", "y");
     await pm.chartTypeSelector.searchAndAddField("kubernetes_container_name", "y");
     await pm.chartTypeSelector.configureYAxisRawQuery(
       "y_axis_1",
@@ -429,10 +448,11 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     // 2. Save panel to access legend on dashboard view
     await pm.dashboardPanelActions.savePanel();
 
-    // 3. Verify legend popup — hover over chart area to reveal legend button
-    const chartArea = page.locator('[data-test="chart-renderer"]').first();
-    await chartArea.waitFor({ state: "visible", timeout: 10000 });
-    await chartArea.hover();
+    // 3. Wait for chart to render in dashboard view then reveal legend button
+    await pm.dashboardPanelActions.waitForChartToRender().catch(() => {});
+    const panelBar = pm.dashboardPanelTime.getPanelBar().first();
+    await panelBar.waitFor({ state: "visible", timeout: 10000 });
+    await panelBar.hover();
 
     const legendBtn = pm.dashboardLegendsCopy.getShowLegendsButton();
     await legendBtn.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
@@ -440,7 +460,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
 
     if (isLegendBtnVisible) {
       await legendBtn.click();
-      const legendPopup = page.locator('[data-test="dashboard-show-legends-popup"]');
+      const legendPopup = pm.dashboardLegendsCopy.getLegendsPopup();
       await expect(legendPopup).toBeVisible({ timeout: 5000 });
 
       const legendCount = await pm.dashboardLegendsCopy.getLegendCount();
@@ -452,7 +472,7 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
       expect(firstLegendText.trim().length).toBeGreaterThan(0);
       testLogger.info("First legend item has text", { text: firstLegendText.trim() });
 
-      await page.locator('[data-test="dashboard-show-legends-close"]').click();
+      await pm.dashboardLegendsCopy.closeBtn.click();
     } else {
       testLogger.info("Legend button not visible — skipping popup check");
     }
@@ -482,12 +502,16 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     testLogger.info("Pie panel applied without Y-axis field");
 
     // Page should still be functional (no crash) — chart may render empty or show no-data
-    await expect(page.locator('[data-test="dashboard-panel-name"]')).toBeVisible();
+    await expect(pm.dashboardPanelEdit.getPanelNameLocator()).toBeVisible();
     testLogger.info("Page remains functional after apply without Y-axis field", { coloredPixels: await getPlottedPixelCount(page) });
 
-    // Navigate to dashboard list (skip savePanel — no valid config to save)
-    await navigateToBase(page);
-    await pm.dashboardPanelActions.waitForDashboardSearchVisible().catch(() => {});
+    // The panel intentionally holds an invalid config, so savePanel() cannot
+    // pass validation — use the editor's own Discard exit instead of forcing a
+    // page.goto through the unsaved-changes beforeunload guard. Discard lands
+    // on the dashboard view, from where the normal cleanup path deletes the
+    // dashboard (previously this test navigated away and leaked it).
+    await pm.dashboardPanelActions.discardPanel();
+    await cleanupTestDashboard(page, pm, dashboardName);
     testLogger.info("Edge case cleanup complete");
   });
 
@@ -505,24 +529,24 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     await pm.dashboardPanelActions.savePanel();
 
     // Open panel in fullscreen
-    const panelBar = page.locator('[data-test="dashboard-panel-bar"]').first();
+    const panelBar = pm.dashboardPanelTime.getPanelBar().first();
     await panelBar.waitFor({ state: "visible", timeout: 10000 });
     await panelBar.hover();
-    const fullscreenBtn = page.locator('[data-test="dashboard-panel-fullscreen-btn"]').first();
+    const fullscreenBtn = pm.dashboardPanelTime.getPanelFullscreenBtn().first();
     await fullscreenBtn.click();
 
     // Verify view panel opens
-    const viewPanel = page.locator('[data-test="view-panel-screen"]');
+    const viewPanel = pm.dashboardPanelTime.getViewPanelScreen();
     await expect(viewPanel).toBeVisible({ timeout: 10000 });
     testLogger.info("Panel opened in fullscreen/view mode");
 
     // Verify chart renders in fullscreen
-    const chartRenderer = page.locator('[data-test="chart-renderer"]').first();
+    const chartRenderer = pm.dashboardPanelActions.getChartRendererCanvas().first();
     await expect(chartRenderer).toBeVisible({ timeout: 15000 });
     testLogger.info("Chart renders in fullscreen view", { coloredPixels: await getPlottedPixelCount(page) });
 
     // Close fullscreen
-    await page.locator('[data-test="dashboard-viewpanel-close-btn"]').click();
+    await pm.dashboardPanelTime.getViewPanelCloseBtn().click();
     testLogger.info("Fullscreen view closed");
 
     await cleanupTestDashboard(page, pm, dashboardName);
@@ -544,12 +568,16 @@ test.describe("Pie & Donut Chart — E2E Tests (SQL Builder / Logs Stream)", () 
     testLogger.info("Pie panel applied without stream selection");
 
     // Page should still be functional (no crash) — chart may render empty or show no-data
-    await expect(page.locator('[data-test="dashboard-panel-name"]')).toBeVisible();
+    await expect(pm.dashboardPanelEdit.getPanelNameLocator()).toBeVisible();
     testLogger.info("Page remains functional after apply without stream selection", { coloredPixels: await getPlottedPixelCount(page) });
 
-    // Navigate to dashboard list (skip savePanel — no valid config to save)
-    await navigateToBase(page);
-    await pm.dashboardPanelActions.waitForDashboardSearchVisible().catch(() => {});
+    // The panel intentionally holds an invalid config, so savePanel() cannot
+    // pass validation — use the editor's own Discard exit instead of forcing a
+    // page.goto through the unsaved-changes beforeunload guard. Discard lands
+    // on the dashboard view, from where the normal cleanup path deletes the
+    // dashboard (previously this test navigated away and leaked it).
+    await pm.dashboardPanelActions.discardPanel();
+    await cleanupTestDashboard(page, pm, dashboardName);
     testLogger.info("Edge case cleanup complete");
   });
 });

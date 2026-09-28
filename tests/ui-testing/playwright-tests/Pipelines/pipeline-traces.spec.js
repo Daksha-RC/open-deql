@@ -18,7 +18,12 @@ import PageManager from "../../pages/page-manager.js";
 const testLogger = require('../utils/test-logger.js');
 const path = require('path');
 
-test.describe.configure({ mode: "serial" });
+// Parallel-safe: each test uses a unique per-test source stream
+// (generateUniqueStreamName) and its own destination stream, has no order
+// dependency, and the beforeEach hook is per-test and non-destructive. Running in
+// parallel lets these tests use idle workers instead of monopolising a single
+// worker serially (the file was the 2nd-slowest pole at ~5.4m).
+test.describe.configure({ mode: "parallel" });
 
 // Use stored authentication state from global setup instead of logging in each test
 const authFile = path.join(__dirname, '../utils/auth/user.json');
@@ -129,12 +134,12 @@ test.describe("Traces Pipeline Tests", { tag: ['@all', '@pipelines', '@traces', 
     expect(isTracesVisible).toBe(true);
     testLogger.info('Traces option found in stream type dropdown');
 
-    // Close dialog by pressing Escape
-    await page.keyboard.press('Escape');
+    // Close dialog by clicking outside
+    await pageManager.pipelinesPage.clickBodyCorner();
     await page.waitForTimeout(500);
 
     // Navigate back to pipelines list
-    await page.keyboard.press('Escape');
+    await pageManager.pipelinesPage.clickBodyCorner();
 
     testLogger.info('Test completed: Traces stream type visibility check');
   });
@@ -153,8 +158,10 @@ test.describe("Traces Pipeline Tests", { tag: ['@all', '@pipelines', '@traces', 
     await pageManager.pipelinesPage.addPipeline();
     await page.waitForTimeout(500);
 
-    // Verify dialog opened - check for pipeline name input using POM
-    await expect(pageManager.pipelinesPage.pipelineNameInput).toBeVisible();
+    // Verify the editor opened. The pipeline name is now an inline-edited title:
+    // in display mode it shows a trigger (the input only mounts once clicked), so
+    // the trigger is the correct "form is open" signal.
+    await expect(pageManager.pipelinesPage.pipelineNameTrigger).toBeVisible();
     testLogger.info('Pipeline name input is visible');
 
     // Enter a pipeline name using POM method
@@ -163,7 +170,7 @@ test.describe("Traces Pipeline Tests", { tag: ['@all', '@pipelines', '@traces', 
     testLogger.info(`Entered pipeline name: ${pipelineName}`);
 
     // Close dialog without saving
-    await page.keyboard.press('Escape');
+    await pageManager.pipelinesPage.clickBodyCorner();
 
     testLogger.info('Test completed: Pipeline dialog opens correctly');
   });
@@ -292,7 +299,7 @@ test.describe("Traces Pipeline Tests", { tag: ['@all', '@pipelines', '@traces', 
     await pageManager.pipelinesPage.saveCondition();
 
     // Verify error message
-    await pageManager.pipelinesPage.verifyFieldRequiredError();
+    await pageManager.pipelinesPage.verifyConditionRequiredError();
 
     testLogger.info('Test completed: Condition validation error shown');
   });
@@ -495,28 +502,30 @@ test.describe("Traces Pipeline Tests", { tag: ['@all', '@pipelines', '@traces', 
     await pageManager.pipelinesPage.selectStreamOptionByName(TRACES_STREAM);
     await pageManager.pipelinesPage.saveInputNodeStream();
 
-    // Set up dialog handler to accept/dismiss
-    let dialogAppeared = false;
-    page.once('dialog', async (dialog) => {
-      dialogAppeared = true;
-      testLogger.debug('Dialog message', { message: dialog.message() });
-      await dialog.accept();
-    });
-
     // Store current URL before navigation attempt
     const beforeUrl = page.url();
 
-    // Try to navigate to dashboards
+    // Try to navigate to dashboards — onBeforeRouteLeave fires and shows a Vue
+    // ConfirmDialog (data-test="confirm-dialog") instead of window.confirm.
     await pageManager.pipelinesPage.clickDashboardsMenu();
 
-    // Wait to see if navigation happens
+    // Check if the Vue confirm dialog appeared (unsaved changes prompt).
+    const dialogVisible = await pageManager.pipelinesPage.discardChangesOkBtn
+      .isVisible({ timeout: 5000 }).catch(() => false);
+
+    if (dialogVisible) {
+      testLogger.debug('Vue confirm dialog appeared — accepting to proceed');
+      await pageManager.pipelinesPage.discardChangesOkBtn.click();
+    }
+
+    // Wait to see if navigation happens after accepting (or if it happened directly)
     await page.waitForURL(/dashboards/, { timeout: 5000 }).catch(() => {
       testLogger.info('Navigation blocked or no dialog appeared');
     });
 
-    // Either a dialog appeared (unsaved changes prompt) or URL changed (navigation succeeded)
+    // Either the Vue confirm dialog appeared or navigation went straight through
     const urlChanged = page.url() !== beforeUrl;
-    expect(dialogAppeared || urlChanged).toBe(true);
+    expect(dialogVisible || urlChanged).toBe(true);
 
     testLogger.info('Test completed: Unsaved changes behavior verified');
   });

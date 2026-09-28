@@ -34,7 +34,11 @@ vi.mock("vuex", async (importOriginal) => {
 });
 
 vi.mock("vue-router", () => ({
-  useRouter: () => ({ push: vi.fn() }),
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(() => Promise.resolve()),
+  }),
+  useRoute: () => ({ query: {}, fullPath: "/metrics" }),
 }));
 
 const mockShowErrorNotification = vi.fn();
@@ -47,10 +51,12 @@ vi.mock("@/composables/useNotifications", () => ({
 const mockResetDashboardPanelData = vi.fn();
 const mockResetDashboardPanelDataAndAddTimeField = vi.fn();
 const mockResetAggregationFunction = vi.fn();
-const mockValidatePanel = vi.fn((errors: any[]) => {
+const mockValidatePanel = vi.fn(() => {
   /* default: no errors */
 });
 const mockRemoveXYFilters = vi.fn();
+const mockUpdateGroupedFields = vi.fn().mockResolvedValue(undefined);
+const mockMakeAutoSQLQuery = vi.fn().mockResolvedValue(undefined);
 
 // A minimal reactive dashboardPanelData object that the component modifies
 const mockDashboardPanelData: any = reactive({
@@ -61,7 +67,7 @@ const mockDashboardPanelData: any = reactive({
     queryType: "promql",
     queries: [
       {
-        fields: { stream_type: "" },
+        fields: { stream_type: "", stream: "", x: [], y: [], breakdown: [], filter: {} },
         customQuery: true,
         query: "",
       },
@@ -80,11 +86,12 @@ vi.mock("../../composables/dashboard/useDashboardPanel", () => ({
   default: () => ({
     dashboardPanelData: mockDashboardPanelData,
     resetDashboardPanelData: mockResetDashboardPanelData,
-    resetDashboardPanelDataAndAddTimeField:
-      mockResetDashboardPanelDataAndAddTimeField,
+    resetDashboardPanelDataAndAddTimeField: mockResetDashboardPanelDataAndAddTimeField,
     resetAggregationFunction: mockResetAggregationFunction,
     validatePanel: mockValidatePanel,
     removeXYFilters: mockRemoveXYFilters,
+    updateGroupedFields: mockUpdateGroupedFields,
+    makeAutoSQLQuery: mockMakeAutoSQLQuery,
   }),
 }));
 
@@ -135,15 +142,16 @@ const createWrapper = (props: Record<string, any> = {}) => {
     props,
     global: {
       stubs: {
+        // ShareButton pulls in the vuex store (store.commit) + short_url; the
+        // metrics page tests don't exercise it (it has its own spec).
+        ShareButton: true,
         // Heavy async / complex children
         PanelEditor: {
-          template:
-            "<div class='panel-editor' data-test='panel-editor'><slot /></div>",
+          template: "<div class='panel-editor' data-test='panel-editor'><slot /></div>",
           methods: { runQuery: vi.fn() },
         },
         DateTimePickerDashboard: {
-          template:
-            "<div class='date-time-picker' data-test='metrics-date-picker'></div>",
+          template: "<div class='date-time-picker' data-test='metrics-date-picker'></div>",
           methods: {
             refresh: vi.fn(),
             getConsumableDateTime: vi.fn(() => ({
@@ -160,27 +168,67 @@ const createWrapper = (props: Record<string, any> = {}) => {
           template: "<div class='metric-legends'></div>",
         },
         AddToDashboard: {
+          template: "<div v-if='open' class='add-to-dashboard' @click='$emit(\"save\")'></div>",
+          props: ["open", "dashboardPanelData"],
+          emits: ["save", "update:open"],
+        },
+        ODialog: {
           template:
-            "<div class='add-to-dashboard' @click='$emit(\"save\")'></div>",
-          emits: ["save"],
+            "<div class='o-dialog' v-if='open'><slot name='header' /><slot /><slot name='footer' /></div>",
+          props: [
+            "open",
+            "persistent",
+            "size",
+            "title",
+            "subTitle",
+            "showClose",
+            "width",
+            "primaryButtonLabel",
+            "secondaryButtonLabel",
+            "neutralButtonLabel",
+            "primaryButtonVariant",
+            "secondaryButtonVariant",
+            "neutralButtonVariant",
+            "primaryButtonDisabled",
+            "secondaryButtonDisabled",
+            "neutralButtonDisabled",
+            "primaryButtonLoading",
+            "secondaryButtonLoading",
+            "neutralButtonLoading",
+          ],
+          emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+        },
+        ODrawer: {
+          template:
+            "<div class='o-drawer' v-if='open'><slot name='header' /><slot /><slot name='footer' /></div>",
+          props: [
+            "open",
+            "persistent",
+            "size",
+            "title",
+            "subTitle",
+            "showClose",
+            "width",
+            "primaryButtonLabel",
+            "secondaryButtonLabel",
+            "neutralButtonLabel",
+            "primaryButtonVariant",
+            "secondaryButtonVariant",
+            "neutralButtonVariant",
+            "primaryButtonDisabled",
+            "secondaryButtonDisabled",
+            "neutralButtonDisabled",
+            "primaryButtonLoading",
+            "secondaryButtonLoading",
+            "neutralButtonLoading",
+          ],
+          emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
         },
         AutoRefreshInterval: {
           template:
             "<div class='auto-refresh-interval' data-test='metrics-auto-refresh' @click='$emit(\"trigger\")'></div>",
           props: ["modelValue", "trigger", "minRefreshInterval"],
           emits: ["update:modelValue", "trigger"],
-        },
-        QDialog: {
-          template:
-            "<div class='q-dialog' v-if='modelValue'><slot /></div>",
-          props: ["modelValue", "position", "fullHeight", "maximized"],
-          emits: ["update:modelValue"],
-        },
-        QBtn: {
-          template:
-            "<button class='q-btn' :data-test='$attrs[\"data-test\"]' :disabled='disable || loading' @click='$emit(\"click\", $event)'><slot /></button>",
-          props: ["label", "loading", "disable", "color", "noCaps", "padding"],
-          emits: ["click"],
         },
       },
     },
@@ -249,24 +297,16 @@ describe("Metrics Index — component initialization", () => {
     expect(wrapper.vm.selectedDate.relativeTimePeriod).toBe("15m");
   });
 
-  it("calls resetDashboardPanelDataAndAddTimeField on mounted", async () => {
+  it("calls resetDashboardPanelData on mounted", async () => {
     createWrapper();
     await flushPromises();
-    expect(mockResetDashboardPanelDataAndAddTimeField).toHaveBeenCalled();
-  });
-
-  it("calls removeXYFilters on mounted", async () => {
-    createWrapper();
-    await flushPromises();
-    expect(mockRemoveXYFilters).toHaveBeenCalled();
+    expect(mockResetDashboardPanelData).toHaveBeenCalled();
   });
 
   it("sets stream_type to 'metrics' on mounted", async () => {
     createWrapper();
     await flushPromises();
-    expect(mockDashboardPanelData.data.queries[0].fields.stream_type).toBe(
-      "metrics",
-    );
+    expect(mockDashboardPanelData.data.queries[0].fields.stream_type).toBe("metrics");
   });
 
   it("sets chart type to 'line' on mounted", async () => {
@@ -338,17 +378,13 @@ describe("Metrics Index — template structure", () => {
   it("renders date-time picker with data-test attribute", async () => {
     const wrapper = createWrapper();
     await flushPromises();
-    expect(wrapper.find('[data-test="metrics-date-picker"]').exists()).toBe(
-      true,
-    );
+    expect(wrapper.find('[data-test="metrics-date-picker"]').exists()).toBe(true);
   });
 
   it("renders auto-refresh interval with data-test attribute", async () => {
     const wrapper = createWrapper();
     await flushPromises();
-    expect(wrapper.find('[data-test="metrics-auto-refresh"]').exists()).toBe(
-      true,
-    );
+    expect(wrapper.find('[data-test="metrics-auto-refresh"]').exists()).toBe(true);
   });
 
   it("does not render AddToDashboard dialog when showAddToDashboardDialog is false", async () => {
@@ -404,7 +440,6 @@ describe("Metrics Index — runQuery method", () => {
     const wrapper = createWrapper();
     await flushPromises();
 
-    const before = wrapper.vm.chartData;
     wrapper.vm.runQuery();
     await nextTick();
 
@@ -629,8 +664,7 @@ describe("Metrics Index — onDataZoom method", () => {
     });
 
     const callArgs = mockSetCustomDate.mock.calls[0][1];
-    const diffMinutes =
-      (callArgs.end.getTime() - callArgs.start.getTime()) / 60000;
+    const diffMinutes = (callArgs.end.getTime() - callArgs.start.getTime()) / 60000;
     expect(diffMinutes).toBe(1);
   });
 
@@ -690,7 +724,6 @@ describe("Metrics Index — cancelAddPanelQuery method", () => {
     await flushPromises();
 
     // Populate search request trace ids
-    const ids = ["trace-1", "trace-2"];
     // searchRequestTraceIds is computed from variablesAndPanelsDataLoadingState
     // We can directly verify that cancelQuery is called (the assignment is internal)
     wrapper.vm.cancelAddPanelQuery();
@@ -788,9 +821,7 @@ describe("Metrics Index — updateDateTime method", () => {
 
     wrapper.vm.updateDateTime(wrapper.vm.selectedDate);
 
-    expect(mockDashboardPanelData.meta.dateTime.start_time).toBeInstanceOf(
-      Date,
-    );
+    expect(mockDashboardPanelData.meta.dateTime.start_time).toBeInstanceOf(Date);
     expect(mockDashboardPanelData.meta.dateTime.end_time).toBeInstanceOf(Date);
   });
 });
@@ -858,7 +889,7 @@ describe("Metrics Index — watcher: isConfigPanelOpen dispatches resize", () =>
 
   it("dispatches a resize event when isConfigPanelOpen changes", async () => {
     const dispatchSpy = vi.spyOn(window, "dispatchEvent");
-    const wrapper = createWrapper();
+    createWrapper();
     await flushPromises();
 
     mockDashboardPanelData.layout.isConfigPanelOpen = true;
@@ -881,7 +912,7 @@ describe("Metrics Index — watcher: showQueryBar dispatches resize", () => {
 
   it("dispatches a resize event when showQueryBar changes", async () => {
     const dispatchSpy = vi.spyOn(window, "dispatchEvent");
-    const wrapper = createWrapper();
+    createWrapper();
     await flushPromises();
 
     mockDashboardPanelData.layout.showQueryBar = false;

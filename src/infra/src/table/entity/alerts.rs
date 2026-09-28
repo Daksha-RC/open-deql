@@ -29,12 +29,43 @@ pub struct Model {
     pub query_promql: Option<String>,
     pub query_promql_condition: Option<Json>,
     pub query_aggregation: Option<Json>,
+    /// Per-series alerting for a PromQL alert. NULL means the alert predates
+    /// the feature, which is the same as `false`.
+    pub query_promql_multi_alert: Option<bool>,
     pub query_vrl_function: Option<String>,
     pub query_search_event_type: Option<i16>,
     pub query_multi_time_range: Option<Json>,
     pub trigger_threshold_operator: String,
     pub trigger_period_seconds: i64,
     pub trigger_threshold_count: i64,
+    /// Level/threshold configuration blob (`ThresholdConfig`). `None` = a
+    /// single-level alert. Decision D1 in `alerts_2.md`.
+    pub trigger_thresholds: Option<Json>,
+    /// Feature 2 (PT-2): storage ids 1..=5, P1 = 1. NULL = unset.
+    pub priority: Option<i32>,
+    /// Feature 2 (PT-6, D18): JSON array of normalized tag strings.
+    /// NULL or absent = no tags.
+    pub tags: Option<Json>,
+    /// Feature 5 (D60): the SLO this alert measures. Its own INDEXED column
+    /// rather than a key inside `query_slo_condition`, because reverse lookup
+    /// — "which alerts point at this SLO" — runs on every SLO delete (S-12)
+    /// and every ingest pass (SA-19), and a JSON key is not portably
+    /// indexable. NULL = not an SLO alert.
+    pub slo_id: Option<String>,
+    /// The team this alert pages, overriding ownership discovery. An explicit
+    /// column rather than a key in `context_attributes` because "which alerts
+    /// route here" runs on every team delete and a JSON key is not portably
+    /// indexable. NULL = discover the owner from identity dimensions.
+    pub oncall_team: Option<String>,
+    /// Where the fix for this alert is written down. An explicit column beside
+    /// `oncall_team` and for the same reason: it is copied onto every response
+    /// record the alert opens, and a JSON key is not portably indexable.
+    /// NULL = no runbook.
+    pub runbook_url: Option<String>,
+    /// Feature 5 (D42): the `SloCondition` payload. Follows the
+    /// `query_aggregation` precedent, NOT `trigger_thresholds`, whose scope is
+    /// threshold and level configuration only (D1).
+    pub query_slo_condition: Option<Json>,
     pub trigger_frequency_type: i16,
     pub trigger_frequency_seconds: i64,
     pub trigger_frequency_cron: Option<String>,
@@ -49,6 +80,8 @@ pub struct Model {
     pub dedup_time_window_minutes: Option<i32>,
     pub dedup_config: Option<Json>,
     pub creates_incident: bool,
+    pub workflows: Json,
+    pub pending_period_sec: i64,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -101,12 +134,20 @@ mod tests {
             query_promql: None,
             query_promql_condition: None,
             query_aggregation: None,
+            query_promql_multi_alert: None,
             query_vrl_function: None,
             query_search_event_type: None,
             query_multi_time_range: None,
             trigger_threshold_operator: ">".to_string(),
             trigger_period_seconds: 60,
             trigger_threshold_count: 10,
+            trigger_thresholds: None,
+            priority: None,
+            tags: None,
+            slo_id: None,
+            oncall_team: None,
+            runbook_url: None,
+            query_slo_condition: None,
             trigger_frequency_type: 0,
             trigger_frequency_seconds: 300,
             trigger_frequency_cron: None,
@@ -121,6 +162,8 @@ mod tests {
             dedup_time_window_minutes: None,
             dedup_config: None,
             creates_incident: false,
+            workflows: serde_json::json!(vec!["abc123"]),
+            pending_period_sec: 0,
         };
         assert_eq!(m.id, "alert-1");
         assert_eq!(m.name, "High Error Rate");

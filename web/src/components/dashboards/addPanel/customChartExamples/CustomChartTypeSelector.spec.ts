@@ -15,8 +15,6 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import CustomChartTypeSelector from "./CustomChartTypeSelector.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
@@ -56,8 +54,6 @@ const node = document.createElement("div");
 node.setAttribute("id", "app");
 document.body.appendChild(node);
 
-installQuasar({ plugins: [Dialog, Notify] });
-
 const mountComponent = () =>
   mount(CustomChartTypeSelector, {
     global: {
@@ -88,7 +84,7 @@ describe("CustomChartTypeSelector", () => {
   });
 
   it("renders chart category sections", () => {
-    const categories = wrapper.findAll("[data-category]");
+    const categories = wrapper.findAll('[data-test="chart-category-section"]');
     expect(categories.length).toBeGreaterThan(0);
   });
 
@@ -154,7 +150,7 @@ describe("CustomChartTypeSelector", () => {
 
     const emitted = wrapper.emitted("select");
     expect(emitted).toBeTruthy();
-    expect((emitted![0][0] as any)).toEqual({ chart, replaceQuery: true });
+    expect(emitted![0][0] as any).toEqual({ chart, replaceQuery: true });
   });
 
   it("defaults replaceQuery to false when no options passed", async () => {
@@ -233,7 +229,7 @@ describe("CustomChartTypeSelector", () => {
     const cats = wrapper.vm.chartCategories;
     expect(Array.isArray(cats)).toBe(true);
     expect(cats.length).toBeGreaterThan(0);
-    expect(cats[0]).toHaveProperty("chartLabel");
+    expect(cats[0]).toHaveProperty("chartLabelKey");
     expect(cats[0]).toHaveProperty("type");
   });
 });

@@ -16,6 +16,11 @@
 import { loadIdentityConfig } from "@/utils/identityConfig";
 import serviceStreamsApi from "@/services/service_streams";
 import type { FieldAlias } from "@/services/service_streams";
+import config from "@/aws-exports";
+
+function isCorrelationAvailable(): boolean {
+  return config.isEnterprise === "true" || config.isCloud === "true";
+}
 
 // ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +41,7 @@ function evictOrgCacheIfSwitched(orgId: string): void {
 }
 
 async function loadSemanticGroups(orgId: string): Promise<FieldAlias[]> {
+  if (!isCorrelationAvailable()) return [];
   if (semanticGroupsCache.has(orgId)) return semanticGroupsCache.get(orgId)!;
   try {
     const response = await serviceStreamsApi.getSemanticGroups(orgId);
@@ -54,6 +60,7 @@ export async function getCorrelationFieldNames(
   streamName: string,
   streamSchemaFields: { name: string }[],
 ): Promise<string[]> {
+  if (!isCorrelationAvailable()) return [];
   evictOrgCacheIfSwitched(orgId);
   const key = `${orgId}/${streamName}`;
   if (fieldNamesCache.has(key)) return fieldNamesCache.get(key)!;
@@ -120,15 +127,16 @@ export function extractCorrelationFilters(
 
   // Match field = 'value' where value may contain SQL-escaped single quotes ('')
   const conditionRegex = /(\w+)\s*=\s*'((?:[^']|'')*)'/gi;
-  let m;
+  let m: RegExpExecArray | null;
   while ((m = conditionRegex.exec(whereClause)) !== null) {
-    if (trackedSet.has(m[1])) {
+    const field = m[1];
+    if (trackedSet.has(field)) {
       const value = m[2].replace(/''/g, "'");
-      const existing = filters.findIndex((f) => f.field === m[1]);
+      const existing = filters.findIndex((f) => f.field === field);
       if (existing >= 0) {
         filters[existing].value = value;
       } else {
-        filters.push({ field: m[1], value });
+        filters.push({ field, value });
       }
     }
   }
@@ -144,10 +152,7 @@ export function saveCorrelationFilters(
 ): void {
   if (!orgId || !streamType || !streamName || !filters.length) return;
 
-  localStorage.setItem(
-    storageKey(orgId, streamType, streamName),
-    JSON.stringify(filters),
-  );
+  localStorage.setItem(storageKey(orgId, streamType, streamName), JSON.stringify(filters));
 }
 
 export function loadCorrelationFilters(
@@ -166,9 +171,7 @@ export function loadCorrelationFilters(
 
 export function buildCorrelationWhereClause(filters: SavedFilter[]): string {
   if (!filters.length) return "";
-  return filters
-    .map((f) => `${f.field} = '${f.value.replace(/'/g, "''")}'`)
-    .join(" AND ");
+  return filters.map((f) => `${f.field} = '${f.value.replace(/'/g, "''")}'`).join(" AND ");
 }
 
 export function clearCorrelationFilters(
@@ -201,6 +204,13 @@ export interface CorrelationFiltersOptions {
 }
 
 export function useCorrelationFilters(opts: CorrelationFiltersOptions) {
+  // Tracks which (org, streamType, streamName) keys we've already attempted to
+  // restore for in this session. Without this, every extractFields() call
+  // (which happens after every query) would re-apply saved filters whenever
+  // the query is empty — racing with user actions like deselecting all values
+  // in the field sidebar and silently restoring filters the user just cleared.
+  const restoredKeys = new Set<string>();
+
   const sync = async (queryStr: string): Promise<void> => {
     try {
       const orgId = opts.orgId();
@@ -239,6 +249,10 @@ export function useCorrelationFilters(opts: CorrelationFiltersOptions) {
       const streamType = opts.streamType();
       const streamName = opts.streamName();
       if (!orgId || !streamType || !streamName) return;
+
+      const key = `${orgId}|${streamType}|${streamName}`;
+      if (restoredKeys.has(key)) return;
+      restoredKeys.add(key);
 
       if (opts.getQuery()) return;
 

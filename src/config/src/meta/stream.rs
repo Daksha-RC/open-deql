@@ -13,15 +13,15 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{cmp::max, fmt::Display, str::FromStr, sync::Arc};
+use std::{cmp::max, fmt::Display, ops::Range, str::FromStr, sync::Arc};
 
+use arrow::buffer::BooleanBuffer;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use hashbrown::HashMap;
 use proto::cluster_rpc;
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeStruct};
 use utoipa::ToSchema;
 
-use super::bitvec::BitVec;
 use crate::{
     get_config,
     meta::self_reporting::usage::Stats,
@@ -107,10 +107,11 @@ impl PartialEq for DataField {
     }
 }
 
-pub const ALL_STREAM_TYPES: [StreamType; 8] = [
+pub const ALL_STREAM_TYPES: [StreamType; 9] = [
     StreamType::Logs,
     StreamType::Metrics,
     StreamType::Traces,
+    StreamType::Profiles,
     StreamType::ServiceGraph,
     StreamType::EnrichmentTables,
     StreamType::Filelist,
@@ -125,6 +126,7 @@ pub enum StreamType {
     Logs,
     Metrics,
     Traces,
+    Profiles,
     #[serde(rename = "service_graph")]
     ServiceGraph,
     #[serde(rename = "enrichment_tables")]
@@ -155,6 +157,7 @@ impl StreamType {
             StreamType::Logs => "logs",
             StreamType::Metrics => "metrics",
             StreamType::Traces => "traces",
+            StreamType::Profiles => "profiles",
             StreamType::ServiceGraph => "service_graph",
             StreamType::EnrichmentTables => "enrichment_tables",
             StreamType::Filelist => "file_list",
@@ -170,6 +173,7 @@ impl From<&str> for StreamType {
             "logs" => StreamType::Logs,
             "metrics" => StreamType::Metrics,
             "traces" => StreamType::Traces,
+            "profiles" => StreamType::Profiles,
             "service_graph" => StreamType::ServiceGraph,
             "enrichment_tables" | "enrich" => StreamType::EnrichmentTables,
             "file_list" => StreamType::Filelist,
@@ -192,6 +196,7 @@ impl std::fmt::Display for StreamType {
             StreamType::Logs => write!(f, "logs"),
             StreamType::Metrics => write!(f, "metrics"),
             StreamType::Traces => write!(f, "traces"),
+            StreamType::Profiles => write!(f, "profiles"),
             StreamType::ServiceGraph => write!(f, "service_graph"),
             StreamType::EnrichmentTables => write!(f, "enrichment_tables"),
             StreamType::Filelist => write!(f, "file_list"),
@@ -273,6 +278,18 @@ impl MemorySize for RemoteStreamParams {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileSelection {
+    /// Row ids matched by the tantivy index, as a per-row bitmap of length
+    /// `num_rows` (one bit per parquet row).
+    Rows(Arc<BooleanBuffer>),
+    /// Sorted, non-overlapping physical row ranges selected by a compact
+    /// secondary index. This avoids materializing one bitmap bit per row.
+    RowRanges(Arc<Vec<Range<usize>>>),
+    /// Sampled row group ids in `PARQUET_MAX_ROW_GROUP_SIZE`-row units, not physical row groups.
+    RowGroups(Arc<Vec<u32>>),
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct FileKey {
     pub id: i64,
@@ -280,7 +297,8 @@ pub struct FileKey {
     pub key: String,
     pub meta: FileMeta,
     pub deleted: bool,
-    pub segment_ids: Option<Arc<BitVec>>,
+    pub selection: Option<FileSelection>,
+    pub row_group_size: Option<u32>,
 }
 
 impl FileKey {
@@ -291,7 +309,8 @@ impl FileKey {
             key,
             meta,
             deleted,
-            segment_ids: None,
+            selection: None,
+            row_group_size: None,
         }
     }
 
@@ -302,12 +321,14 @@ impl FileKey {
             key: file.to_string(),
             meta: FileMeta::default(),
             deleted: false,
-            segment_ids: None,
+            selection: None,
+            row_group_size: None,
         }
     }
 
-    pub fn with_segment_ids(&mut self, segment_ids: BitVec) {
-        self.segment_ids = Some(Arc::new(segment_ids));
+    pub fn with_selection(&mut self, selection: FileSelection, row_group_size: Option<u32>) {
+        self.selection = Some(selection);
+        self.row_group_size = row_group_size;
     }
 }
 
@@ -319,6 +340,10 @@ pub struct FileMeta {
     pub original_size: i64,
     pub compressed_size: i64,
     pub index_size: i64,
+    #[serde(default)]
+    pub mindex_size: i64,
+    #[serde(default)]
+    pub bloom_ver: i64, // 0 = no .bf; otherwise = microsecond ts encoded in .bf filename
     pub flattened: bool,
 }
 
@@ -359,6 +384,7 @@ pub struct FileListDeleted {
     pub account: String,
     pub file: String,
     pub index_file: bool,
+    pub mindex_file: bool,
     pub flattened: bool,
 }
 
@@ -445,13 +471,18 @@ pub struct StreamStats {
     pub storage_size: f64,
     pub compressed_size: f64,
     pub index_size: f64,
+    #[serde(default)]
+    pub mindex_size: f64,
 }
 
 impl StreamStats {
-    /// Returns true iff [start, end] time range intersects with the stream's
-    /// time range.
+    /// Returns true iff [start, end] intersects the stream's time range, or the stream has no
+    /// stats yet.
     pub fn time_range_intersects(&self, start: i64, end: i64) -> bool {
-        assert!(start <= end);
+        // stats are built from persisted files only, so a stream with none is unknown, not empty
+        if self.doc_time_max == 0 {
+            return true;
+        }
         let (min, max) = self.time_range();
         // [min, max] does *not* intersect with [start, end] if either
         //
@@ -469,11 +500,16 @@ impl StreamStats {
 
     fn time_range(&self) -> (i64, i64) {
         assert!(self.doc_time_min <= self.doc_time_max);
-        let file_push_interval = Duration::try_seconds(get_config().limit.file_push_interval as _)
+        let cfg = get_config();
+        // stats lag ingestion by the WAL retention plus the stats job interval, not just the push
+        let slack_secs = cfg.limit.file_push_interval
+            + cfg.limit.max_file_retention_time
+            + cfg.limit.calculate_stats_interval;
+        let slack = Duration::try_seconds(slack_secs as _)
             .unwrap()
             .num_microseconds()
             .unwrap();
-        (self.doc_time_min, self.doc_time_max + file_push_interval)
+        (self.doc_time_min, self.doc_time_max + slack)
     }
 
     pub fn add_file_meta(&mut self, meta: &FileMeta) {
@@ -490,11 +526,15 @@ impl StreamStats {
         self.storage_size += meta.original_size as f64;
         self.compressed_size += meta.compressed_size as f64;
         self.index_size += meta.index_size as f64;
+        self.mindex_size += meta.mindex_size as f64;
         if self.storage_size < 0.0 {
             self.storage_size = 0.0;
         }
         if self.compressed_size < 0.0 {
             self.compressed_size = 0.0;
+        }
+        if self.mindex_size < 0.0 {
+            self.mindex_size = 0.0;
         }
         if self.index_size < 0.0 {
             self.index_size = 0.0;
@@ -507,6 +547,7 @@ impl StreamStats {
         self.storage_size = stats.storage_size;
         self.compressed_size = stats.compressed_size;
         self.index_size = stats.index_size;
+        self.mindex_size = stats.mindex_size;
         self.doc_time_min = if self.doc_time_min == 0 {
             stats.doc_time_min
         } else if stats.doc_time_min == 0 {
@@ -532,6 +573,7 @@ impl StreamStats {
         self.storage_size += other.storage_size;
         self.compressed_size += other.compressed_size;
         self.index_size += other.index_size;
+        self.mindex_size += other.mindex_size;
     }
 }
 
@@ -564,6 +606,7 @@ impl From<Stats> for StreamStats {
             storage_size: meta.original_size,
             compressed_size: meta.compressed_size.unwrap_or_default(),
             index_size: meta.index_size.unwrap_or_default(),
+            mindex_size: meta.mindex_size.unwrap_or_default(),
         }
     }
 }
@@ -587,6 +630,7 @@ impl std::ops::Sub<&StreamStats> for &StreamStats {
             storage_size: self.storage_size - rhs.storage_size,
             compressed_size: self.compressed_size - rhs.compressed_size,
             index_size: self.index_size - rhs.index_size,
+            mindex_size: self.mindex_size - rhs.mindex_size,
         }
     }
 }
@@ -610,6 +654,7 @@ impl std::ops::Add<&StreamStats> for &StreamStats {
             storage_size: self.storage_size + rhs.storage_size,
             compressed_size: self.compressed_size + rhs.compressed_size,
             index_size: self.index_size + rhs.index_size,
+            mindex_size: self.mindex_size + rhs.mindex_size,
         }
     }
 }
@@ -629,6 +674,7 @@ impl From<&FileMeta> for cluster_rpc::FileMeta {
             original_size: req.original_size,
             compressed_size: req.compressed_size,
             index_size: req.index_size,
+            mindex_size: req.mindex_size,
         }
     }
 }
@@ -643,6 +689,8 @@ impl From<&cluster_rpc::FileMeta> for FileMeta {
             compressed_size: req.compressed_size,
             flattened: false,
             index_size: req.index_size,
+            mindex_size: req.mindex_size,
+            bloom_ver: 0,
         }
     }
 }
@@ -668,7 +716,8 @@ impl From<&cluster_rpc::FileKey> for FileKey {
             key: req.key.clone(),
             meta: FileMeta::from(req.meta.as_ref().unwrap()),
             deleted: req.deleted,
-            segment_ids: None,
+            selection: None,
+            row_group_size: None,
         }
     }
 }
@@ -818,6 +867,16 @@ pub struct CrossLink {
     pub fields: Vec<CrossLinkField>,
 }
 
+impl Display for CrossLink {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "name: {}, url: {}, fields: {:?}",
+            self.name, self.url, self.fields
+        )
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq)]
 pub struct CrossLinkField {
     pub name: String,
@@ -894,7 +953,7 @@ impl TimeRange {
             return ranges;
         }
         let mut ranges = ranges;
-        ranges.sort_by(|a, b| a.start.cmp(&b.start));
+        ranges.sort_by_key(|k| k.start);
         let mut result = Vec::new();
         let mut current = ranges[0].clone();
         for range in ranges.iter().skip(1) {
@@ -921,23 +980,21 @@ pub struct StreamSettings {
     #[serde(default)]
     pub bloom_filter_fields: Vec<String>,
     #[serde(default)]
+    pub defined_schema_fields: Vec<String>,
+    #[serde(default)]
+    pub storage_type: StorageType,
+    #[serde(default)]
     pub data_retention: i64,
     #[serde(default)]
-    pub flatten_level: Option<i64>,
+    pub extended_retention_days: Vec<TimeRange>,
     #[serde(default)]
-    pub defined_schema_fields: Vec<String>,
+    pub flatten_level: Option<i64>,
     #[serde(default)]
     pub max_query_range: i64, // hours
     #[serde(default)]
     pub store_original_data: bool,
     #[serde(default)]
     pub approx_partition: bool,
-    #[serde(default)]
-    pub distinct_value_fields: Vec<DistinctField>,
-    #[serde(default)]
-    pub index_updated_at: i64,
-    #[serde(default)]
-    pub extended_retention_days: Vec<TimeRange>,
     #[serde(default)]
     pub index_original_data: bool,
     #[serde(default)]
@@ -949,9 +1006,13 @@ pub struct StreamSettings {
     #[serde(default)]
     pub is_llm_stream: bool,
     #[serde(default)]
+    pub distinct_value_fields: Vec<DistinctField>,
+    #[serde(default)]
     pub cross_links: Vec<CrossLink>,
     #[serde(default)]
-    pub storage_type: StorageType,
+    pub index_updated_at: i64,
+    #[serde(default)]
+    pub index_fields_updated_at: HashMap<String, i64>,
 }
 
 impl Default for StreamSettings {
@@ -969,6 +1030,7 @@ impl Default for StreamSettings {
             approx_partition: false,
             distinct_value_fields: Vec::new(),
             index_updated_at: 0,
+            index_fields_updated_at: Default::default(),
             extended_retention_days: Vec::new(),
             index_original_data: false,
             index_all_values: false,
@@ -978,6 +1040,28 @@ impl Default for StreamSettings {
             cross_links: Vec::new(),
             storage_type: StorageType::Normal,
         }
+    }
+}
+
+impl StreamSettings {
+    /// Internal columns implicitly included in the user-defined schema for a
+    /// stream with these settings.
+    pub fn uds_internal_columns(&self) -> Vec<String> {
+        let mut columns = vec![
+            crate::TIMESTAMP_COL_NAME.to_string(),
+            get_config().common.column_all.to_string(),
+        ];
+        if self.is_llm_stream {
+            columns.push(crate::O2_INGEST_TS_COL_NAME.to_string());
+        }
+        if self.store_original_data || self.index_original_data {
+            columns.push(crate::ID_COL_NAME.to_string());
+            columns.push(crate::ORIGINAL_DATA_COL_NAME.to_string());
+        }
+        if self.index_all_values {
+            columns.push(crate::ALL_VALUES_COL_NAME.to_string());
+        }
+        columns
     }
 }
 
@@ -1001,6 +1085,11 @@ impl Serialize for StreamSettings {
         state.serialize_field("store_original_data", &self.store_original_data)?;
         state.serialize_field("approx_partition", &self.approx_partition)?;
         state.serialize_field("index_updated_at", &self.index_updated_at)?;
+        if !self.index_fields_updated_at.is_empty() {
+            state.serialize_field("index_fields_updated_at", &self.index_fields_updated_at)?;
+        } else {
+            state.skip_field("index_fields_updated_at")?;
+        }
         state.serialize_field("extended_retention_days", &self.extended_retention_days)?;
         state.serialize_field("index_original_data", &self.index_original_data)?;
         state.serialize_field("index_all_values", &self.index_all_values)?;
@@ -1141,6 +1230,18 @@ impl From<&str> for StreamSettings {
             .and_then(Value::as_i64)
             .unwrap_or_default();
 
+        let mut index_fields_updated_at = HashMap::new();
+        if let Some(value) = settings
+            .get("index_fields_updated_at")
+            .and_then(Value::as_object)
+        {
+            for (k, v) in value {
+                if let Some(ts) = v.as_i64() {
+                    index_fields_updated_at.insert(k.clone(), ts);
+                }
+            }
+        }
+
         let mut extended_retention_days = vec![];
         if let Some(values) = settings
             .get("extended_retention_days")
@@ -1203,6 +1304,7 @@ impl From<&str> for StreamSettings {
             approx_partition,
             distinct_value_fields,
             index_updated_at,
+            index_fields_updated_at,
             extended_retention_days,
             index_original_data,
             index_all_values,
@@ -1225,6 +1327,11 @@ impl MemorySize for StreamSettings {
             + self.defined_schema_fields.mem_size()
             + self.distinct_value_fields.mem_size()
             + self.extended_retention_days.mem_size()
+            + self
+                .index_fields_updated_at
+                .iter()
+                .map(|(k, v)| k.mem_size() + v.mem_size())
+                .sum::<usize>()
     }
 }
 
@@ -1354,6 +1461,58 @@ impl From<&str> for FileListBookKeepMode {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_uds_internal_columns() {
+        let mut settings = StreamSettings::default();
+        let columns = settings.uds_internal_columns();
+        assert!(columns.contains(&crate::TIMESTAMP_COL_NAME.to_string()));
+        assert!(!columns.contains(&crate::O2_INGEST_TS_COL_NAME.to_string()));
+        assert!(columns.contains(&get_config().common.column_all));
+        assert!(!columns.contains(&crate::ID_COL_NAME.to_string()));
+        assert!(!columns.contains(&crate::ALL_VALUES_COL_NAME.to_string()));
+
+        settings.is_llm_stream = true;
+        settings.store_original_data = true;
+        settings.index_all_values = true;
+        let columns = settings.uds_internal_columns();
+        assert!(columns.contains(&crate::O2_INGEST_TS_COL_NAME.to_string()));
+        assert!(columns.contains(&crate::ID_COL_NAME.to_string()));
+        assert!(columns.contains(&crate::ORIGINAL_DATA_COL_NAME.to_string()));
+        assert!(columns.contains(&crate::ALL_VALUES_COL_NAME.to_string()));
+
+        for column in settings.uds_internal_columns() {
+            assert!(crate::is_uds_internal_column(&column));
+        }
+        assert!(!crate::is_uds_internal_column("my_field"));
+    }
+
+    #[test]
+    fn test_stream_settings_index_fields_updated_at() {
+        // legacy payload without the map deserializes to an empty map
+        let settings = StreamSettings::from(r#"{"index_updated_at": 100}"#);
+        assert_eq!(settings.index_updated_at, 100);
+        assert!(settings.index_fields_updated_at.is_empty());
+
+        // the map survives a serialize -> parse round trip
+        let mut settings = StreamSettings {
+            index_updated_at: 100,
+            ..Default::default()
+        };
+        settings
+            .index_fields_updated_at
+            .insert("trace_id".to_string(), 200);
+        let payload = json::to_string(&settings).unwrap();
+        let parsed = StreamSettings::from(payload.as_str());
+        assert_eq!(
+            parsed.index_fields_updated_at,
+            settings.index_fields_updated_at
+        );
+
+        // an empty map is skipped during serialization
+        let payload = json::to_string(&StreamSettings::default()).unwrap();
+        assert!(!payload.contains("index_fields_updated_at"));
+    }
+
     #[tokio::test]
     async fn test_get_file_meta() {
         let file_meta = FileMeta {
@@ -1364,6 +1523,8 @@ mod tests {
             compressed_size: 1,
             flattened: false,
             index_size: 0,
+            mindex_size: 0,
+            bloom_ver: 0,
         };
 
         let rpc_meta = cluster_rpc::FileMeta::from(&file_meta);
@@ -1381,7 +1542,9 @@ mod tests {
             original_size: 1000,
             compressed_size: 500,
             index_size: 50,
+            mindex_size: 0,
             flattened: false,
+            bloom_ver: 0,
         };
 
         stats.add_file_meta(&meta);
@@ -1397,12 +1560,14 @@ mod tests {
             original_size: -100,
             compressed_size: -50,
             index_size: -10,
+            mindex_size: 0,
             ..meta
         };
         let mut negative_stats = StreamStats {
             storage_size: 50.0,
             compressed_size: 25.0,
             index_size: 5.0,
+            mindex_size: 0.0,
             ..Default::default()
         };
         negative_stats.add_file_meta(&negative_meta);
@@ -1635,6 +1800,7 @@ mod tests {
         assert!(StreamType::Logs.support_index());
         assert!(StreamType::Metrics.support_index());
         assert!(StreamType::Traces.support_index());
+        assert!(!StreamType::Profiles.support_index());
         assert!(StreamType::Metadata.support_index());
         assert!(!StreamType::EnrichmentTables.support_index());
         assert!(!StreamType::Filelist.support_index());
@@ -1648,6 +1814,7 @@ mod tests {
         assert!(StreamType::Metrics.support_uds());
         assert!(StreamType::Traces.support_uds());
         assert!(!StreamType::EnrichmentTables.support_uds());
+        assert!(!StreamType::Profiles.support_uds());
         assert!(!StreamType::Filelist.support_uds());
         assert!(!StreamType::Metadata.support_uds());
         assert!(!StreamType::Index.support_uds());
@@ -1659,6 +1826,7 @@ mod tests {
         assert_eq!(StreamType::Logs.as_str(), "logs");
         assert_eq!(StreamType::Metrics.as_str(), "metrics");
         assert_eq!(StreamType::Traces.as_str(), "traces");
+        assert_eq!(StreamType::Profiles.as_str(), "profiles");
         assert_eq!(StreamType::ServiceGraph.as_str(), "service_graph");
         assert_eq!(StreamType::EnrichmentTables.as_str(), "enrichment_tables");
         assert_eq!(StreamType::Filelist.as_str(), "file_list");
@@ -1773,7 +1941,7 @@ mod tests {
 
     #[test]
     fn test_stream_stats_time_range_intersects() {
-        // Use large timestamps so file_push_interval (10s = 10_000_000 µs) doesn't confuse results
+        // Use large timestamps so the stats slack (~20 min in µs) doesn't confuse results
         let base: i64 = 1_700_000_000_000_000; // ~2023-11-14 in µs
         let stats = StreamStats {
             doc_time_min: base,
@@ -1790,8 +1958,21 @@ mod tests {
         assert!(stats.time_range_intersects(base - 1_000_000, base + 5_000_000));
         // query ends exactly at stream min — no intersection (min < end: base < base is false)
         assert!(!stats.time_range_intersects(base - 1_000_000, base));
-        // query starts well after effective max (doc_time_max + file_push_interval ~10s)
-        assert!(!stats.time_range_intersects(base + 20_000_000, base + 30_000_000));
+        // the WAL and the stats job can hold data back for a while, so the upper bound is slack
+        let cfg = get_config();
+        let slack = ((cfg.limit.file_push_interval
+            + cfg.limit.max_file_retention_time
+            + cfg.limit.calculate_stats_interval)
+            * 1_000_000) as i64;
+        // query starts exactly at effective max (doc_time_max + slack) — still intersects
+        assert!(stats.time_range_intersects(base + slack, base + slack + 1_000_000));
+        // query starts after effective max
+        assert!(!stats.time_range_intersects(base + slack + 2_000_000, base + slack + 3_000_000));
+        // a stream with no persisted files has no stats and must not be filtered out
+        let no_stats = StreamStats::default();
+        assert!(no_stats.time_range_intersects(base, base + 1_000_000));
+        // an inverted range does not panic
+        assert!(!stats.time_range_intersects(base + 1_000_000, base));
     }
 
     // ── PartitionTimeLevel ────────────────────────────────────────────────────
@@ -1856,7 +2037,7 @@ mod tests {
         assert_eq!(key.id, 0);
         assert!(key.account.is_empty());
         assert!(!key.deleted);
-        assert!(key.segment_ids.is_none());
+        assert!(key.selection.is_none());
     }
 
     #[test]
@@ -1868,7 +2049,9 @@ mod tests {
             original_size: 1024,
             compressed_size: 512,
             index_size: 0,
+            mindex_size: 0,
             flattened: false,
+            bloom_ver: 0,
         };
         let key = FileKey::new(
             42,
@@ -1882,16 +2065,28 @@ mod tests {
         assert_eq!(key.key, "files/k.parquet");
         assert_eq!(key.meta, meta);
         assert!(!key.deleted);
-        assert!(key.segment_ids.is_none());
+        assert!(key.selection.is_none());
     }
 
     #[test]
-    fn test_file_key_with_segment_ids() {
+    fn test_file_key_with_selection() {
         let mut key = FileKey::from_file_name("files/k.parquet");
-        assert!(key.segment_ids.is_none());
-        let bv = BitVec::new();
-        key.with_segment_ids(bv);
-        assert!(key.segment_ids.is_some());
+        assert!(key.selection.is_none());
+        let selection = FileSelection::Rows(Arc::new(BooleanBuffer::from_iter(
+            (0..16u32).map(|i| [1u32, 5, 9].contains(&i)),
+        )));
+        key.with_selection(selection, Some(1024));
+        assert!(key.selection.is_some());
+        assert_eq!(key.row_group_size, Some(1024));
+    }
+
+    #[test]
+    fn test_file_key_with_row_range_selection() {
+        let mut key = FileKey::from_file_name("files/k.parquet");
+        let selection = FileSelection::RowRanges(Arc::new(vec![1..4, 8..12]));
+        key.with_selection(selection.clone(), Some(1024));
+        assert_eq!(key.selection, Some(selection));
+        assert_eq!(key.row_group_size, Some(1024));
     }
 
     #[test]
@@ -1919,6 +2114,7 @@ mod tests {
             storage_size: 2048.0,
             compressed_size: 1024.0,
             index_size: 10.0,
+            mindex_size: 0.0,
             doc_time_min: 200,
             doc_time_max: 800,
             ..Default::default()
@@ -1941,10 +2137,10 @@ mod tests {
             storage_size: 300.0,
             compressed_size: 150.0,
             index_size: 5.0,
+            mindex_size: 0.0,
             doc_time_min: 1000,
             doc_time_max: 2000,
             created_at: 100,
-            ..Default::default()
         };
         let b = StreamStats {
             file_num: 2,
@@ -1952,10 +2148,10 @@ mod tests {
             storage_size: 200.0,
             compressed_size: 100.0,
             index_size: 3.0,
+            mindex_size: 0.0,
             doc_time_min: 500,
             doc_time_max: 3000,
             created_at: 50,
-            ..Default::default()
         };
         a.merge(&b);
         assert_eq!(a.file_num, 5);
@@ -2102,6 +2298,7 @@ mod tests {
             max_ts: 200,
             compressed_size: None,
             index_size: None,
+            mindex_size: None,
         };
         let stream_stats = StreamStats::from(usage);
         assert_eq!(stream_stats.doc_num, 50);
@@ -2123,6 +2320,7 @@ mod tests {
             max_ts: 5000,
             compressed_size: Some(1024.0),
             index_size: Some(50.0),
+            mindex_size: Some(0.0),
         };
         let stream_stats = StreamStats::from(usage);
         assert_eq!(stream_stats.doc_num, 100);
@@ -2259,5 +2457,121 @@ mod tests {
         let a = TimeRange::new(0, 30);
         let b = TimeRange::new(50, 100);
         assert!(!a.intersects(&b));
+    }
+
+    // ── bloom_ver coverage on FileMeta ─────────────────────────────────────────
+
+    #[test]
+    fn test_file_meta_default_bloom_ver_is_zero() {
+        let m = FileMeta::default();
+        assert_eq!(m.bloom_ver, 0);
+    }
+
+    #[test]
+    fn test_file_meta_serde_json_roundtrip_with_bloom_ver() {
+        let m = FileMeta {
+            min_ts: 1,
+            max_ts: 2,
+            records: 3,
+            original_size: 4,
+            compressed_size: 5,
+            index_size: 6,
+            mindex_size: 0,
+            flattened: true,
+            bloom_ver: 42,
+        };
+        let s = serde_json::to_string(&m).unwrap();
+        assert!(s.contains("\"bloom_ver\":42"));
+        let parsed: FileMeta = serde_json::from_str(&s).unwrap();
+        assert_eq!(parsed, m);
+    }
+
+    #[test]
+    fn test_file_meta_serde_json_legacy_without_bloom_ver_defaults_to_zero() {
+        // Old payloads written before bloom_ver was added must still deserialize.
+        let legacy = r#"{
+            "min_ts": 1,
+            "max_ts": 2,
+            "records": 3,
+            "original_size": 4,
+            "compressed_size": 5,
+            "index_size": 6,
+            "mindex_size": 0,
+            "flattened": false
+        }"#;
+        let parsed: FileMeta = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.bloom_ver, 0);
+    }
+
+    #[test]
+    fn test_file_meta_is_empty_independent_of_bloom_ver() {
+        // bloom_ver should not affect emptiness.
+        let mut m = FileMeta::default();
+        assert!(m.is_empty());
+        m.bloom_ver = 99;
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_kv_metadata_to_file_meta_leaves_bloom_ver_zero() {
+        // Parquet KV metadata never carries bloom_ver — it must default to 0.
+        use parquet::file::metadata::KeyValue;
+        let kvs = vec![
+            KeyValue::new("min_ts".to_string(), "10".to_string()),
+            KeyValue::new("max_ts".to_string(), "20".to_string()),
+            KeyValue::new("records".to_string(), "5".to_string()),
+            KeyValue::new("original_size".to_string(), "100".to_string()),
+            KeyValue::new("compressed_size".to_string(), "50".to_string()),
+        ];
+        let m: FileMeta = (kvs.as_slice()).into();
+        assert_eq!(m.min_ts, 10);
+        assert_eq!(m.max_ts, 20);
+        assert_eq!(m.bloom_ver, 0);
+    }
+    #[test]
+    fn mindex_size_is_independent_in_stats_json_and_rpc() {
+        let meta = FileMeta {
+            records: 2,
+            index_size: 7,
+            mindex_size: 13,
+            ..Default::default()
+        };
+        let rpc = cluster_rpc::FileMeta::from(&meta);
+        assert_eq!(FileMeta::from(&rpc), meta);
+        let mut json = serde_json::to_value(&meta).unwrap();
+        json.as_object_mut().unwrap().remove("mindex_size");
+        assert_eq!(
+            serde_json::from_value::<FileMeta>(json)
+                .unwrap()
+                .mindex_size,
+            0
+        );
+        let mut a = StreamStats::default();
+        a.add_file_meta(&meta);
+        let b = StreamStats {
+            mindex_size: 5.0,
+            index_size: 12.0,
+            ..Default::default()
+        };
+        assert_eq!((&a + &b).mindex_size, 18.0);
+        assert_eq!((&a - &b).mindex_size, 8.0);
+        a.merge(&b);
+        assert_eq!((a.mindex_size, a.index_size), (18.0, 19.0));
+        let mut copied = StreamStats::default();
+        copied.format_by(&a);
+        assert_eq!(copied.mindex_size, 18.0);
+        copied.add_file_meta(&FileMeta {
+            mindex_size: -50,
+            ..Default::default()
+        });
+        assert_eq!((copied.mindex_size, copied.index_size), (0.0, 19.0));
+        let mut json = serde_json::to_value(&a).unwrap();
+        json.as_object_mut().unwrap().remove("mindex_size");
+        assert_eq!(
+            serde_json::from_value::<StreamStats>(json)
+                .unwrap()
+                .mindex_size,
+            0.0
+        );
     }
 }

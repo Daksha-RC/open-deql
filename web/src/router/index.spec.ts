@@ -27,7 +27,7 @@ vi.mock("@/composables/shared/router", () => ({
         path: "/login",
         name: "login",
         component: { template: "<div>Login</div>" },
-        meta: { title: "Login" },
+        meta: { titleKey: "login.login" },
       },
     ],
     homeChildRoutes: [
@@ -35,13 +35,13 @@ vi.mock("@/composables/shared/router", () => ({
         path: "",
         name: "home",
         component: { template: "<div>Home</div>" },
-        meta: { title: "Home" },
+        meta: { titleKey: "menu.home" },
       },
       {
         path: "logs",
         name: "logs",
         component: { template: "<div>Logs</div>" },
-        meta: { title: "Logs" },
+        meta: { titleKey: "menu.search" },
       },
     ],
   }),
@@ -185,10 +185,6 @@ describe("router/index (factory)", () => {
     });
 
     it("should allow navigation to /cb when not authenticated", async () => {
-      const next = vi.fn();
-      const to = { path: "/cb", meta: {}, query: {} };
-      const from = { path: "/" };
-
       // Trigger the guard manually via the internal hooks
       await router.push("/login").catch(() => {});
       // Accessing protected router guard via beforeEach simulation
@@ -223,19 +219,15 @@ describe("router/index (factory)", () => {
         .push({ path: "/logs", query: { short_url: "https://short.example.com" } })
         .catch(() => {});
 
-      const callArgs = sessionSetItemSpy.mock.calls.find(
-        (c) => c[0] === "redirectURI",
-      );
+      const callArgs = sessionSetItemSpy.mock.calls.find((c) => c[0] === "redirectURI");
       if (callArgs) {
         expect(callArgs[1]).toBe("https://short.example.com");
       }
     });
 
     it("should dispatch login action when sessionUserInfo exists but store is not logged in", async () => {
-      const dispatchSpy = vi.spyOn(store, "dispatch");
-      vi.mocked(getDecodedUserInfo).mockReturnValue(
-        JSON.stringify({ email: "test@example.com" }),
-      );
+      vi.spyOn(store, "dispatch");
+      vi.mocked(getDecodedUserInfo).mockReturnValue(JSON.stringify({ email: "test@example.com" }));
       store = buildStore(false);
       router = createAppRouter(store);
 
@@ -248,9 +240,7 @@ describe("router/index (factory)", () => {
   // -------------------------------------------------------------------------
   describe("beforeEach navigation guard – authenticated user", () => {
     beforeEach(() => {
-      vi.mocked(getDecodedUserInfo).mockReturnValue(
-        JSON.stringify({ email: "user@example.com" }),
-      );
+      vi.mocked(getDecodedUserInfo).mockReturnValue(JSON.stringify({ email: "user@example.com" }));
       store = buildStore(true);
       router = createAppRouter(store);
     });
@@ -269,25 +259,24 @@ describe("router/index (factory)", () => {
   // -------------------------------------------------------------------------
   describe("document.title management", () => {
     beforeEach(() => {
-      vi.mocked(getDecodedUserInfo).mockReturnValue(
-        JSON.stringify({ email: "user@example.com" }),
-      );
+      vi.mocked(getDecodedUserInfo).mockReturnValue(JSON.stringify({ email: "user@example.com" }));
       store = buildStore(true);
       router = createAppRouter(store);
     });
 
-    it("should set document.title to OpenObserve when route has no meta.title", async () => {
-      // Resolve a route without meta.title
-      await router.push("/").catch(() => {});
-      // Title guard ran: default fallback
-      // We cannot assert exact title in all environments but guard logic exists
-      expect(document.title).toMatch(/OpenObserve/);
+    it("should set document.title to OpenObserve when route has no meta.titleKey", async () => {
+      // The ingestion fixture route carries no meta at all
+      await router.push("/ingestion").catch(() => {});
+      expect(document.title).toBe("OpenObserve");
     });
 
-    it("should prefix document.title with OpenObserve - when route has meta.title", async () => {
+    it("should prefix document.title with OpenObserve - and translate meta.titleKey", async () => {
+      // Login fixture carries meta.titleKey = "login.login", which resolves to "Login".
+      // Asserting the resolved text (not the key) is the point: the guard, not the
+      // route table, is what translates — that is what keeps the tab title in the
+      // current locale.
       await router.push("/login").catch(() => {});
-      // Login route has meta.title = "Login"
-      expect(document.title).toMatch(/OpenObserve/);
+      expect(document.title).toBe("OpenObserve - Login");
     });
   });
 });

@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { describe, expect, it, vi, beforeEach } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { applyLineAreaScatterBarChart } from "@/utils/dashboard/sql/charts/convertSQLLineAreaChart";
 
 vi.mock("@/utils/dashboard/convertDataIntoUnitValue", () => ({
@@ -54,7 +54,15 @@ function makeMockContext(overrides: Partial<any> = {}): any {
 
   return {
     options: {
-      xAxis: [{ data: ["Jan", "Feb", "Mar"], axisLabel: { rotate: 0, width: 120, margin: 5 }, axisTick: {}, nameGap: 25, name: "" }],
+      xAxis: [
+        {
+          data: ["Jan", "Feb", "Mar"],
+          axisLabel: { rotate: 0, width: 120, margin: 5 },
+          axisTick: {},
+          nameGap: 25,
+          name: "",
+        },
+      ],
       yAxis: [{ data: [], axisLabel: { width: 80 }, name: "" }],
       series: [],
       tooltip: { axisPointer: {}, textStyle: {} },
@@ -188,7 +196,12 @@ describe("applyLineAreaScatterBarChart - area-stacked (Branch A)", () => {
           trellis: { layout: "grid" },
           background: { value: { color: "#FFFFFF" } },
         },
-        queries: [{ fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] }, customQuery: false }],
+        queries: [
+          {
+            fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] },
+            customQuery: false,
+          },
+        ],
       },
       breakDownKeys: ["breakdown"],
     });
@@ -211,7 +224,12 @@ describe("applyLineAreaScatterBarChart - line with breakdown (Branch A)", () => 
           trellis: { layout: null },
           background: { value: { color: "#FFFFFF" } },
         },
-        queries: [{ fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] }, customQuery: false }],
+        queries: [
+          {
+            fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] },
+            customQuery: false,
+          },
+        ],
       },
       breakDownKeys: ["breakdown"],
     });
@@ -234,7 +252,12 @@ describe("applyLineAreaScatterBarChart - line with breakdown (Branch A)", () => 
           trellis: { layout: null },
           background: { value: { color: "#FFFFFF" } },
         },
-        queries: [{ fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] }, customQuery: false }],
+        queries: [
+          {
+            fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] },
+            customQuery: false,
+          },
+        ],
       },
       breakDownKeys: ["breakdown"],
     });
@@ -367,7 +390,12 @@ describe("applyLineAreaScatterBarChart - trellis behavior", () => {
           trellis: { layout: "grid" },
           background: { value: { color: "#FFFFFF" } },
         },
-        queries: [{ fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] }, customQuery: false }],
+        queries: [
+          {
+            fields: { y: [{ label: "Value" }], breakdown: [{ label: "Cat" }] },
+            customQuery: false,
+          },
+        ],
       },
       breakDownKeys: ["breakdown"],
     });
@@ -442,5 +470,33 @@ describe("applyLineAreaScatterBarChart - additional coverage", () => {
     const formatter = ctx.options.tooltip.formatter;
     const result = formatter([]);
     expect(result).toBe("");
+  });
+
+  it("scatter tooltip formatter escapes HTML in category and series names", () => {
+    const ctx = makeMockContext({
+      panelSchema: {
+        type: "scatter",
+        config: {
+          unit: "default",
+          unit_custom: "",
+          decimals: 2,
+          axis_label_rotate: 0,
+          axis_label_truncate_width: 120,
+          trellis: { layout: null },
+          background: { value: { color: "#FFFFFF" } },
+        },
+        queries: [{ fields: { y: [{ label: "Value" }], breakdown: [] }, customQuery: false }],
+      },
+      breakDownKeys: [],
+    });
+    applyLineAreaScatterBarChart(ctx);
+    const marker = '<span style="color:red">●</span>';
+    const result = ctx.options.tooltip.formatter([
+      { name: "<b>cat</b>", seriesName: "<img src=x onerror=alert(1)>", data: 1, marker },
+    ]);
+    expect(result).not.toContain("<img");
+    expect(result).not.toContain("<b>cat");
+    expect(result).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(result).toContain(marker);
   });
 });

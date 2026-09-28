@@ -66,6 +66,16 @@ pub fn uuid() -> String {
     Ksuid::new(None, None).to_string()
 }
 
+/// Generate a random hyphenated GUID, for credentials that must be unguessable.
+///
+/// `uuid()` above returns a KSUID and `Uuid::now_v7()` leaks its creation time,
+/// so neither is usable for a secret.
+pub fn random_uuid() -> String {
+    uuid::Builder::from_random_bytes(rand::random::<[u8; 16]>())
+        .into_uuid()
+        .to_string()
+}
+
 /// Generate a unique id like uuid for file name.
 pub fn generate_file_name() -> String {
     let id = generate();
@@ -447,11 +457,11 @@ mod tests {
 
         // Allow for some tolerance (within last hour and next hour)
         assert!(
-            timestamp >= now - 3600_000_000,
+            timestamp >= now - 3_600_000_000,
             "Timestamp should not be too far in past"
         );
         assert!(
-            timestamp <= now + 3600_000_000,
+            timestamp <= now + 3_600_000_000,
             "Timestamp should not be too far in future"
         );
 
@@ -465,8 +475,8 @@ mod tests {
 
         // Verify both formats give reasonable timestamps
         let standard_timestamp = standard_result.unwrap();
-        assert!(standard_timestamp >= now - 3600_000_000);
-        assert!(standard_timestamp <= now + 3600_000_000);
+        assert!(standard_timestamp >= now - 3_600_000_000);
+        assert!(standard_timestamp <= now + 3_600_000_000);
     }
 
     #[test]
@@ -582,7 +592,7 @@ mod tests {
         ];
         for (id, ts) in data {
             let id_ts = to_timestamp_millis(id);
-            let t = chrono::Utc.timestamp_nanos(id_ts * 1000_000);
+            let t = chrono::Utc.timestamp_nanos(id_ts * 1_000_000);
             let td = t.format("%Y-%m-%d").to_string();
             assert_eq!(td, ts.to_string());
         }

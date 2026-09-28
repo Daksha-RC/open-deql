@@ -29,7 +29,7 @@ test.describe("ConfigPanel — Trellis Settings", () => {
 
     await setupBarPanelWithBreakdownAndConfig(page, pm, dashboardName);
 
-    const trellisDropdown = page.locator('[data-test="dashboard-trellis-chart"]');
+    const trellisDropdown = pm.dashboardPanelConfigs.trellisLayout;
     await expect(trellisDropdown).toBeVisible();
 
     // Auto
@@ -48,27 +48,26 @@ test.describe("ConfigPanel — Trellis Settings", () => {
 
     // Custom — columns input appears, set 3, then cap at 16
     await pm.dashboardPanelConfigs.selectTrellisLayout("Custom");
-    const colInput = page.locator('[data-test="trellis-chart-num-of-columns"]');
+    const colInput = pm.dashboardPanelConfigs.trellisNumColumns;
     await expect(colInput).toBeVisible();
-    await colInput.click();
-    await colInput.fill("3");
+    await colInput.locator('[data-test$="-field"]').fill("3");
     await pm.dashboardPanelActions.applyDashboardBtn();
     testLogger.info("Trellis Custom with 3 columns");
     await pm.dashboardPanelActions.waitForChartToRender();
     await pm.dashboardPanelActions.verifyChartHasData(expect);
 
     // Cap at 16
-    await colInput.click();
-    await colInput.fill("20");
-    await colInput.blur();
+    await colInput.locator('[data-test$="-field"]').fill("20");
+    await colInput.locator('[data-test$="-field"]').blur();
     testLogger.info("Trellis columns capped at 16");
     await pm.dashboardPanelActions.applyDashboardBtn();
+    await pm.dashboardPanelActions.waitForChartToRender();
 
     await pm.dashboardPanelActions.savePanel();
     testLogger.info("Verifying trellis Custom layout and 16 columns persist after save");
     await reopenPanelConfig(page, pm);
-    await expect(page.locator('[data-test="dashboard-trellis-chart"]')).toContainText("custom");
-    await expect(page.locator('[data-test="trellis-chart-num-of-columns"]')).toHaveValue("16");
+    await expect(pm.dashboardPanelConfigs.trellisTrigger).toHaveAttribute('data-test-selected-value', 'custom');
+    await expect(pm.dashboardPanelConfigs.trellisNumColumns.locator('[data-test$="-field"]')).toHaveValue("16");
     await pm.dashboardPanelActions.savePanel();
     await cleanupTestDashboard(page, pm, dashboardName);
   });
@@ -79,9 +78,8 @@ test.describe("ConfigPanel — Trellis Settings", () => {
 
     await setupBarPanelWithConfig(page, pm, dashboardName);
 
-    // aria-disabled is on the root q-field wrapper, not the inner native div that data-test resolves to.
-    // Use CSS :has() to find the disabled wrapper that contains the trellis data-test element.
-    await expect(page.locator('.q-field--disabled:has([data-test="dashboard-trellis-chart"])')).toBeVisible();
+    // OSelect disabled state is on the trigger button, not the root wrapper div.
+    await expect(pm.dashboardPanelConfigs.trellisTrigger).toBeDisabled();
     testLogger.info("Trellis disabled with no breakdown field");
 
     await pm.dashboardPanelActions.savePanel();
@@ -93,9 +91,12 @@ test.describe("ConfigPanel — Trellis Settings", () => {
     const dashboardName = generateDashboardName();
 
     await setupBarPanelWithBreakdownAndConfig(page, pm, dashboardName);
+    await expect(pm.dashboardPanelConfigs.trellisTrigger).toBeEnabled();
+    testLogger.info("Trellis enabled before time shift (breakdown present)");
+
     await pm.dashboardPanelConfigs.addTimeShift();
 
-    await expect(page.locator('.q-field--disabled:has([data-test="dashboard-trellis-chart"])')).toBeVisible();
+    await expect(pm.dashboardPanelConfigs.trellisTrigger).toBeDisabled();
     testLogger.info("Trellis disabled with time shifts active");
 
     await pm.dashboardPanelActions.savePanel();
@@ -109,8 +110,12 @@ test.describe("ConfigPanel — Trellis Settings", () => {
     await setupBarPanelWithBreakdownAndConfig(page, pm, dashboardName);
     await pm.dashboardPanelConfigs.selectTrellisLayout("Auto");
     await pm.dashboardPanelActions.applyDashboardBtn();
+    // Settle before interacting with the sidebar again — the toggle below is
+    // clicked while this query would otherwise still be running.
+    await pm.dashboardPanelActions.waitForChartToRender();
 
-    const groupByYAxisToggle = page.locator('[data-test="dashboard-config-trellis-group-by-y-axis"]');
+    const groupByYAxisToggle = pm.dashboardPanelConfigs.trellisGroupByYAxis;
+    await pm.dashboardPanelConfigs.scrollSidebarToElement(groupByYAxisToggle);
     await expect(groupByYAxisToggle).toBeVisible();
     await groupByYAxisToggle.click();
     await pm.dashboardPanelActions.applyDashboardBtn();
@@ -121,7 +126,7 @@ test.describe("ConfigPanel — Trellis Settings", () => {
     await pm.dashboardPanelActions.savePanel();
     testLogger.info("Verifying group by Y axis enabled persists after save");
     await reopenPanelConfig(page, pm);
-    await expect(page.locator('[data-test="dashboard-config-trellis-group-by-y-axis"]')).toHaveAttribute("aria-checked", "true");
+    await expect(pm.dashboardPanelConfigs.trellisGroupByYAxis.locator('[data-test$="-btn"]')).toHaveAttribute("aria-checked", "true");
     await pm.dashboardPanelActions.savePanel();
     await cleanupTestDashboard(page, pm, dashboardName);
   });

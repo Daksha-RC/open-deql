@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { ref } from "vue";
 import { usePanelSQLExecutor } from "./usePanelSQLExecutor";
 
@@ -53,14 +53,16 @@ const makeStore = () => ({
   },
 });
 
-const makePanelSchema = (queries: any[] = [
-  {
-    query: "SELECT * FROM logs",
-    vrlFunctionQuery: "",
-    fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
-    config: { time_shift: [] },
-  },
-]) =>
+const makePanelSchema = (
+  queries: any[] = [
+    {
+      query: "SELECT * FROM logs",
+      vrlFunctionQuery: "",
+      fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+      config: { time_shift: [] },
+    },
+  ],
+) =>
   ref({
     id: "panel-sql-1",
     title: "SQL Panel",
@@ -151,12 +153,7 @@ describe("usePanelSQLExecutor", () => {
       await executeSQL(0, 300_000_000, null);
 
       expect(replaceQueryValue).toHaveBeenCalledTimes(1);
-      expect(replaceQueryValue).toHaveBeenCalledWith(
-        "SELECT * FROM logs",
-        0,
-        300_000_000,
-        "sql",
-      );
+      expect(replaceQueryValue).toHaveBeenCalledWith("SELECT * FROM logs", 0, 300_000_000, "sql");
     });
 
     it("calls applyDynamicVariables after replaceQueryValue", async () => {
@@ -167,7 +164,7 @@ describe("usePanelSQLExecutor", () => {
       expect(applyDynamicVariables).toHaveBeenCalledWith("SELECT * FROM logs", "sql");
     });
 
-    it("calls fetchQueryDataWithHttpStream with correct payload shape", async () => {
+    it("calls fetchQueryDataWithHttpStream with correct payload shape for single query", async () => {
       const { ctx, fetchQueryDataWithHttpStream } = makeCtx();
       const { executeSQL } = usePanelSQLExecutor(ctx);
       await executeSQL(0, 300_000_000, null);
@@ -176,7 +173,10 @@ describe("usePanelSQLExecutor", () => {
       const [payload] = fetchQueryDataWithHttpStream.mock.calls[0];
       expect(payload.type).toBe("histogram");
       expect(payload.org_id).toBe("test-org");
+      // single query uses _search_stream: sql is a string, not an array
+      expect(typeof payload.queryReq.query.sql).toBe("string");
       expect(payload.queryReq.query.sql).toBe("SELECT * FROM logs");
+      expect(payload.meta.currentQueryIndex).toBe(0);
     });
 
     it("calls addTraceId after initiating fetch", async () => {
@@ -185,6 +185,15 @@ describe("usePanelSQLExecutor", () => {
       await executeSQL(0, 300_000_000, null);
 
       expect(addTraceId).toHaveBeenCalled();
+    });
+
+    it("single query uses standard handleSearchResponse handler", async () => {
+      const { ctx, fetchQueryDataWithHttpStream, handleSearchResponse } = makeCtx();
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const [, handlers] = fetchQueryDataWithHttpStream.mock.calls[0];
+      expect(handlers.data).toBe(handleSearchResponse);
     });
 
     it("includes panel metadata in payload.meta", async () => {
@@ -207,7 +216,7 @@ describe("usePanelSQLExecutor", () => {
 
       // Re-import after mock override
       const { usePanelSQLExecutor: freshFn } = await import("./usePanelSQLExecutor");
-      const { ctx, fetchQueryDataWithHttpStream, state } = makeCtx();
+      const { ctx, state } = makeCtx();
 
       const { executeSQL } = freshFn(ctx);
       await executeSQL(0, 300_000_000, null);
@@ -281,9 +290,7 @@ describe("usePanelSQLExecutor", () => {
       await executeSQL(100, 200, null);
 
       const rmd = state.resultMetaData[0]?.[0];
-      expect(rmd.converted_histogram_query).toBe(
-        "SELECT histogram(_timestamp) FROM default",
-      );
+      expect(rmd.converted_histogram_query).toBe("SELECT histogram(_timestamp) FROM default");
       expect(rmd.order_by).toBe("asc");
       expect(rmd.some_other_field).toBe("preserved");
       // And time_offset is overridden with the executor's arguments
@@ -291,7 +298,7 @@ describe("usePanelSQLExecutor", () => {
     });
 
     it("skips fetch and sets partial data flag when abort signal is aborted", async () => {
-      const { ctx, fetchQueryDataWithHttpStream, state } = makeCtx();
+      const { ctx, state } = makeCtx();
       const abortController = new AbortController();
 
       // Set up fetchQueryDataWithHttpStream to abort before call
@@ -328,7 +335,7 @@ describe("usePanelSQLExecutor", () => {
       expect(refreshAnnotations).toHaveBeenCalled();
     });
 
-    it("passes clear_cache flag from shouldRefreshWithoutCache", async () => {
+    it("passes clear_cache flag from shouldRefreshWithoutCache for single query", async () => {
       const { ctx, fetchQueryDataWithHttpStream } = makeCtx({
         shouldRefreshWithoutCache: ref(true),
       });
@@ -336,6 +343,7 @@ describe("usePanelSQLExecutor", () => {
       await executeSQL(0, 300_000_000, null);
 
       const [payload] = fetchQueryDataWithHttpStream.mock.calls[0];
+      // single query path uses clear_cache
       expect(payload.clear_cache).toBe(true);
     });
 
@@ -355,11 +363,15 @@ describe("usePanelSQLExecutor", () => {
       const { executeSQL } = usePanelSQLExecutor(ctx);
       await executeSQL(0, 300_000_000, null);
 
-      // With time_shift, a different code path fires (multi-query streaming)
+      // Time-shift expands to 2 entries (original + 1 shift), all batched in one call
       expect(addTraceId).toHaveBeenCalled();
+      expect(fetchQueryDataWithHttpStream).toHaveBeenCalledTimes(1);
+      const [payload] = fetchQueryDataWithHttpStream.mock.calls[0];
+      expect(Array.isArray(payload.queryReq.query.sql)).toBe(true);
+      expect(payload.queryReq.query.sql).toHaveLength(2);
     });
 
-    it("propagates errors from applyDynamicVariables (no internal catch in simple path)", async () => {
+    it("propagates errors from applyDynamicVariables", async () => {
       const { ctx } = makeCtx();
       ctx.applyDynamicVariables = vi.fn(async () => {
         throw new Error("variable substitution failed");
@@ -369,6 +381,156 @@ describe("usePanelSQLExecutor", () => {
       await expect(executeSQL(0, 300_000_000, null)).rejects.toThrow(
         "variable substitution failed",
       );
+    });
+
+    it("batches multiple queries into a single multi-stream call", async () => {
+      const panelSchema = makePanelSchema([
+        {
+          query: "SELECT * FROM logs",
+          vrlFunctionQuery: "",
+          fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+        {
+          query: "SELECT * FROM metrics",
+          vrlFunctionQuery: "",
+          fields: { stream: "metrics", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+      ]);
+
+      const { ctx, fetchQueryDataWithHttpStream } = makeCtx({ panelSchema });
+      // Batching of multiple distinct queries into a single multi-stream call
+      // is implemented by executeMultiSQL (the _search_multi_stream path).
+      const { executeMultiSQL } = usePanelSQLExecutor(ctx);
+      await executeMultiSQL(0, 300_000_000, null, "logs");
+
+      // Should be exactly 1 API call for both queries
+      expect(fetchQueryDataWithHttpStream).toHaveBeenCalledTimes(1);
+      const [payload] = fetchQueryDataWithHttpStream.mock.calls[0];
+      expect(payload.queryReq.query.sql).toHaveLength(2);
+      expect(payload.queryReq.query.sql[0].sql).toBe("SELECT * FROM logs");
+      expect(payload.queryReq.query.sql[1].sql).toBe("SELECT * FROM metrics");
+      expect(payload.queryReq.query.per_query_response).toBe(true);
+    });
+
+    it("initializes state arrays for all queries before fetch", async () => {
+      const panelSchema = makePanelSchema([
+        {
+          query: "SELECT * FROM logs",
+          vrlFunctionQuery: "",
+          fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+        {
+          query: "SELECT * FROM metrics",
+          vrlFunctionQuery: "",
+          fields: { stream: "metrics", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+      ]);
+
+      const { ctx, state } = makeCtx({ panelSchema });
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      expect(state.data).toHaveLength(2);
+      expect(state.metadata.queries).toHaveLength(2);
+      expect(state.resultMetaData).toHaveLength(2);
+    });
+
+    it("sets tabName from query definition into metadata for single query", async () => {
+      const panelSchema = makePanelSchema([
+        {
+          query: "SELECT * FROM logs",
+          tabName: "My Logs",
+          vrlFunctionQuery: "",
+          fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+      ]);
+
+      const { ctx, state } = makeCtx({ panelSchema });
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      expect(state.metadata.queries[0].tabName).toBe("My Logs");
+    });
+
+    it("sets tabName from each query into metadata for multi-query", async () => {
+      const panelSchema = makePanelSchema([
+        {
+          query: "SELECT * FROM logs",
+          tabName: "Ziox",
+          vrlFunctionQuery: "",
+          fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+        {
+          query: "SELECT * FROM metrics",
+          tabName: "Monitoring",
+          vrlFunctionQuery: "",
+          fields: { stream: "metrics", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [] },
+        },
+      ]);
+
+      const { ctx, state } = makeCtx({ panelSchema });
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      expect(state.metadata.queries[0].tabName).toBe("Ziox");
+      expect(state.metadata.queries[1].tabName).toBe("Monitoring");
+    });
+
+    it("sets tabName as undefined when not defined in query", async () => {
+      const { ctx, state } = makeCtx();
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      expect(state.metadata.queries[0].tabName).toBeUndefined();
+    });
+
+    it("sets panelQueryIndex on all time-shift metadata entries including the current-period entry", async () => {
+      const panelSchema = makePanelSchema([
+        {
+          query: "SELECT * FROM logs",
+          vrlFunctionQuery: "",
+          fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [{ offSet: "1d" }] },
+        },
+      ]);
+
+      const { ctx, state } = makeCtx({ panelSchema });
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      // 2 entries: current period (index 0) + 1 comparison (index 1)
+      expect(state.metadata.queries).toHaveLength(2);
+      // Both must carry panelQueryIndex: 0 (first query in panelSchema.queries)
+      expect(state.metadata.queries[0].panelQueryIndex).toBe(0);
+      expect(state.metadata.queries[1].panelQueryIndex).toBe(0);
+    });
+
+    it("sets correct panelQueryIndex for each time-shift entry when there are multiple time shifts", async () => {
+      const panelSchema = makePanelSchema([
+        {
+          query: "SELECT * FROM logs",
+          vrlFunctionQuery: "",
+          fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+          config: { time_shift: [{ offSet: "1d" }, { offSet: "7d" }] },
+        },
+      ]);
+
+      const { ctx, state } = makeCtx({ panelSchema });
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      // 3 entries: current + 2 comparisons
+      expect(state.metadata.queries).toHaveLength(3);
+      expect(state.metadata.queries[0].panelQueryIndex).toBe(0);
+      expect(state.metadata.queries[1].panelQueryIndex).toBe(0);
+      expect(state.metadata.queries[2].panelQueryIndex).toBe(0);
     });
   });
 
@@ -512,6 +674,246 @@ describe("usePanelSQLExecutor", () => {
 
       const [payload] = fetchQueryDataWithHttpStream.mock.calls[0];
       expect(payload.meta.fallback_order_by_col).toBeNull();
+    });
+  });
+
+  // ─── metric sparkline (isolated 2nd is_ui_histogram fetch) ────────────────────
+
+  describe("metric sparkline histogram fetch", () => {
+    const metricQuery = {
+      query: "SELECT count(_timestamp) as y_axis_1 FROM logs",
+      vrlFunctionQuery: "",
+      fields: { stream: "logs", stream_type: "logs", x: [{ alias: "ts" }] },
+      config: { time_shift: [] },
+    };
+    const makeMetricCtx = (sparklineEnabled: boolean) =>
+      makeCtx({
+        panelSchema: ref({
+          id: "panel-metric-1",
+          title: "Metric Panel",
+          type: "metric",
+          queryType: "sql",
+          config: sparklineEnabled ? { sparkline: { enabled: true } } : {},
+          queries: [metricQuery],
+        }),
+      });
+
+    it("fires a 2nd is_ui_histogram request when sparkline is enabled", async () => {
+      const { ctx, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const histCall = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      expect(histCall).toBeTruthy();
+    });
+
+    it("does NOT fire the 2nd fetch when sparkline is disabled", async () => {
+      const { ctx, fetchQueryDataWithHttpStream } = makeMetricCtx(false);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const histCall = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      expect(histCall).toBeUndefined();
+    });
+
+    it("captures hits from the stream response (2nd handler arg), not the request payload", async () => {
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const histCall = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      const [payload, handlers] = histCall;
+      // 1st arg is our OWN request payload (type "histogram"); 2nd is the stream
+      // response. A handler that reads the request's `type` would capture nothing.
+      expect(payload.type).toBe("histogram");
+      const hits = [
+        { zo_sql_key: "2026-01-01T00:00:00", zo_sql_num: 5 },
+        { zo_sql_key: "2026-01-01T00:01:00", zo_sql_num: 7 },
+      ];
+      handlers.data(payload, {
+        type: "search_response_hits",
+        content: { results: { hits } },
+      });
+      handlers.complete();
+
+      expect(state.sparklineData[0]).toEqual(hits);
+    });
+
+    it("streams hits: sparklineData updates on each chunk, not only on complete", async () => {
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const [payload, handlers] = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+
+      const chunk1 = [{ zo_sql_key: 1, zo_sql_num: 5 }];
+      handlers.data(payload, {
+        type: "search_response_hits",
+        content: { results: { hits: chunk1 } },
+      });
+      // Committed on the chunk, before complete() runs.
+      expect(state.sparklineData[0]).toEqual(chunk1);
+
+      const chunk2 = [{ zo_sql_key: 2, zo_sql_num: 7 }];
+      handlers.data(payload, {
+        type: "search_response_hits",
+        content: { results: { hits: chunk2 } },
+      });
+      expect(state.sparklineData[0]).toEqual([...chunk1, ...chunk2]);
+
+      handlers.complete();
+      expect(state.sparklineData[0]).toEqual([...chunk1, ...chunk2]);
+    });
+
+    it("drops a stale sparkline stream that completes after a newer run reset the state", async () => {
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+
+      // Run 1 fires the sparkline stream, but it hasn't completed yet.
+      await executeSQL(0, 300_000_000, null);
+      const [stalePayload, staleHandlers] = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+
+      // Run 2 (e.g. a new time range) resets state and bumps the run token.
+      await executeSQL(0, 600_000_000, null);
+
+      // The OLD stream now completes with stale hits — must be ignored.
+      staleHandlers.data(stalePayload, {
+        type: "search_response_hits",
+        content: { results: { hits: [{ zo_sql_key: "old", zo_sql_num: 1 }] } },
+      });
+      staleHandlers.complete();
+      expect(state.sparklineData[0]).toBeUndefined();
+
+      // The current run's stream still writes normally.
+      const histCalls = fetchQueryDataWithHttpStream.mock.calls.filter(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      const [freshPayload, freshHandlers] = histCalls[histCalls.length - 1];
+      const freshHits = [{ zo_sql_key: "new", zo_sql_num: 9 }];
+      freshHandlers.data(freshPayload, {
+        type: "search_response_hits",
+        content: { results: { hits: freshHits } },
+      });
+      freshHandlers.complete();
+      expect(state.sparklineData[0]).toEqual(freshHits);
+    });
+
+    it("fires a per-query is_ui_histogram fetch for a multi-query metric grid", async () => {
+      const panelSchema = ref({
+        id: "panel-metric-multi",
+        title: "Multi Metric",
+        type: "metric",
+        queryType: "sql",
+        config: { sparkline: { enabled: true } },
+        queries: [
+          {
+            query: "SELECT count(*) as y FROM a",
+            vrlFunctionQuery: "",
+            fields: { stream: "a", stream_type: "logs", x: [{ alias: "ts" }] },
+            config: { time_shift: [] },
+          },
+          {
+            query: "SELECT count(*) as y FROM b",
+            vrlFunctionQuery: "",
+            fields: { stream: "b", stream_type: "logs", x: [{ alias: "ts" }] },
+            config: { time_shift: [] },
+          },
+        ],
+      });
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeCtx({ panelSchema });
+      const { executeMultiSQL } = usePanelSQLExecutor(ctx);
+      await executeMultiSQL(0, 300_000_000, null, "logs");
+
+      // One isolated histogram fetch per query, each targeting its own grid cell.
+      const histCalls = fetchQueryDataWithHttpStream.mock.calls.filter(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      expect(histCalls).toHaveLength(2);
+      expect(histCalls[0][0].meta.currentQueryIndex).toBe(0);
+      expect(histCalls[1][0].meta.currentQueryIndex).toBe(1);
+
+      // Completing each stream writes to the matching sparklineData slot.
+      const hitsA = [
+        { zo_sql_key: "1", zo_sql_num: 1 },
+        { zo_sql_key: "2", zo_sql_num: 2 },
+      ];
+      const hitsB = [
+        { zo_sql_key: "1", zo_sql_num: 3 },
+        { zo_sql_key: "2", zo_sql_num: 4 },
+      ];
+      histCalls[0][1].data(histCalls[0][0], {
+        type: "search_response_hits",
+        content: { results: { hits: hitsA } },
+      });
+      histCalls[0][1].complete();
+      histCalls[1][1].data(histCalls[1][0], {
+        type: "search_response_hits",
+        content: { results: { hits: hitsB } },
+      });
+      histCalls[1][1].complete();
+
+      expect(state.sparklineData[0]).toEqual(hitsA);
+      expect(state.sparklineData[1]).toEqual(hitsB);
+    });
+
+    const HISTOGRAM_UNAVAILABLE = {
+      code: 20013,
+      message: "Search histogram not available",
+      error_detail: "Histogram unavailable for CTEs, DISTINCT, UNION, JOIN and LIMIT queries.",
+    };
+
+    it("sets sparklineWarning when the histogram-unavailable error (20013) arrives via the data event", async () => {
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const histCall = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      const [payload, handlers] = histCall;
+      // The API delivers this as a data event of type "error" (see handleSearchResponse),
+      // not the error callback — the handler must catch it there.
+      handlers.data(payload, { type: "error", content: HISTOGRAM_UNAVAILABLE });
+
+      expect(state.sparklineWarning).toBe(HISTOGRAM_UNAVAILABLE.error_detail);
+    });
+
+    it("also sets sparklineWarning when 20013 arrives via the error callback", async () => {
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const histCall = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      const [payload, handlers] = histCall;
+      handlers.error(payload, { type: "error", content: HISTOGRAM_UNAVAILABLE });
+
+      expect(state.sparklineWarning).toBe(HISTOGRAM_UNAVAILABLE.error_detail);
+    });
+
+    it("stays silent for other (transient) histogram errors", async () => {
+      const { ctx, state, fetchQueryDataWithHttpStream } = makeMetricCtx(true);
+      const { executeSQL } = usePanelSQLExecutor(ctx);
+      await executeSQL(0, 300_000_000, null);
+
+      const histCall = fetchQueryDataWithHttpStream.mock.calls.find(
+        ([p]: any) => p?.meta?.is_ui_histogram === true,
+      );
+      const [payload, handlers] = histCall;
+      handlers.error(payload, { type: "error", content: { code: 500, message: "boom" } });
+
+      expect(state.sparklineWarning).toBe("");
     });
   });
 });

@@ -1,4 +1,5 @@
 const { test, expect, navigateToBase } = require("../utils/enhanced-baseFixtures.js");
+const testLogger = require('../utils/test-logger.js');
 import { ingestion } from "./utils/dashIngestion.js";
 import PageManager from "../../pages/page-manager.js";
 import { waitForDashboardPage, deleteDashboard } from "./utils/dashCreation.js";
@@ -21,7 +22,8 @@ const { safeWaitForHidden, safeWaitForNetworkIdle, safeWaitForDOMContentLoaded }
 test.describe.configure({ mode: "parallel" });
 
 test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases", () => {
-  test.beforeEach(async ({ page }) => {
+  test.beforeEach(async ({ page }, testInfo) => {
+    testLogger.testStart(testInfo.title, testInfo.file);
     await navigateToBase(page);
     await ingestion(page);
   });
@@ -50,12 +52,7 @@ test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases",
     await assertPanelTimePickerInModal(page);
 
     // Step 5: Change time to "Last 6d" in modal
-    const modalPicker = page.locator('[data-test="dashboard-viewpanel-date-time-picker"]');
-    await modalPicker.click();
-    await page.locator('[data-test="date-time-relative-6-d-btn"]').click();
-
-    // Step 6: Click Apply
-    await page.locator('[data-test="date-time-apply-btn"]').click();
+    await pm.dashboardPanelTime.changeViewPanelDateTime('6-d');
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
 
     // Step 7: Verify URL remains unchanged (View Panel time is temporary)
@@ -65,7 +62,7 @@ test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases",
     await pm.dashboardPanelTime.closeViewPanelModal();
 
     // Step 9: Verify Panel in dashboard still shows "Last 1h" (not affected by View Panel change)
-    const pickerText = await page.locator(`[data-test="panel-time-picker-${panelId}"]`).textContent();
+    const pickerText = await pm.dashboardPanelTime.getPanelTimeDisplayText(panelId);
     expect(pickerText).toContain("1");
     expect(pickerText).not.toContain("7");
 
@@ -106,7 +103,7 @@ test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases",
     await assertPanelTimeInURL(page, panelId, "1d");
 
     // Step 7: Verify panel picker shows "1d"
-    const pickerText = await page.locator(`[data-test="panel-time-picker-${panelId}"]`).textContent();
+    const pickerText = await pm.dashboardPanelTime.getPanelTimeDisplayText(panelId);
     expect(pickerText).toContain("1");
 
     // Step 8: Reload to verify persistence
@@ -242,8 +239,7 @@ test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases",
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
 
     // Should fallback to config or global (should not crash)
-    const panelPicker = page.locator(`[data-test="panel-time-picker-${panelIds[0]}"]`);
-    expect(await panelPicker.isVisible()).toBe(true);
+    expect(await pm.dashboardPanelTime.isPanelTimePickerVisible(panelIds[0])).toBe(true);
 
     // Step 3: Test missing panel in URL
     const missingPanelURL = `${currentURL}&pt-period.nonexistent=1h`;
@@ -251,7 +247,7 @@ test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases",
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
 
     // Should ignore unknown panel (should not crash)
-    expect(await panelPicker.isVisible()).toBe(true);
+    expect(await pm.dashboardPanelTime.isPanelTimePickerVisible(panelIds[0])).toBe(true);
 
     // Step 5: Test concurrent changes
     await pm.dashboardPanelTime.changePanelTimeInView(panelIds[0], "1-d", true);
@@ -262,10 +258,10 @@ test.describe("Dashboard Panel Time - Part 3: Advanced Features and Edge Cases",
 
     // Step 7: Test quick successive changes
     await pm.dashboardPanelTime.clickPanelTimePicker(panelIds[0]);
-    await page.locator('[data-test="date-time-relative-1-h-btn"]').click();
-    await page.locator('[data-test="date-time-relative-6-d-btn"]').click();
-    await page.locator('[data-test="date-time-relative-1-m-btn"]').click();
-    await page.locator('[data-test="date-time-apply-btn"]').click();
+    await pm.dashboardPanelTime.timeRangeBtn('1-h').click();
+    await pm.dashboardPanelTime.timeRangeBtn('6-d').click();
+    await pm.dashboardPanelTime.timeRangeBtn('1-m').click();
+    await pm.dashboardPanelTime.clickDateTimeApply();
     await safeWaitForNetworkIdle(page, { timeout: 5000 });
 
     // Last change (1m) should be applied

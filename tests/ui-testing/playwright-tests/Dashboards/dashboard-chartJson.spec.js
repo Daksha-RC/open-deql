@@ -1,5 +1,8 @@
-import { test, expect } from "../baseFixtures.js";
-import { login } from "./utils/dashLogin.js";
+const {
+  test,
+  expect,
+  navigateToBase,
+} = require("../utils/enhanced-baseFixtures.js");
 import { ingestionForDashboardChartJson } from "./utils/dashIngestion.js";
 
 import { waitForDashboardPage, deleteDashboard } from "./utils/dashCreation.js";
@@ -7,8 +10,46 @@ import { waitForDateTimeButtonToBeEnabled } from "../../pages/dashboardPages/das
 import PageManager from "../../pages/page-manager";
 const testLogger = require('../utils/test-logger.js');
 
-const randomDashboardName =
-  "Dashboard_" + Math.random().toString(36).substr(2, 9);
+const CHART_JSON_STREAM = "kubernetes";
+
+// Generated per test: these run in parallel, and a module-scope name is also
+// reused across CI retries (they share the worker), so a run that dies before
+// its delete leaves same-named strays behind.
+const generateDashboardName = () =>
+  "Dashboard_" + Math.random().toString(36).slice(2, 11) + "_" + Date.now();
+
+/**
+ * Wait until the freshly ingested stream is actually queryable.
+ *
+ * Replaces a flat 2s sleep after ingestion: the ingest -> queryable delay scales
+ * with load, so a constant is simultaneously wasteful on an idle box and too
+ * short on a busy one. The ingest POST itself is already awaited; what this
+ * covers is the stream becoming visible to the stream/schema API that the panel
+ * editor reads when selecting it.
+ */
+async function waitForStreamReady(page, streamName = CHART_JSON_STREAM) {
+  const orgId = process.env.ORGNAME || "default";
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(
+          async ({ orgId, streamName }) => {
+            const r = await fetch(
+              `/api/${orgId}/streams/${streamName}/schema?type=logs`,
+              { headers: { Accept: "application/json" } }
+            );
+            return r.ok;
+          },
+          { orgId, streamName }
+        ),
+      {
+        timeout: 30000,
+        intervals: [300, 600, 1200, 2000],
+        message: `stream "${streamName}" did not become queryable after ingestion`,
+      }
+    )
+    .toBe(true);
+}
 
 test.describe.configure({ mode: "parallel" });
 
@@ -17,16 +58,16 @@ test.describe.configure({ mode: "parallel" });
 test.describe("dashboard UI testcases", () => {
   test.beforeEach(async ({ page }) => {
     testLogger.debug("Test setup - beforeEach hook executing");
-    await login(page);
-    await page.waitForTimeout(1000);
+    await navigateToBase(page);
     await ingestionForDashboardChartJson(page);
-    await page.waitForTimeout(2000);
+    await waitForStreamReady(page);
   });
 
   test("Should display data as JSON when the 'Render Data as JSON/Array' option is selected", async ({
     page,
   }) => {
     const pm = new PageManager(page);
+    const dashboardName = generateDashboardName();
     const panelName =
       pm.dashboardPanelActions.generateUniquePanelName("panel-test");
 
@@ -35,7 +76,7 @@ test.describe("dashboard UI testcases", () => {
     await waitForDashboardPage(page);
 
     // Create a new dashboard
-    await pm.dashboardCreate.createDashboard(randomDashboardName);
+    await pm.dashboardCreate.createDashboard(dashboardName);
     await pm.dashboardCreate.addPanel();
 
     // Select a stream
@@ -68,23 +109,29 @@ test.describe("dashboard UI testcases", () => {
       ""
     );
 
-    await page.locator('[data-test="dashboard-x-item-x_axis_1"]').click();
-    await page.getByRole('checkbox', { name: 'Render Data as JSON / Array' }).click();
-
-    // Close the field options popover so it doesn't block Apply
-    await page.keyboard.press('Escape');
-
-    // Set date-time and timezone for table chart
+    // Set date-time and apply once so the panel renders with data before
+    // we toggle JSON rendering on the field — mirrors test 4's pattern,
+    // which avoids the race between the v-model toggle on
+    // `fields.showFieldAsJson` and the first panel-schema build.
     await pm.dateTimeHelper.setRelativeTimeRange("6-w");
     await pm.dashboardPanelActions.applyDashboardBtn();
+    await pm.dashboardPanelActions.waitForChartToRender();
 
-    // Verify the table chart is visible
+    await pm.chartTypeSelector.openFieldPropertyPopup("x_axis_1", "x");
+    await pm.chartTypeSelector.toggleShowFieldAsJson();
+
+    // Close the field options popover so it doesn't block Apply
+    await pm.chartTypeSelector.dismissFieldPropertyPopup();
+
+    // Re-apply with showFieldAsJson now set — this triggers a fresh schema
+    // build that includes the JSON-renderer column meta.
+    await pm.dashboardPanelActions.applyDashboardBtn();
     await pm.dashboardPanelActions.waitForChartToRender();
 
     // Verify JSON data is rendered in the table
-    await expect(page.locator('.json-field-renderer').first()).toBeVisible({ timeout: 30000 });
-    await expect(page.locator('.json-key:has-text("domain")').first()).toBeVisible();
-    await expect(page.locator('.json-value:has-text("service.local")').first()).toBeVisible();
+    await pm.chartTypeSelector.verifyJsonRendererVisible();
+    await pm.chartTypeSelector.verifyJsonContainsKey("domain");
+    await pm.chartTypeSelector.verifyJsonContainsValue("service.local");
 
     // Edit the panel name
     await pm.dashboardPanelActions.addPanelName(panelName);
@@ -92,7 +139,7 @@ test.describe("dashboard UI testcases", () => {
 
     // Delete the panel
     await pm.dashboardCreate.backToDashboardList();
-    await deleteDashboard(page, randomDashboardName);
+    await deleteDashboard(page, dashboardName);
   });
 });
 
@@ -100,17 +147,16 @@ test.describe("dashboard UI testcases", () => {
 test.describe("dashboard custom query mode field options testcases", () => {
   test.beforeEach(async ({ page }) => {
     testLogger.debug("Test setup - beforeEach hook executing for custom mode tests");
-    await login(page);
-    await page.waitForTimeout(1000);
+    await navigateToBase(page);
     await ingestionForDashboardChartJson(page);
-    await page.waitForTimeout(2000);
+    await waitForStreamReady(page);
   });
 
   test("Should show 'Mark this field as non-timestamp' checkbox in custom query mode for table chart", {
     tag: ['@dashboardChartJson', '@customMode', '@P0']
   }, async ({ page }) => {
     const pm = new PageManager(page);
-    const dashName = "Dashboard_" + Math.random().toString(36).substr(2, 9);
+    const dashName = generateDashboardName();
     const panelName =
       pm.dashboardPanelActions.generateUniquePanelName("custom-nontimestamp");
 
@@ -154,7 +200,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     testLogger.info('Non-timestamp checkbox is visible and toggleable in custom mode');
 
     // Close the popup
-    await page.keyboard.press('Escape');
+    await pm.chartTypeSelector.dismissFieldPropertyPopup();
 
     // Save and cleanup
     await pm.dashboardPanelActions.addPanelName(panelName);
@@ -167,7 +213,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     tag: ['@dashboardChartJson', '@customMode', '@P0']
   }, async ({ page }) => {
     const pm = new PageManager(page);
-    const dashName = "Dashboard_" + Math.random().toString(36).substr(2, 9);
+    const dashName = generateDashboardName();
     const panelName =
       pm.dashboardPanelActions.generateUniquePanelName("custom-json");
 
@@ -211,7 +257,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     testLogger.info('JSON/Array checkbox is visible and toggleable in custom mode');
 
     // Close the popup
-    await page.keyboard.press('Escape');
+    await pm.chartTypeSelector.dismissFieldPropertyPopup();
 
     // Save and cleanup
     await pm.dashboardPanelActions.addPanelName(panelName);
@@ -224,7 +270,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     tag: ['@dashboardChartJson', '@customMode', '@P1']
   }, async ({ page }) => {
     const pm = new PageManager(page);
-    const dashName = "Dashboard_" + Math.random().toString(36).substr(2, 9);
+    const dashName = generateDashboardName();
     const panelName =
       pm.dashboardPanelActions.generateUniquePanelName("custom-json-render");
 
@@ -257,15 +303,17 @@ test.describe("dashboard custom query mode field options testcases", () => {
     await pm.chartTypeSelector.openFieldPropertyPopup("x_axis_1", "x");
     await pm.chartTypeSelector.toggleShowFieldAsJson();
 
-    // Close the popup and re-apply
-    await page.keyboard.press('Escape');
+    // Close the popup before applying. The popup is an ODropdown portaled outside the
+    // axis-item button; press Escape to dismiss it before clicking Apply — otherwise
+    // CI runs occasionally see Apply intercepted by the still-mounted menu.
+    // Wait for the JSON-toggle checkbox (which only renders inside the open popup)
+    // to detach before continuing, so the menu is guaranteed gone.
+    await pm.chartTypeSelector.dismissFieldPropertyPopup();
     await pm.dashboardPanelActions.applyDashboardBtn();
     await pm.dashboardPanelActions.waitForChartToRender();
 
     // Verify JSON data is rendered in the table (element may be in overflow, check DOM presence)
-    const jsonRenderers = page.locator('.json-field-renderer');
-    await jsonRenderers.first().waitFor({ state: 'attached', timeout: 30000 });
-    const jsonCount = await jsonRenderers.count();
+    const jsonCount = await pm.chartTypeSelector.getJsonRendererCount();
     expect(jsonCount).toBeGreaterThan(0);
 
     testLogger.info('JSON data rendered successfully in custom query mode', { jsonCount });
@@ -281,7 +329,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     tag: ['@dashboardChartJson', '@customMode', '@P2']
   }, async ({ page }) => {
     const pm = new PageManager(page);
-    const dashName = "Dashboard_" + Math.random().toString(36).substr(2, 9);
+    const dashName = generateDashboardName();
     const panelName =
       pm.dashboardPanelActions.generateUniquePanelName("custom-tabs-hidden");
 
@@ -323,7 +371,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     testLogger.info('Build/Raw tabs hidden, checkboxes visible in custom mode');
 
     // Close the popup
-    await page.keyboard.press('Escape');
+    await pm.chartTypeSelector.dismissFieldPropertyPopup();
 
     // Save and cleanup
     await pm.dashboardPanelActions.addPanelName(panelName);
@@ -336,7 +384,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     tag: ['@dashboardChartJson', '@customMode', '@P2']
   }, async ({ page }) => {
     const pm = new PageManager(page);
-    const dashName = "Dashboard_" + Math.random().toString(36).substr(2, 9);
+    const dashName = generateDashboardName();
     const panelName =
       pm.dashboardPanelActions.generateUniquePanelName("custom-both-opts");
 
@@ -391,7 +439,7 @@ test.describe("dashboard custom query mode field options testcases", () => {
     testLogger.info('Both checkboxes enabled simultaneously in custom mode');
 
     // Close the popup
-    await page.keyboard.press('Escape');
+    await pm.chartTypeSelector.dismissFieldPropertyPopup();
 
     // Save and cleanup
     await pm.dashboardPanelActions.addPanelName(panelName);

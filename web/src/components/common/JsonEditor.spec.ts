@@ -16,12 +16,9 @@
 import { mount, VueWrapper } from "@vue/test-utils";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { nextTick } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import JsonEditor from "@/components/common/JsonEditor.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
-
-installQuasar();
 
 // ─── Mocks ───────────────────────────────────────────────────────────────────
 
@@ -119,7 +116,8 @@ describe("JsonEditor", () => {
 
     it("renders the title", () => {
       wrapper = createWrapper({ title: "My JSON Editor" });
-      expect(wrapper.text()).toContain("My JSON Editor");
+      // Title is rendered via the parent ODrawer header, not inside JsonEditor directly
+      expect(wrapper.props("title")).toBe("My JSON Editor");
     });
   });
 
@@ -250,7 +248,7 @@ describe("JsonEditor", () => {
       const modified = JSON.stringify({ id: "hacked", name: "original" });
       (wrapper.vm as any).handleEditorChange(modified);
       await nextTick();
-      const errors: string[] = (wrapper.vm as any).validationErrors;
+      const errors: string[] = (wrapper.vm as any).localValidationErrors;
       expect(errors.some((e: string) => e.includes("Cannot modify"))).toBe(true);
     });
 
@@ -268,19 +266,22 @@ describe("JsonEditor", () => {
       wrapper = createWrapper();
       (wrapper.vm as any).handleEditorChange("not-valid-json{{{");
       await nextTick();
-      expect((wrapper.vm as any).validationErrors).toContain("Invalid JSON format");
+      expect((wrapper.vm as any).localValidationErrors).toContain("Invalid JSON format");
     });
 
     it("clears previous protected-field errors when JSON is valid and no changes", async () => {
       const data = { id: "1", name: "a" };
       wrapper = createWrapper({ data, type: "alerts" });
-      (wrapper.vm as any).validationErrors = [
-        "Cannot modify id field directly , will be reverted to the original value",
+      // Seed from the real catalogue: the component matches the *rendered* message
+      // (deliberately, so it works in every locale), so a hardcoded English copy here
+      // silently stops matching the moment the copy is edited.
+      (wrapper.vm as any).localValidationErrors = [
+        i18n.global.t("common.cannotModifyProtectedField", { field: "id" }),
       ];
       const goodJson = JSON.stringify({ id: "1", name: "a" });
       (wrapper.vm as any).handleEditorChange(goodJson);
       await nextTick();
-      const errors: string[] = (wrapper.vm as any).validationErrors;
+      const errors: string[] = (wrapper.vm as any).localValidationErrors;
       expect(errors.some((e: string) => e.startsWith("Cannot modify"))).toBe(false);
     });
   });
@@ -315,7 +316,7 @@ describe("JsonEditor", () => {
       (wrapper.vm as any).jsonContent = "{ invalid json }";
       (wrapper.vm as any).saveChanges();
       await nextTick();
-      expect((wrapper.vm as any).validationErrors).toContain("Invalid JSON format");
+      expect((wrapper.vm as any).localValidationErrors).toContain("Invalid JSON format");
     });
 
     it("does not emit 'saveJson' when jsonContent is invalid JSON", async () => {
@@ -340,13 +341,17 @@ describe("JsonEditor", () => {
     it("shows validation errors section when validationErrors is non-empty", async () => {
       wrapper = createWrapper({ validationErrors: ["Field 'id' is required"] });
       await nextTick();
-      expect(wrapper.find(".validation-errors").exists()).toBe(true);
+      expect(wrapper.find('[data-test="common-json-editor-validation-errors"]').exists()).toBe(
+        true,
+      );
       expect(wrapper.text()).toContain("Field 'id' is required");
     });
 
     it("hides validation errors section when validationErrors is empty", () => {
       wrapper = createWrapper({ validationErrors: [] });
-      expect(wrapper.find(".validation-errors").exists()).toBe(false);
+      expect(wrapper.find('[data-test="common-json-editor-validation-errors"]').exists()).toBe(
+        false,
+      );
     });
 
     it("renders multiple validation errors as list items", async () => {
@@ -354,7 +359,7 @@ describe("JsonEditor", () => {
         validationErrors: ["Error one", "Error two", "Error three"],
       });
       await nextTick();
-      const errors = wrapper.findAll(".validation-errors li");
+      const errors = wrapper.findAll('[data-test="common-json-editor-validation-errors"] li');
       expect(errors.length).toBe(3);
     });
   });
@@ -435,8 +440,9 @@ describe("JsonEditor", () => {
     it("renders AI toggle button when isEnterprise and ai_enabled", async () => {
       store.state.zoConfig = { ...store.state.zoConfig, ai_enabled: true };
       wrapper = createWrapper();
+      // AI toggle button has been moved to the parent ODrawer header slot, not inside JsonEditor
       const aiBtn = wrapper.find('[data-test="menu-link-ai-item"]');
-      expect(aiBtn.exists()).toBe(true);
+      expect(aiBtn.exists()).toBe(false);
     });
   });
 
@@ -478,18 +484,22 @@ describe("JsonEditor", () => {
   // ─── Theme-based CSS class ───────────────────────────────────────────────────
 
   describe("Theme-based CSS class", () => {
-    it("applies 'dark-mode' class on root q-card when theme is dark", async () => {
+    it("applies dark background class on root when theme is dark", async () => {
       store.state.theme = "dark";
       wrapper = createWrapper();
       await nextTick();
-      expect(wrapper.html()).toContain("dark-mode");
+      // Dark background is gated behind the `dark:` variant token
+      expect(wrapper.classes()).toContain("dark:bg-surface-base");
     });
 
-    it("applies 'bg-white' class on root q-card when theme is light", async () => {
+    it("does not apply a bare surface background class on root when theme is light", async () => {
       store.state.theme = "light";
       wrapper = createWrapper();
       await nextTick();
-      expect(wrapper.html()).toContain("bg-white");
+      // The surface background is only ever applied via the `dark:` variant,
+      // never as a bare `bg-surface-base` class
+      expect(wrapper.classes()).toContain("dark:bg-surface-base");
+      expect(wrapper.classes()).not.toContain("bg-surface-base");
     });
   });
 
@@ -498,12 +508,34 @@ describe("JsonEditor", () => {
   describe("Close / Cancel controls", () => {
     it("renders close icon with data-test attribute", () => {
       wrapper = createWrapper();
-      expect(wrapper.find('[data-test="json-editor-close"]').exists()).toBe(true);
+      // Close icon has been moved to the parent ODrawer; JsonEditor no longer renders it
+      expect(wrapper.find('[data-test="json-editor-close"]').exists()).toBe(false);
     });
 
     it("renders cancel button with data-test attribute", () => {
       wrapper = createWrapper();
       expect(wrapper.find('[data-test="json-editor-cancel"]').exists()).toBe(true);
+    });
+
+    it("emits 'close' when the cancel button is clicked (close icon removed)", async () => {
+      wrapper = createWrapper();
+      // The separate close icon has been removed; 'close' is emitted via the cancel button
+      await wrapper.find('[data-test="json-editor-cancel"]').trigger("click");
+      expect(wrapper.emitted("close")).toBeTruthy();
+      expect(wrapper.emitted("close")!.length).toBe(1);
+    });
+
+    it("emits 'close' when the cancel button is clicked", async () => {
+      wrapper = createWrapper();
+      await wrapper.find('[data-test="json-editor-cancel"]').trigger("click");
+      expect(wrapper.emitted("close")).toBeTruthy();
+      expect(wrapper.emitted("close")!.length).toBe(1);
+    });
+
+    it("does not emit 'close' when the save button is clicked", async () => {
+      wrapper = createWrapper({ data: { id: "1" }, type: "alerts" });
+      await wrapper.find('[data-test="json-editor-save"]').trigger("click");
+      expect(wrapper.emitted("close")).toBeFalsy();
     });
   });
 

@@ -1,6 +1,19 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { ref } from "vue";
+import { onMounted, ref } from "vue";
 import { usePanelDataLoader } from "./usePanelDataLoader";
+
+/**
+ * Lets the NEXT usePanelDataLoader() install its visibility observer.
+ *
+ * onMounted is stubbed to a no-op for this whole file, which leaves a loader
+ * permanently invisible — and every load, cache restore included, is gated on
+ * visibility. The composable registers the observer hook before the one that
+ * auto-loads, so running only the first keeps the "no automatic loadData"
+ * property these tests rely on.
+ */
+const allowPanelToBecomeVisible = () => {
+  vi.mocked(onMounted).mockImplementationOnce((cb: any) => cb());
+};
 
 // Mock all dependencies with enhanced functionality
 let mockSearchResults: any = [];
@@ -12,29 +25,32 @@ let shouldSearchThrow = false;
 let shouldPartitionThrow = false;
 let shouldMetricsThrow = false;
 
-vi.mock("../../services/search", () => ({
-  default: {
-    partition: vi.fn().mockImplementation(() => {
-      if (shouldPartitionThrow) {
-        return Promise.reject(new Error("Partition service error"));
-      }
-      return Promise.resolve(mockPartitionResults);
-    }),
-    search: vi.fn().mockImplementation(() => {
-      if (shouldSearchThrow) {
-        return Promise.reject(new Error("Search service error"));
-      }
-      return Promise.resolve({ data: mockSearchResults });
-    }),
-    metrics_query_range: vi.fn().mockImplementation(() => {
-      if (shouldMetricsThrow) {
-        return Promise.reject(new Error("Metrics service error"));
-      }
-      return Promise.resolve(mockMetricsResults);
-    }),
-    delete_running_queries: vi.fn().mockResolvedValue({ status: "success" }),
-  },
-}));
+vi.mock("../../services/search", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      partition: vi.fn().mockImplementation(() => {
+        if (shouldPartitionThrow) {
+          return Promise.reject(new Error("Partition service error"));
+        }
+        return Promise.resolve(mockPartitionResults);
+      }),
+      search: vi.fn().mockImplementation(() => {
+        if (shouldSearchThrow) {
+          return Promise.reject(new Error("Search service error"));
+        }
+        return Promise.resolve({ data: mockSearchResults });
+      }),
+      metrics_query_range: vi.fn().mockImplementation(() => {
+        if (shouldMetricsThrow) {
+          return Promise.reject(new Error("Metrics service error"));
+        }
+        return Promise.resolve(mockMetricsResults);
+      }),
+      delete_running_queries: vi.fn().mockResolvedValue({ status: "success" }),
+    },
+  });
+});
 
 vi.mock("vuex", () => ({
   useStore: () => ({
@@ -49,15 +65,16 @@ vi.mock("vuex", () => ({
 }));
 
 vi.mock("@/utils/query/promQLUtils", () => ({
-  addLabelToPromQlQuery: vi.fn((query, name, value, operator) => query),
+  addLabelToPromQlQuery: vi.fn((query) => query),
 }));
 
 vi.mock("@/utils/query/sqlUtils", () => ({
-  addLabelsToSQlQuery: vi.fn((query, filters) => Promise.resolve(query)),
+  addLabelsToSQlQuery: vi.fn((query) => Promise.resolve(query)),
   getStreamFromQuery: vi.fn(() => Promise.resolve("test_stream")),
 }));
 
-vi.mock("@/utils/dashboard/variables/variablesUtils", () => ({
+vi.mock("@/utils/dashboard/variables/variablesUtils", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/utils/dashboard/variables/variablesUtils")>()),
   formatInterval: vi.fn(() => ({ value: 5, unit: "m" })),
   formatRateInterval: vi.fn(() => "5m"),
   getTimeInSecondsBasedOnUnit: vi.fn(() => 300),
@@ -71,9 +88,7 @@ vi.mock("@/utils/zincutils", () => ({
   })),
   isWebSocketEnabled: vi.fn(() => false),
   isStreamingEnabled: vi.fn(() => false),
-  escapeSingleQuotes: vi.fn((str) =>
-    str.replace(/\\/g, "\\\\").replace(/'/g, "\\'"),
-  ),
+  escapeSingleQuotes: vi.fn((str) => str.replace(/\\/g, "\\\\").replace(/'/g, "\\'")),
   useLocalWrapContent: vi.fn(() => null),
 }));
 
@@ -107,31 +122,26 @@ vi.mock("@/utils/dashboard/dateTimeUtils", () => ({
 }));
 
 // Enhanced WebSocket mocking
-let mockWebSocketCallbacks: any = {};
 let shouldWebSocketThrow = false;
-let webSocketConnectionState = "connected";
 
 vi.mock("@/composables/useSearchWebSocket", () => ({
   default: () => ({
-    fetchQueryDataWithWebSocket: vi
-      .fn()
-      .mockImplementation((payload, callbacks) => {
-        mockWebSocketCallbacks = callbacks;
-        if (shouldWebSocketThrow) {
-          callbacks?.error?.(payload, { message: "WebSocket error" });
-          return "error-trace-id";
-        }
-        // Simulate successful connection
-        setTimeout(() => {
-          callbacks?.open?.(payload);
-          callbacks?.message?.(payload, {
-            content: { results: { hits: [] } },
-            type: "search_response",
-          });
-          callbacks?.close?.(payload, { code: 1000 });
-        }, 10);
-        return "test-trace-id";
-      }),
+    fetchQueryDataWithWebSocket: vi.fn().mockImplementation((payload, callbacks) => {
+      if (shouldWebSocketThrow) {
+        callbacks?.error?.(payload, { message: "WebSocket error" });
+        return "error-trace-id";
+      }
+      // Simulate successful connection
+      setTimeout(() => {
+        callbacks?.open?.(payload);
+        callbacks?.message?.(payload, {
+          content: { results: { hits: [] } },
+          type: "search_response",
+        });
+        callbacks?.close?.(payload, { code: 1000 });
+      }, 10);
+      return "test-trace-id";
+    }),
     sendSearchMessageBasedOnRequestId: vi.fn(),
     cancelSearchQueryBasedOnRequestId: vi.fn(),
     cleanUpListeners: vi.fn(),
@@ -154,29 +164,25 @@ vi.mock("./useAnnotations", () => ({
 }));
 
 // Enhanced HTTP Streaming mocking
-let mockStreamingCallbacks: any = {};
 let shouldStreamingThrow = false;
 
 vi.mock("../useStreamingSearch", () => ({
   default: () => ({
-    fetchQueryDataWithHttpStream: vi
-      .fn()
-      .mockImplementation((payload, callbacks) => {
-        mockStreamingCallbacks = callbacks;
-        if (shouldStreamingThrow) {
-          callbacks?.error?.(payload, { message: "Streaming error" });
-          return "error-stream-id";
-        }
-        // Simulate streaming response
-        setTimeout(() => {
-          callbacks?.data?.(payload, {
-            content: { results: { hits: [] } },
-            type: "search_response",
-          });
-          callbacks?.complete?.(payload, { status: "complete" });
-        }, 10);
-        return "test-stream-id";
-      }),
+    fetchQueryDataWithHttpStream: vi.fn().mockImplementation((payload, callbacks) => {
+      if (shouldStreamingThrow) {
+        callbacks?.error?.(payload, { message: "Streaming error" });
+        return "error-stream-id";
+      }
+      // Simulate streaming response
+      setTimeout(() => {
+        callbacks?.data?.(payload, {
+          content: { results: { hits: [] } },
+          type: "search_response",
+        });
+        callbacks?.complete?.(payload, { status: "complete" });
+      }, 10);
+      return "test-stream-id";
+    }),
     cancelStreamQueryBasedOnRequestId: vi.fn(),
     closeStreamWithError: vi.fn(),
     closeStream: vi.fn(),
@@ -207,11 +213,6 @@ vi.mock("vue", async () => {
     onUnmounted: vi.fn((cb) => cb?.()),
   };
 });
-
-// Enhanced Global Configuration
-let mockRunCount = 0;
-let mockForceLoadState = false;
-let mockIsVariablesLoading = false;
 
 // Test Helper Functions
 const createMockPanelSchema = (overrides: any = {}) =>
@@ -260,12 +261,9 @@ const resetAllMocks = () => {
   shouldMetricsThrow = false;
 
   // Reset WebSocket mocks
-  mockWebSocketCallbacks = {};
   shouldWebSocketThrow = false;
-  webSocketConnectionState = "connected";
 
   // Reset streaming mocks
-  mockStreamingCallbacks = {};
   shouldStreamingThrow = false;
 
   // Reset cache mocks
@@ -279,11 +277,6 @@ const resetAllMocks = () => {
 
   // Reset config
   shouldRequireApiCall = true;
-
-  // Reset global config
-  mockRunCount = 0;
-  mockForceLoadState = false;
-  mockIsVariablesLoading = false;
 
   // Reset helper function mocks
   mockIfPanelVariablesCompletedLoading.mockReturnValue(true);
@@ -299,25 +292,26 @@ describe("usePanelDataLoader", () => {
     resetAllMocks();
     vi.clearAllMocks();
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    windowAddEventListenerSpy = vi
-      .spyOn(window, "addEventListener")
-      .mockImplementation(() => {});
+    windowAddEventListenerSpy = vi.spyOn(window, "addEventListener").mockImplementation(() => {});
     windowRemoveEventListenerSpy = vi
       .spyOn(window, "removeEventListener")
       .mockImplementation(() => {});
 
-    // Mock IntersectionObserver for visibility detection
-    global.IntersectionObserver = vi.fn().mockImplementation((callback) => ({
-      observe: vi.fn().mockImplementation(() => {
+    // Mock IntersectionObserver for visibility detection.
+    // Must be a real (constructible) function — an arrow implementation throws
+    // "is not a constructor" at `new IntersectionObserver(...)`, which would
+    // leave every panel permanently invisible.
+    global.IntersectionObserver = vi.fn(function (this: any, callback: any) {
+      this.observe = vi.fn(() => {
         // Immediately trigger visibility
         callback([{ isIntersecting: true }]);
-      }),
-      unobserve: vi.fn(),
-      disconnect: vi.fn(),
-    }));
+      });
+      this.unobserve = vi.fn();
+      this.disconnect = vi.fn();
+    }) as any;
 
     // Mock setTimeout to work with promise-based async flows
-    vi.spyOn(global, "setTimeout").mockImplementation((fn: any, ms: number) => {
+    vi.spyOn(global, "setTimeout").mockImplementation((fn: any) => {
       if (typeof fn === "function") {
         // Execute immediately for tests
         Promise.resolve().then(() => fn());
@@ -518,6 +512,56 @@ describe("usePanelDataLoader", () => {
       await loader.loadData();
       expect(loader.loading.value).toBe(false);
       expect(loader.data.value).toEqual([]);
+    });
+
+    it("renders injected PromQL data instead of firing a query", async () => {
+      const panelSchema = ref({
+        id: "test-panel",
+        queryType: "promql",
+        queries: [{ query: "up" }],
+      });
+      const selectedTimeObj = ref({
+        start_time: new Date(Date.now() - 3600000),
+        end_time: new Date(),
+      });
+      const variablesData = ref({ values: [] });
+      const chartPanelRef = ref({ offsetWidth: 1000 });
+
+      const injected = ref({
+        data: [{ result: [{ values: [[1, "1"]] }] }],
+        metadata: { queries: [{ startTime: 1000, endTime: 2000 }] },
+        resultMetaData: [],
+      });
+
+      const loader = usePanelDataLoader(
+        panelSchema,
+        selectedTimeObj,
+        variablesData,
+        chartPanelRef,
+        ref(false), // forceLoad
+        ref("dashboards"), // searchType
+        ref("d"), // dashboardId
+        ref("f"), // folderId
+        ref(null), // reportId
+        ref(null), // runId
+        ref(null), // tabId
+        ref(null), // tabName
+        ref(null), // searchResponse
+        ref(false), // is_ui_histogram
+        ref(null), // dashboardName
+        ref(null), // folderName
+        ref(false), // shouldRefreshWithoutCache
+        ref(undefined), // regionClusterParams
+        ref(true), // allowAnnotationsAPI
+        injected, // injectedPromqlData
+      );
+
+      await loader.loadData();
+
+      // The already-fetched results are rendered directly; no executor runs.
+      expect(loader.loading.value).toBe(false);
+      expect(loader.data.value).toEqual(injected.value.data);
+      expect(loader.metadata.value).toEqual(injected.value.metadata);
     });
 
     it("should handle invalid timestamps", () => {
@@ -1146,8 +1190,7 @@ describe("usePanelDataLoader", () => {
         const variablesData = createMockVariablesData();
 
         // Mock streaming enabled, WebSocket disabled
-        const { isWebSocketEnabled, isStreamingEnabled } =
-          await import("@/utils/zincutils");
+        const { isWebSocketEnabled, isStreamingEnabled } = await import("@/utils/zincutils");
         (isWebSocketEnabled as any).mockReturnValue(false);
         (isStreamingEnabled as any).mockReturnValue(true);
 
@@ -1188,9 +1231,7 @@ describe("usePanelDataLoader", () => {
             status: "success",
             data: {
               resultType: "vector",
-              result: [
-                { metric: { __name__: "up" }, value: [1234567890, "1"] },
-              ],
+              result: [{ metric: { __name__: "up" }, value: [1234567890, "1"] }],
             },
           },
         };
@@ -1341,10 +1382,9 @@ describe("usePanelDataLoader", () => {
         await loader.loadData();
 
         // Check that some error state was set (either errorDetail has content or data is empty)
-        expect(
-          loader.errorDetail.value.message.length > 0 ||
-            loader.data.value.length === 0,
-        ).toBe(true);
+        expect(loader.errorDetail.value.message.length > 0 || loader.data.value.length === 0).toBe(
+          true,
+        );
       });
     });
 
@@ -1355,8 +1395,7 @@ describe("usePanelDataLoader", () => {
         const variablesData = createMockVariablesData();
 
         // Enable WebSocket
-        const { isWebSocketEnabled, isStreamingEnabled } =
-          await import("@/utils/zincutils");
+        const { isWebSocketEnabled, isStreamingEnabled } = await import("@/utils/zincutils");
         (isWebSocketEnabled as any).mockReturnValue(true);
         (isStreamingEnabled as any).mockReturnValue(false);
 
@@ -1383,8 +1422,7 @@ describe("usePanelDataLoader", () => {
         const variablesData = createMockVariablesData();
 
         // Enable WebSocket with error
-        const { isWebSocketEnabled, isStreamingEnabled } =
-          await import("@/utils/zincutils");
+        const { isWebSocketEnabled, isStreamingEnabled } = await import("@/utils/zincutils");
         (isWebSocketEnabled as any).mockReturnValue(true);
         (isStreamingEnabled as any).mockReturnValue(false);
         shouldWebSocketThrow = true;
@@ -1414,8 +1452,7 @@ describe("usePanelDataLoader", () => {
         const variablesData = createMockVariablesData();
 
         // Enable streaming, disable WebSocket
-        const { isWebSocketEnabled, isStreamingEnabled } =
-          await import("@/utils/zincutils");
+        const { isWebSocketEnabled, isStreamingEnabled } = await import("@/utils/zincutils");
         (isWebSocketEnabled as any).mockReturnValue(false);
         (isStreamingEnabled as any).mockReturnValue(true);
 
@@ -1442,8 +1479,7 @@ describe("usePanelDataLoader", () => {
         const variablesData = createMockVariablesData();
 
         // Enable streaming with error
-        const { isWebSocketEnabled, isStreamingEnabled } =
-          await import("@/utils/zincutils");
+        const { isWebSocketEnabled, isStreamingEnabled } = await import("@/utils/zincutils");
         (isWebSocketEnabled as any).mockReturnValue(false);
         (isStreamingEnabled as any).mockReturnValue(true);
         shouldStreamingThrow = true;
@@ -1501,6 +1537,8 @@ describe("usePanelDataLoader", () => {
           },
         };
 
+        allowPanelToBecomeVisible();
+
         const loader = usePanelDataLoader(
           panelSchema,
           selectedTimeObj,
@@ -1557,6 +1595,8 @@ describe("usePanelDataLoader", () => {
           },
         };
 
+        allowPanelToBecomeVisible();
+
         const loader = usePanelDataLoader(
           panelSchema,
           selectedTimeObj,
@@ -1576,9 +1616,7 @@ describe("usePanelDataLoader", () => {
 
         await loader.loadData();
 
-        expect(
-          loader.isCachedDataDifferWithCurrentTimeRange.value,
-        ).toBeDefined();
+        expect(loader.isCachedDataDifferWithCurrentTimeRange.value).toBeDefined();
       });
 
       it("should handle cache retrieval errors", async () => {
@@ -1666,6 +1704,8 @@ describe("usePanelDataLoader", () => {
           },
         };
 
+        allowPanelToBecomeVisible();
+
         const loader = usePanelDataLoader(
           panelSchema,
           selectedTimeObj,
@@ -1683,13 +1723,15 @@ describe("usePanelDataLoader", () => {
           ref(false), // is_ui_histogram
         );
 
-        // Start loadData without waiting (it will be pending due to visibility check after cache attempt)
-        const loadPromise = loader.loadData();
+        // Start loadData without waiting (the cache read happens once the panel
+        // is reported visible)
+        loader.loadData();
 
-        // Give it a moment to attempt cache restore (happens before visibility wait)
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        // Give it a moment to attempt cache restore. setTimeout is stubbed to a
+        // microtask here, so drain a few rather than waiting on the clock.
+        for (let i = 0; i < 20; i++) await Promise.resolve();
 
-        // With forceLoad=false and runCount=0, cache restore is attempted (line 803)
+        // With forceLoad=false and runCount=0, cache restore is attempted
         // Cache operation count should be > 0 because getPanelCache was called
         expect(cacheOperationCount).toBeGreaterThan(0);
 
@@ -1814,8 +1856,7 @@ describe("usePanelDataLoader", () => {
         const panelSchema = createMockPanelSchema({
           queries: [
             {
-              query:
-                "SELECT * FROM logs WHERE time >= now() - INTERVAL '$__range'",
+              query: "SELECT * FROM logs WHERE time >= now() - INTERVAL '$__range'",
               fields: { stream_type: "logs" },
             },
           ],
@@ -1851,8 +1892,7 @@ describe("usePanelDataLoader", () => {
         const panelSchema = createMockPanelSchema({
           queries: [
             {
-              query:
-                "SELECT * FROM logs WHERE time >= now() - INTERVAL '${__range}'",
+              query: "SELECT * FROM logs WHERE time >= now() - INTERVAL '${__range}'",
               fields: { stream_type: "logs" },
             },
           ],
@@ -1887,8 +1927,7 @@ describe("usePanelDataLoader", () => {
         const panelSchema = createMockPanelSchema({
           queries: [
             {
-              query:
-                "SELECT * FROM logs WHERE time >= now() - INTERVAL '$__range'",
+              query: "SELECT * FROM logs WHERE time >= now() - INTERVAL '$__range'",
               fields: { stream_type: "logs" },
             },
           ],
@@ -1978,8 +2017,7 @@ describe("usePanelDataLoader", () => {
         const panelSchema = createMockPanelSchema({
           queries: [
             {
-              query:
-                "SELECT * FROM logs WHERE service IN (${services:singlequote})",
+              query: "SELECT * FROM logs WHERE service IN (${services:singlequote})",
               fields: { stream_type: "logs" },
             },
           ],
@@ -2121,8 +2159,7 @@ describe("usePanelDataLoader", () => {
         const panelSchema = createMockPanelSchema({
           queries: [
             {
-              query:
-                "SELECT * FROM logs WHERE service IN (${services:doublequote})",
+              query: "SELECT * FROM logs WHERE service IN (${services:doublequote})",
               fields: { stream_type: "logs" },
             },
           ],
@@ -2431,8 +2468,7 @@ describe("usePanelDataLoader", () => {
         const panelSchema = createMockPanelSchema({
           queries: [
             {
-              query:
-                "SELECT * FROM logs WHERE service IN (${services:singlequote})",
+              query: "SELECT * FROM logs WHERE service IN (${services:singlequote})",
               fields: { stream_type: "logs" },
             },
           ],
@@ -2781,8 +2817,7 @@ describe("usePanelDataLoader", () => {
         const variablesData = createMockVariablesData();
 
         // Enable WebSocket and simulate error
-        const { isWebSocketEnabled, isStreamingEnabled } =
-          await import("@/utils/zincutils");
+        const { isWebSocketEnabled, isStreamingEnabled } = await import("@/utils/zincutils");
         (isWebSocketEnabled as any).mockReturnValue(true);
         (isStreamingEnabled as any).mockReturnValue(false);
 
@@ -2893,8 +2928,7 @@ describe("usePanelDataLoader", () => {
         queryType: "sql",
         queries: [
           {
-            query:
-              "SELECT * FROM logs WHERE service = $service AND time >= $__interval_ms",
+            query: "SELECT * FROM logs WHERE service = $service AND time >= $__interval_ms",
             fields: {
               stream_type: "logs",
               x: [{ alias: "timestamp" }],
@@ -2911,9 +2945,7 @@ describe("usePanelDataLoader", () => {
         hits: [[{ test: "data" }]],
         per_query_response: true,
       };
-      mockAnnotations = [
-        { id: "test", title: "Test Annotation", time: Date.now() },
-      ];
+      mockAnnotations = [{ id: "test", title: "Test Annotation", time: Date.now() }];
 
       const loader = usePanelDataLoader(
         panelSchema,

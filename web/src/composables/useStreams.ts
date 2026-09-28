@@ -13,16 +13,22 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { streamNameListQuery } from "@/services/stream.queries";
+import { streamKeys } from "@/services/stream.querykeys";
+import { queryClient } from "@/composables/query/queryClient";
 import { useStore } from "vuex";
 import StreamService from "@/services/stream";
-import { computed, ComputedRef, reactive } from "vue";
-import { ref } from "vue";
-import { useQuasar } from "quasar";
+import { computed, ComputedRef } from "vue";
 import { deepCopy } from "@/utils/zincutils";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import type { TranslateFn, I18nText } from "@/types/i18n";
 
-const getStreamsPromise: any = ref(null);
+// Keep the HTTP status on the rejection: callers need it to tell a denial (403)
+// apart from any other failure, and a bare Error would drop it.
+const withResponse = (err: Error, source: any): Error =>
+  Object.assign(err, { response: source?.response, status: source?.status });
 
-const useStreams = () => {
+const useStreams = (t: TranslateFn) => {
   const store = useStore();
 
   const updateStreamsInStore = (streamType: string, streams: any) => {
@@ -46,33 +52,52 @@ const useStreams = () => {
     metadata: computed(() => store.state.streams.metadata),
   };
 
-  const q = useQuasar();
-
   const getStreams = async (
     _streamName: string = "",
     schema: boolean,
     notify: boolean = true,
     force: boolean = false,
   ) => {
-    return new Promise(async (resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const streamName = _streamName || "all";
 
       // We don't fetch schema while fetching all streams or specific type all streams
       // So keeping it false, don't change this
       schema = false;
-      if (getStreamsPromise.value) {
-        await getStreamsPromise.value;
-      }
-      try {
-        if (!isStreamFetched(streamName || "all") || force) {
-          // Added adddtional check to fetch all streamstype separately if streamName is all
-          const dismiss = notify
-            ? q.notify({
-                spinner: true,
-                message: "Please wait while loading streams...",
-                timeout: 5000,
-              })
-            : () => {};
+      void (async () => {
+        try {
+          // No global in-flight promise any more: each stream type is its own
+          // query key, so concurrent callers share a request per type instead of
+          // every type queueing behind whichever fetch started first.
+          // `force` must reach the server: invalidate the cached list first, otherwise
+          // the query would answer from cache and force would be a no-op.
+          if (force) {
+            const org = store.state.selectedOrganization.identifier;
+            if (streamName === "all") {
+              await queryClient.invalidateQueries({ queryKey: streamKeys.all(org) });
+            } else {
+              // One type, exactly: a Metrics Explorer mount must not throw away the logs and traces lists too.
+              await Promise.all([
+                queryClient.invalidateQueries({
+                  queryKey: streamKeys.nameList(org, streamName),
+                  exact: true,
+                }),
+                queryClient.invalidateQueries({ queryKey: streamKeys.pagesAll(org) }),
+              ]);
+            }
+          }
+          // Always ask the query — it answers from cache while the list is fresh
+          // and refetches once it is not. The toast is only for a cold read,
+          // where there is nothing on screen to keep.
+          const cold = !isStreamFetched(streamName || "all");
+          const dismiss =
+            notify && cold
+              ? toast({
+                  variant: "loading",
+                  message: t("toastMessages.composables.pleaseWaitWhileLoadingStreams"),
+                  timeout: 0,
+                })
+              : () => {};
           if (streamName === "all") {
             // As in RBAC there can be permission on certain types of streams
             // So here added some additional logic to handle those
@@ -86,32 +111,19 @@ const useStreams = () => {
               "metadata",
             ];
 
-            const streamsToFetch = streamList.filter(
-              (_streamType) => !streamsCache[_streamType]?.value,
-            );
-
-            getStreamsPromise.value = Promise.allSettled(
-              [...streamsToFetch].map((streamType) =>
-                StreamService.nameList(
-                  store.state.selectedOrganization.identifier,
-                  streamType,
-                  schema,
+            // Every type, every time: each is its own query, so a fresh one
+            // resolves from cache and only an expired one reaches the server.
+            Promise.allSettled(
+              streamList.map((streamType) =>
+                queryClient.fetchQuery(
+                  streamNameListQuery(store.state.selectedOrganization.identifier, streamType),
                 ),
               ),
-            );
-
-            getStreamsPromise.value
+            )
               .then((results: any) => {
                 results.forEach((result: any, index: number) => {
-                  if (
-                    result.status === "fulfilled" &&
-                    Object.hasOwn(result, "value") &&
-                    result?.value?.data?.list.length > 0
-                  ) {
-                    setStreams(
-                      streamsToFetch[index],
-                      result?.value?.data?.list,
-                    );
+                  if (result.status === "fulfilled" && result.value?.length > 0) {
+                    setStreams(streamList[index], result.value);
                   }
                 });
 
@@ -119,50 +131,37 @@ const useStreams = () => {
                   streamList.every((stream) => !!streamsCache[stream].value),
                 );
 
-                getStreamsPromise.value = null;
-
                 dismiss();
                 resolve(getAllStreamsPayload());
               })
               .catch((e: any) => {
-                getStreamsPromise.value = null;
                 dismiss();
-                reject(new Error(e.message));
+                reject(withResponse(new Error(e.message), e));
               });
           } else {
-            getStreamsPromise.value = StreamService.nameList(
-              store.state.selectedOrganization.identifier,
-              _streamName,
-              schema,
-            );
-            getStreamsPromise.value
-              .then((res: any) => {
-                setStreams(streamName, res.data.list);
+            queryClient
+              .fetchQuery(
+                streamNameListQuery(store.state.selectedOrganization.identifier, _streamName),
+              )
+              .then((list: any) => {
+                setStreams(streamName, list);
                 const streamData = {
                   name: streamName,
-                  list: res.data.list,
+                  list,
                   schema: false,
                 };
-                getStreamsPromise.value = null;
                 dismiss();
                 resolve(streamData);
               })
               .catch((e: any) => {
-                getStreamsPromise.value = null;
                 dismiss();
-                reject(new Error(e.message));
+                reject(withResponse(new Error(e.message), e));
               });
           }
-        } else {
-          if (streamName === "all") {
-            resolve(getAllStreamsPayload());
-          } else {
-            resolve(streamsCache[streamName].value || {});
-          }
+        } catch (e: any) {
+          reject(withResponse(new Error(e.message), e));
         }
-      } catch (e: any) {
-        reject(new Error(e.message));
-      }
+      })();
     });
   };
 
@@ -176,55 +175,52 @@ const useStreams = () => {
     sort: string = "",
     asc: boolean = false,
   ) => {
-    return new Promise(async (resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const streamType = _streamType || "all";
 
       // We don't fetch schema while fetching all streams or specific type all streams
       // So keeping it false, don't change this
       schema = false;
-      if (getStreamsPromise.value) {
-        await getStreamsPromise.value;
-      }
-      try {
-        // Added adddtional check to fetch all streamstype separately if streamName is all
-        const dismiss = notify
-          ? q.notify({
-              spinner: true,
-              message: "Please wait while loading streams...",
-              timeout: 5000,
-            })
-          : () => {};
+      void (async () => {
+        try {
+          // Added adddtional check to fetch all streamstype separately if streamName is all
+          const dismiss = notify
+            ? toast({
+                variant: "loading",
+                message: t("toastMessages.composables.pleaseWaitWhileLoadingStreams"),
+                timeout: 5000,
+              })
+            : () => {};
 
-        getStreamsPromise.value = StreamService.nameList(
-          store.state.selectedOrganization.identifier,
-          _streamType,
-          schema,
-          offset,
-          limit,
-          keyword,
-          sort,
-          asc,
-        );
-        getStreamsPromise.value
-          .then((res: any) => {
-            const streamData = {
-              name: streamType,
-              list: res.data.list,
-              schema: false,
-              total: res.data.total,
-            };
-            getStreamsPromise.value = null;
-            dismiss();
-            resolve(streamData);
-          })
-          .catch((e: any) => {
-            getStreamsPromise.value = null;
-            dismiss();
-            reject(new Error(e.message));
-          });
-      } catch (e: any) {
-        reject(new Error(e.message));
-      }
+          const pageResponse = StreamService.nameList(
+            store.state.selectedOrganization.identifier,
+            _streamType,
+            schema,
+            offset,
+            limit,
+            keyword,
+            sort,
+            asc,
+          );
+          pageResponse
+            .then((res: any) => {
+              const streamData = {
+                name: streamType,
+                list: res.data.list,
+                schema: false,
+                total: res.data.total,
+              };
+              dismiss();
+              resolve(streamData);
+            })
+            .catch((e: any) => {
+              dismiss();
+              reject(withResponse(new Error(e.message), e));
+            });
+        } catch (e: any) {
+          reject(withResponse(new Error(e.message), e));
+        }
+      })();
     });
   };
 
@@ -246,74 +242,77 @@ const useStreams = () => {
     schema: boolean,
     force: boolean = false,
   ): Promise<any> => {
-    return new Promise(async (resolve, reject) => {
-      if (!streamName || !streamType) {
-        resolve(null);
-      }
+    return new Promise((resolve, reject) => {
+      void (async () => {
+        if (!streamName || !streamType) {
+          resolve(null);
+        }
 
-      // Wait for the streams to be fetched if they are being fetched
-      if (getStreamsPromise.value) {
-        await getStreamsPromise.value;
-      }
-
-      // If the stream is not fetched, and trying to fetch the specific stream. First fetch all streams
-      if (!isStreamFetched(streamType)) {
+        // The type's list has to be in hand before indexing into it, and asking
+        // unconditionally is what lets a stream added since the last read be
+        // found — the query answers from cache while it is fresh.
         try {
           await getStreams(streamType, false);
         } catch (e: any) {
-          reject(new Error(e.message));
+          reject(withResponse(new Error(e.message), e));
         }
-      }
 
-      try {
-        if (
-          streamsCache[streamType].value &&
-          streamsCache[streamType].value?.list?.length &&
-          Object.prototype.hasOwnProperty.call(
-            store.state.streams.streamsIndexMapping[streamType],
-            streamName,
-          )
-        ) {
-          const streamIndex =
-            store.state.streams.streamsIndexMapping[streamType][streamName];
-          const hasSchema =
-            !!streamsCache[streamType].value?.list[streamIndex]?.schema?.length;
+        try {
+          if (
+            streamsCache[streamType].value &&
+            streamsCache[streamType].value?.list?.length &&
+            Object.prototype.hasOwnProperty.call(
+              store.state.streams.streamsIndexMapping[streamType],
+              streamName,
+            )
+          ) {
+            const streamIndex = store.state.streams.streamsIndexMapping[streamType][streamName];
+            const hasSchema = !!streamsCache[streamType].value?.list[streamIndex]?.schema?.length;
 
-          if ((schema && !hasSchema) || force) {
-            try {
-              const _stream: any = await StreamService.schema(
-                store.state.selectedOrganization.identifier,
-                streamName,
-                streamType,
-              );
-              const streamList = deepCopy(streamsCache[streamType].value || {});
-              streamList.list[streamIndex] = removeSchemaFields(_stream.data);
-              updateStreamsInStore(streamType, streamList);
-            } catch (err: any) {
-              return reject(new Error(`Error while fetching schema: ${err?.message || 'Unknown error'}`));
+            if ((schema && !hasSchema) || force) {
+              try {
+                const _stream: any = await StreamService.schema(
+                  store.state.selectedOrganization.identifier,
+                  streamName,
+                  streamType,
+                );
+                const streamList = deepCopy(streamsCache[streamType].value || {});
+                streamList.list[streamIndex] = removeSchemaFields(_stream.data);
+                updateStreamsInStore(streamType, streamList);
+              } catch (err: any) {
+                return reject(
+                  new Error(
+                    t("logStream.errorWhileFetchingSchema", {
+                      message: err?.message || t("search.unknownError"),
+                    }),
+                  ),
+                );
+              }
             }
+            return resolve(streamsCache[streamType].value?.list[streamIndex] || {});
+          } else {
+            // Stream not found in cache - reject with proper Error object
+            // await StreamService.schema(
+            //   store.state.selectedOrganization.identifier,
+            //   streamName,
+            //   streamType
+            // )
+            //   .then((res: any) => {
+            //     addStream(res.data);
+            //     const streamIndex = streamsIndexMapping[streamType][streamName];
+            //     return resolve(streams[streamType].list[streamIndex]);
+            //   })
+            //   .catch(() => reject(new Error("Stream Not Found")));
+            return reject(
+              new Error(
+                t("logStream.streamNotFoundForType", { stream: streamName, type: streamType }),
+              ),
+            );
           }
-          return resolve(
-            streamsCache[streamType].value?.list[streamIndex] || {},
-          );
-        } else {
-          // Stream not found in cache - reject with proper Error object
-          // await StreamService.schema(
-          //   store.state.selectedOrganization.identifier,
-          //   streamName,
-          //   streamType
-          // )
-          //   .then((res: any) => {
-          //     addStream(res.data);
-          //     const streamIndex = streamsIndexMapping[streamType][streamName];
-          //     return resolve(streams[streamType].list[streamIndex]);
-          //   })
-          //   .catch(() => reject(new Error("Stream Not Found")));
-          return reject(new Error(`Stream '${streamName}' not found for type '${streamType}'`));
+        } catch (e: any) {
+          reject(withResponse(new Error(e.message), e));
         }
-      } catch (e: any) {
-        reject(new Error(e.message));
-      }
+      })();
     });
   };
 
@@ -341,10 +340,8 @@ const useStreams = () => {
               streamName,
             )
           ) {
-            const streamIndex =
-              store.state.streams.streamsIndexMapping[streamType][streamName];
-            const hasSchema =
-              !!streamsCache[streamType].value?.list[streamIndex]?.schema;
+            const streamIndex = store.state.streams.streamsIndexMapping[streamType][streamName];
+            const hasSchema = !!streamsCache[streamType].value?.list[streamIndex]?.schema;
 
             // If schema is requested but not present, fetch and update it.
             if (schema && !hasSchema) {
@@ -355,20 +352,17 @@ const useStreams = () => {
               );
 
               const streamList = deepCopy(streamsCache[streamType].value || {});
-              streamList.list[streamIndex] = removeSchemaFields(
-                fetchedStream.data,
-              );
+              streamList.list[streamIndex] = removeSchemaFields(fetchedStream.data);
               updateStreamsInStore(streamType, streamList);
             }
           }
 
           // Return the stream object (with or without updated schema).
-          const streamIndex =
-            store.state.streams.streamsIndexMapping[streamType][streamName];
+          const streamIndex = store.state.streams.streamsIndexMapping[streamType][streamName];
           return streamsCache[streamType].value?.list?.[streamIndex] || {};
         } catch (e: any) {
           // Use reject in Promise.all to catch errors specifically.
-          throw new Error(e.message);
+          throw withResponse(new Error(e.message), e);
         }
       }),
     );
@@ -377,11 +371,7 @@ const useStreams = () => {
   function removeSchemaFields(streamData: any) {
     if (streamData.schema) {
       streamData.schema = streamData.schema.filter((field: any) => {
-        return (
-          field.name != "_o2_id" &&
-          field.name != "_original" &&
-          field.name != "_all_values"
-        );
+        return field.name != "_o2_id" && field.name != "_original" && field.name != "_all_values";
       });
     }
     return streamData;
@@ -398,13 +388,19 @@ const useStreams = () => {
     return isStreamFetched;
   };
 
-  const setStreams = (
-    streamName: string = "all",
-    streamList: any[] = [],
-    force: boolean = false,
-  ) => {
-    if (isStreamFetched(streamName || "all") && !force) return;
+  // "all" is one query per type, so its age is the oldest of them.
+  const getStreamsFetchedAt = async (streamType: string = "all"): Promise<number | undefined> => {
+    const org = store.state.selectedOrganization.identifier;
+    const types = streamType === "all" ? Object.keys(streamsCache) : [streamType];
+    const times = types
+      .map((type) => queryClient.getQueryState(streamKeys.nameList(org, type))?.dataUpdatedAt)
+      .filter((t): t is number => !!t);
+    return times.length ? Math.min(...times) : undefined;
+  };
 
+  // No "already fetched" bail-out: the caller only reaches here with a list the
+  // query just produced, and refusing to store it would discard a refetch.
+  const setStreams = (streamName: string = "all", streamList: any[] = []) => {
     if (!store.state.organizationData.isDataIngested && !!streamList.length)
       store.dispatch("setIsDataIngested", !!streamList.length);
 
@@ -421,9 +417,7 @@ const useStreams = () => {
 
       streamList.forEach((stream: any) => {
         if (streamsCache[stream.stream_type].value) {
-          const streamList = deepCopy(
-            streamsCache[stream.stream_type].value || {},
-          );
+          const streamList = deepCopy(streamsCache[stream.stream_type].value || {});
           streamList.list.push(stream);
           updateStreamsInStore(stream.stream_type, streamList);
         } else {
@@ -442,9 +436,7 @@ const useStreams = () => {
     if (streamName === "all") {
       updateStreamIndexMappingInStore({});
       Object.keys(streamsCache).forEach((key) => {
-        const streamIndexMapping = deepCopy(
-          store.state.streams.streamsIndexMapping || {},
-        );
+        const streamIndexMapping = deepCopy(store.state.streams.streamsIndexMapping || {});
         streamIndexMapping[key] = {};
 
         streamsCache[key].value?.list?.forEach((stream: any, index: number) => {
@@ -453,15 +445,11 @@ const useStreams = () => {
         updateStreamIndexMappingInStore(streamIndexMapping || {});
       });
     } else {
-      const streamIndexMapping = deepCopy(
-        store.state.streams.streamsIndexMapping || {},
-      );
+      const streamIndexMapping = deepCopy(store.state.streams.streamsIndexMapping || {});
       streamIndexMapping[streamName] = {};
-      streamsCache[streamName].value?.list?.forEach(
-        (stream: any, index: number) => {
-          streamIndexMapping[streamName][stream.name] = index;
-        },
-      );
+      streamsCache[streamName].value?.list?.forEach((stream: any, index: number) => {
+        streamIndexMapping[streamName][stream.name] = index;
+      });
       updateStreamIndexMappingInStore(streamIndexMapping);
     }
 
@@ -483,37 +471,31 @@ const useStreams = () => {
   // Don't add delete log here, it will create issue
   // This method is to remove specific stream from cache
   const removeStream = (streamName: string, streamType: string) => {
-    if (
-      Object.prototype.hasOwnProperty.call(
-        store.state.streams.streamsIndexMapping[streamType],
-        streamName,
-      )
-    ) {
-      const indexToRemove =
-        store.state.streams.streamsIndexMapping[streamType][streamName];
+    const org = store.state.selectedOrganization.identifier;
+    // Ahead of the early return: the cached name list and page entries hold the deleted row whether Vuex does or not.
+    void queryClient.invalidateQueries({ queryKey: streamKeys.all(org) });
+
+    const indexMapping = store.state.streams.streamsIndexMapping[streamType];
+
+    // Bail out safely when the mapping/cache for this type isn't populated.
+    if (!indexMapping || !streamsCache[streamType]) {
+      return;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(indexMapping, streamName)) {
+      const indexToRemove = store.state.streams.streamsIndexMapping[streamType][streamName];
 
       // Deleting stream index that was mapped
       delete store.state.streams.streamsIndexMapping[streamType][streamName];
 
       // TODO OK : Remove the multiple updates to store
-      if (
-        indexToRemove >= 0 &&
-        indexToRemove < streamsCache[streamType].value?.list?.length
-      ) {
-        for (
-          let i = indexToRemove;
-          i < streamsCache[streamType].value?.list?.length - 1;
-          i++
-        ) {
+      if (indexToRemove >= 0 && indexToRemove < streamsCache[streamType].value?.list?.length) {
+        for (let i = indexToRemove; i < streamsCache[streamType].value?.list?.length - 1; i++) {
           // Shift each element one position to the left
-          const streamList = deepCopy(
-            streamsCache[streamType].value?.list || [],
-          );
+          const streamList = deepCopy(streamsCache[streamType].value?.list || []);
           streamList[i] = streamList[i + 1];
 
-          const streamIndexMapping = deepCopy(
-            store.state.streams.streamsIndexMapping || {},
-          );
+          const streamIndexMapping = deepCopy(store.state.streams.streamsIndexMapping || {});
           streamIndexMapping[streamType][streamList[i].name] = i;
 
           updateStreamIndexMappingInStore(streamIndexMapping);
@@ -529,9 +511,7 @@ const useStreams = () => {
   const addStream = async (stream: any) => {
     if (
       !!streamsCache[stream.stream_type] &&
-      store.state.streams.streamsIndexMapping[stream.stream_type][
-        stream.name
-      ] >= 0
+      store.state.streams.streamsIndexMapping[stream.stream_type][stream.name] >= 0
     )
       return;
 
@@ -542,11 +522,8 @@ const useStreams = () => {
       const streamList = deepCopy(streamsCache[stream.stream_type].value || {});
       streamList.list.push(stream);
 
-      const streamIndexMapping = deepCopy(
-        store.state.streams.streamsIndexMapping,
-      );
-      streamIndexMapping[stream.stream_type][stream.name] =
-        streamList.list.length - 1;
+      const streamIndexMapping = deepCopy(store.state.streams.streamsIndexMapping);
+      streamIndexMapping[stream.stream_type][stream.name] = streamList.list.length - 1;
 
       updateStreamIndexMappingInStore(streamIndexMapping);
       updateStreamsInStore(stream.stream_type, streamList);
@@ -559,7 +536,6 @@ const useStreams = () => {
     });
     updateStreamIndexMappingInStore({});
     updateStreamsFetchedInStore(false);
-    getStreamsPromise.value = null;
     store.dispatch("setIsDataIngested", false);
   };
 
@@ -601,12 +577,7 @@ const useStreams = () => {
 
   // Helper function to deeply compare two objects, considering the "types" object and ignoring the "disabled" attribute
   function deepEqual(objA: any, objB: any) {
-    if (
-      typeof objA !== "object" ||
-      typeof objB !== "object" ||
-      objA === null ||
-      objB === null
-    ) {
+    if (typeof objA !== "object" || typeof objB !== "object" || objA === null || objB === null) {
       return objA === objB;
     }
 
@@ -648,8 +619,7 @@ const useStreams = () => {
           ? previousSettings[attribute]
           : [];
       const currentArray =
-        Array.isArray(currentSettings[attribute]) ||
-        typeof currentSettings[attribute] === "object"
+        Array.isArray(currentSettings[attribute]) || typeof currentSettings[attribute] === "object"
           ? currentSettings[attribute]
           : [];
 
@@ -665,9 +635,7 @@ const useStreams = () => {
         add = result.add;
         remove = result.remove;
         remove = remove.filter((item: any) => {
-          const isInAdd = add.some(
-            (addItem: any) => addItem.field === item.field,
-          );
+          const isInAdd = add.some((addItem: any) => addItem.field === item.field);
 
           // Only keep in `remove` if not in `add` and `disabled` is false
           return !isInAdd && item.disabled === false;
@@ -676,30 +644,23 @@ const useStreams = () => {
         add = currentArray.filter(
           (currentItem: any) =>
             !previousArray.some(
-              (previousItem: any) =>
-                JSON.stringify(currentItem) === JSON.stringify(previousItem),
+              (previousItem: any) => JSON.stringify(currentItem) === JSON.stringify(previousItem),
             ),
         );
         remove = previousArray.filter(
           (previousItem: any) =>
             !currentArray.some(
-              (currentItem: any) =>
-                JSON.stringify(previousItem) === JSON.stringify(currentItem),
+              (currentItem: any) => JSON.stringify(previousItem) === JSON.stringify(currentItem),
             ),
         );
       } else if (attribute === "pattern_associations") {
-        const result: any = comparePatternAssociations(
-          previousArray,
-          currentArray,
-        );
+        const result: any = comparePatternAssociations(previousArray, currentArray);
         add = result.add;
         remove = result.remove;
       } else {
         // For other attributes, do a simple array comparison
         add = currentArray.filter((item: any) => !previousArray.includes(item));
-        remove = previousArray.filter(
-          (item: any) => !currentArray.includes(item),
-        );
+        remove = previousArray.filter((item: any) => !currentArray.includes(item));
       }
 
       // Add the _add and _remove arrays to the result
@@ -727,7 +688,7 @@ const useStreams = () => {
     policy: string;
     apply_at?: string | null; // Optional or nullable
     pattern: string;
-    description?: string;
+    description?: I18nText;
   };
 
   //this function is used to compare the pattern associations
@@ -741,11 +702,7 @@ const useStreams = () => {
       //because some times user might not select the apply_at value while updating the already applied pattern
       //so instead of sending undefined/null we dont consider them as different
       if (!a.apply_at || !b.apply_at) {
-        return (
-          a.pattern_id === b.pattern_id &&
-          a.field === b.field &&
-          a.policy === b.policy
-        );
+        return a.pattern_id === b.pattern_id && a.field === b.field && a.policy === b.policy;
       }
       return (
         a.pattern_id === b.pattern_id &&
@@ -755,13 +712,9 @@ const useStreams = () => {
       );
     };
 
-    const add = curr.filter(
-      (currItem) => !prev.some((prevItem) => isSame(currItem, prevItem)),
-    );
+    const add = curr.filter((currItem) => !prev.some((prevItem) => isSame(currItem, prevItem)));
 
-    const remove = prev.filter(
-      (prevItem) => !curr.some((currItem) => isSame(currItem, prevItem)),
-    );
+    const remove = prev.filter((prevItem) => !curr.some((currItem) => isSame(currItem, prevItem)));
 
     return { add, remove };
   };
@@ -799,7 +752,7 @@ const useStreams = () => {
     });
 
     if (streamsToAdd.length > 0) {
-      setStreams(streamType, streamsToAdd, true);
+      setStreams(streamType, streamsToAdd);
     }
   };
 
@@ -816,6 +769,7 @@ const useStreams = () => {
     getPaginatedStreams,
     isStreamExists,
     isStreamFetched,
+    getStreamsFetchedAt,
     addNewStreams,
     // Internal functions exposed for testing
     updateStreamsInStore,

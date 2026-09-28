@@ -15,8 +15,6 @@
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import SearchResult from "@/plugins/logs/SearchResult.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
@@ -25,9 +23,41 @@ const node = document.createElement("div");
 node.setAttribute("id", "app");
 document.body.appendChild(node);
 
-installQuasar({
-  plugins: [Dialog, Notify],
-});
+// ── Stub for migrated ODrawer ───────────────────────────────────────────────
+// Mirrors the real ODrawer contract: v-model:open, width, show-close props
+// plus update:open / close events. The default slot renders the drawer body
+// (DetailTable) so tests can assert what's mounted inside.
+const oDrawerStub = {
+  template:
+    '<div data-test="o-drawer" v-if="open">' +
+    '<div data-test="o-drawer-body"><slot /></div>' +
+    "</div>",
+  props: ["open", "width", "showClose", "title", "subTitle", "size", "persistent"],
+  emits: ["update:open", "close"],
+};
+
+// Named stub so props and the presence of a `loading-banner` slot are observable.
+vi.mock("@/lib/core/Table/OTable.vue", () => ({
+  // defineAsyncComponent unwraps `.default` only for a module-shaped result.
+  __esModule: true,
+  default: {
+    name: "OTable",
+    props: ["columns", "data", "loading", "streaming", "wrap", "rowKey", "virtualScroll"],
+    template:
+      '<div data-test="otable-stub">' +
+      '<div v-if="$slots[\'loading-banner\']" data-test="otable-stub-has-loading-banner-slot" />' +
+      "</div>",
+  },
+}));
+
+// Named stub so both progress bars on the page can be told apart by their props.
+vi.mock("@/components/common/LoadingProgress.vue", () => ({
+  default: {
+    name: "LoadingProgress",
+    props: ["loading", "loadingProgressPercentage"],
+    template: '<div data-test="loading-progress-stub" />',
+  },
+}));
 
 describe("SearchResult Component", () => {
   let wrapper: any;
@@ -74,9 +104,11 @@ describe("SearchResult Component", () => {
           DetailTable: true,
           ChartRenderer: true,
           SanitizedHtmlRenderer: true,
-          TenstackTable: true,
+          CellActions: true,
+          O2AIContextAddBtn: true,
           PatternDetailsDialog: true,
           TracesAnalysisDashboard: true,
+          ODrawer: oDrawerStub,
         },
       },
       props: {
@@ -116,6 +148,20 @@ describe("SearchResult Component", () => {
     it("should handle missing scrollContainerRef in scrollTableToTop", () => {
       wrapper.vm.scrollContainerRef = null;
       expect(() => wrapper.vm.scrollTableToTop(0)).not.toThrow();
+    });
+
+    // Regression: the skeleton clamped the shared scroller mid-list, so a fresh patterns result mounted half-way down instead of at the top
+    it("should scroll the shared container to the top when a patterns extraction starts", async () => {
+      const scrollToSpy = vi.fn();
+      wrapper.vm.scrollContainerRef = { scrollTo: scrollToSpy };
+      wrapper.vm.patternsState = { ...wrapper.vm.patternsState, loading: false };
+      await flushPromises();
+      scrollToSpy.mockClear();
+
+      wrapper.vm.patternsState = { ...wrapper.vm.patternsState, loading: true };
+      await flushPromises();
+
+      expect(scrollToSpy).toHaveBeenCalledWith({ top: 0 });
     });
   });
 
@@ -162,9 +208,7 @@ describe("SearchResult Component", () => {
       await wrapper.vm.onTimeBoxed(timeboxData);
 
       expect(wrapper.vm.searchObj.meta.showDetailTab).toBe(false);
-      expect(wrapper.vm.searchObj.data.searchAround.indexTimestamp).toBe(
-        "2023-01-01T00:00:00Z",
-      );
+      expect(wrapper.vm.searchObj.data.searchAround.indexTimestamp).toBe("2023-01-01T00:00:00Z");
     });
   });
 
@@ -216,6 +260,34 @@ describe("SearchResult Component", () => {
     });
   });
 
+  describe("showLogCellActions", () => {
+    // The default grid (no fields selected) is timestamp + one `source` column
+    // holding the whole row as JSON, and `source` is not closable.
+    it("shows actions on the source column even though it is not closable", () => {
+      expect(
+        wrapper.vm.showLogCellActions({ id: "source", meta: { closable: false } }, { a: 1 }),
+      ).toBe(true);
+    });
+
+    it("shows actions on a closable field column that has a value", () => {
+      expect(
+        wrapper.vm.showLogCellActions({ id: "level", meta: { closable: true } }, { level: "info" }),
+      ).toBe(true);
+    });
+
+    it("hides actions on a closable field column with no value in this row", () => {
+      expect(
+        wrapper.vm.showLogCellActions({ id: "level", meta: { closable: true } }, { level: null }),
+      ).toBe(false);
+    });
+
+    it("hides actions on other non-closable columns", () => {
+      expect(
+        wrapper.vm.showLogCellActions({ id: "index", meta: { closable: false } }, { a: 1 }),
+      ).toBe(false);
+    });
+  });
+
   describe("Computed Properties", () => {
     it("should compute toggleWrapFlag", () => {
       wrapper.vm.searchObj.meta.toggleSourceWrap = true;
@@ -231,7 +303,7 @@ describe("SearchResult Component", () => {
     it("should compute updateTitle", () => {
       const title = "Test Title";
       wrapper.vm.searchObj.data.histogram.chartParams.title = title;
-      expect(wrapper.vm.updateTitle).toBe(title);
+      expect(wrapper.vm.noOfRecordsTitle).toBe(title);
     });
 
     it("should compute resetPlotChart", () => {
@@ -295,24 +367,6 @@ describe("SearchResult Component", () => {
       expect(width).toBe("");
     });
 
-    it("should compute histogramLoader when loading", () => {
-      wrapper.vm.searchObj.meta.showHistogram = true;
-      wrapper.vm.searchObj.loadingHistogram = true;
-
-      const isLoading = wrapper.vm.histogramLoader;
-
-      expect(isLoading).toBe(true);
-    });
-
-    it("should compute histogramLoader when not loading", () => {
-      wrapper.vm.searchObj.meta.showHistogram = false;
-      wrapper.vm.searchObj.loadingHistogram = false;
-
-      const isLoading = wrapper.vm.histogramLoader;
-
-      expect(isLoading).toBe(false);
-    });
-
     it("should compute getTableWidth correctly", () => {
       Object.defineProperty(window, "innerWidth", {
         writable: true,
@@ -331,11 +385,129 @@ describe("SearchResult Component", () => {
   describe("Watch Handlers", () => {
     it("should handle findFTSFields changes", async () => {
       const extractFTSFieldsSpy = vi.spyOn(wrapper.vm, "extractFTSFields");
-      wrapper.vm.searchObj.data.stream.selectedStreamFields = [
-        { name: "field1" },
-      ];
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [{ name: "field1" }];
       await wrapper.vm.$nextTick();
       expect(extractFTSFieldsSpy).toHaveBeenCalled();
+    });
+
+    it("does not set selectedFields from findFTSFields watcher (selection deferred to post-search)", async () => {
+      wrapper.vm.searchObj.data.stream.selectedFields = [];
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [
+        { name: "message", ftsKey: true },
+        { name: "pod_name", ftsKey: false },
+      ];
+      await wrapper.vm.$nextTick();
+      // Selection is now data-driven (fill-rate from hits), not optimistic
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([]);
+    });
+
+    it("does not overwrite selectedFields when user already has columns selected", async () => {
+      wrapper.vm.searchObj.data.stream.selectedFields = ["pod_name"];
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [
+        { name: "message", ftsKey: true },
+        { name: "pod_name", ftsKey: false },
+      ];
+      await wrapper.vm.$nextTick();
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual(["pod_name"]);
+    });
+
+    it("loading watcher does not override a user-chosen column (flag cleared, selection non-empty)", async () => {
+      // The user explicitly chose a column, so isFtsDefaultColumn is false and
+      // selectedFields is non-empty. The watcher must leave it alone — even if the
+      // chosen field happens to be an FTS candidate.
+      wrapper.vm.searchObj.data.stream.selectedFields = ["kubernetes_pod_id"];
+      wrapper.vm.searchObj.meta.isFtsDefaultColumn = false;
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [
+        { name: "message", ftsKey: true },
+        { name: "kubernetes_pod_id", ftsKey: false },
+      ];
+      wrapper.vm.searchObj.data.queryResults = {
+        hits: [{ message: "hello", kubernetes_pod_id: "pod-1" }],
+      };
+      wrapper.vm.searchObj.meta.sqlMode = false;
+      wrapper.vm.searchObj.meta.searchApplied = true;
+
+      wrapper.vm.searchObj.loading = true;
+      await wrapper.vm.$nextTick();
+      wrapper.vm.searchObj.loading = false;
+      await wrapper.vm.$nextTick();
+
+      // User's choice preserved; no FTS default injected.
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual(["kubernetes_pod_id"]);
+      expect(wrapper.vm.searchObj.meta.isFtsDefaultColumn).toBe(false);
+    });
+
+    it("loading watcher re-resolves when the current columns are a prior system pick", async () => {
+      // A previous system pick is in place (flag true). A new search may change
+      // fill rates, so the watcher is allowed to re-resolve the default — and the
+      // result stays flagged as a system pick.
+      wrapper.vm.searchObj.data.stream.selectedFields = ["log"];
+      wrapper.vm.searchObj.meta.isFtsDefaultColumn = true;
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [
+        { name: "message", ftsKey: true },
+        { name: "log", ftsKey: true },
+      ];
+      wrapper.vm.searchObj.data.queryResults = {
+        hits: [{ message: "hello", log: "" }],
+      };
+      wrapper.vm.searchObj.meta.sqlMode = false;
+      wrapper.vm.searchObj.meta.searchApplied = true;
+
+      wrapper.vm.searchObj.loading = true;
+      await wrapper.vm.$nextTick();
+      wrapper.vm.searchObj.loading = false;
+      await wrapper.vm.$nextTick();
+
+      // "message" is filled, "log" is empty → best-fill picks "message".
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual(["message"]);
+      expect(wrapper.vm.searchObj.meta.isFtsDefaultColumn).toBe(true);
+    });
+
+    it("loading watcher resolves an FTS default (system pick) when there is no selection", async () => {
+      wrapper.vm.searchObj.data.stream.selectedFields = [];
+      wrapper.vm.searchObj.meta.isFtsDefaultColumn = false;
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [
+        { name: "message", ftsKey: true },
+        { name: "kubernetes_pod_id", ftsKey: false },
+      ];
+      wrapper.vm.searchObj.data.queryResults = {
+        hits: [{ message: "hello", kubernetes_pod_id: "pod-1" }],
+      };
+      wrapper.vm.searchObj.meta.sqlMode = false;
+      wrapper.vm.searchObj.meta.searchApplied = true;
+
+      wrapper.vm.searchObj.loading = true;
+      await wrapper.vm.$nextTick();
+      wrapper.vm.searchObj.loading = false;
+      await wrapper.vm.$nextTick();
+
+      // No selection → the best-filled FTS field ("message") becomes the default,
+      // and is marked as a system pick so it is never persisted.
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual(["message"]);
+      expect(wrapper.vm.searchObj.meta.isFtsDefaultColumn).toBe(true);
+    });
+
+    it("loading watcher leaves columns alone in SQL mode (custom queries are authoritative)", async () => {
+      // A hand-written SQL query (CTE / aggregate) with no pinned fields renders
+      // the generic "source" column. The FTS feature must not override a custom
+      // query's result columns.
+      wrapper.vm.searchObj.data.stream.selectedFields = [];
+      wrapper.vm.searchObj.meta.isFtsDefaultColumn = false;
+      wrapper.vm.searchObj.data.stream.selectedStreamFields = [{ name: "message", ftsKey: true }];
+      wrapper.vm.searchObj.data.queryResults = {
+        hits: [{ message: "hello" }],
+      };
+      wrapper.vm.searchObj.meta.sqlMode = true;
+      wrapper.vm.searchObj.meta.searchApplied = true;
+
+      wrapper.vm.searchObj.loading = true;
+      await wrapper.vm.$nextTick();
+      wrapper.vm.searchObj.loading = false;
+      await wrapper.vm.$nextTick();
+
+      // sqlMode short-circuits the watcher → selectedFields untouched (stays empty
+      // so updateGridColumns renders the "source" column).
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([]);
     });
 
     it("should handle updateTitle changes", async () => {
@@ -388,14 +560,16 @@ describe("SearchResult Component", () => {
 
     it("should handle column sizes update with empty previous sizes", async () => {
       wrapper.vm.searchObj.data.resultGrid.colSizes = {};
-      wrapper.vm.searchObj.data.stream.selectedStream = "new-stream";
+      wrapper.vm.searchObj.data.stream.selectedStream = ["new-stream"];
 
+      // handleColumnSizesUpdate converts column-id-keyed sizes into the CSS-var
+      // persistence format so saved views load correctly.
       const newSizes = { col1: 100 };
       await wrapper.vm.handleColumnSizesUpdate(newSizes);
 
-      expect(
-        wrapper.vm.searchObj.data.resultGrid.colSizes["new-stream"],
-      ).toEqual([newSizes]);
+      expect(wrapper.vm.searchObj.data.resultGrid.colSizes["new-stream"]).toEqual([
+        { "--col-col1-size": 100, "--header-col1-size": 100 },
+      ]);
     });
 
     it("should handle empty column order update", async () => {
@@ -405,9 +579,7 @@ describe("SearchResult Component", () => {
 
       await wrapper.vm.handleColumnOrderUpdate(newOrder, columns);
 
-      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual([
-        "field1",
-      ]);
+      expect(wrapper.vm.searchObj.data.stream.selectedFields).toEqual(["field1"]);
     });
   });
 
@@ -560,9 +732,7 @@ describe("SearchResult Component", () => {
 
       await wrapper.vm.onTimeBoxed(timeboxData);
 
-      expect(wrapper.vm.searchObj.data.searchAround.indexTimestamp).toBe(
-        "2023-01-01T00:00:00Z",
-      );
+      expect(wrapper.vm.searchObj.data.searchAround.indexTimestamp).toBe("2023-01-01T00:00:00Z");
       expect(wrapper.vm.searchObj.meta.showDetailTab).toBe(false);
     });
   });
@@ -708,6 +878,176 @@ describe("SearchResult Component", () => {
         start: 0,
         end: 0,
       });
+    });
+  });
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // ODrawer migration coverage
+  //
+  // The Detail Tab was migrated to <ODrawer>. These tests
+  // pin the v-model:open binding to searchObj.meta.showDetailTab and the
+  // close behaviour (which must trigger reDrawChart).
+  // ───────────────────────────────────────────────────────────────────────────
+  describe("Detail Tab — ODrawer migration", () => {
+    it("does not render the Detail ODrawer by default (showDetailTab=false)", () => {
+      expect(wrapper.vm.searchObj.meta.showDetailTab).toBe(false);
+      expect(wrapper.find('[data-test="logs-search-result-detail-dialog"]').exists()).toBe(false);
+    });
+
+    it("renders the Detail ODrawer once showDetailTab flips true", async () => {
+      wrapper.vm.searchObj.meta.showDetailTab = true;
+      await flushPromises();
+
+      const drawer = wrapper.findComponent(oDrawerStub);
+      expect(drawer.exists()).toBe(true);
+      expect(drawer.props("open")).toBe(true);
+      expect(drawer.props("width")).toBe(85);
+    });
+
+    it("closes the Detail ODrawer when update:open=false (v-model:open contract) and calls reDrawChart", async () => {
+      wrapper.vm.searchObj.meta.showDetailTab = true;
+      await flushPromises();
+
+      const reDrawSpy = vi.spyOn(wrapper.vm, "reDrawChart");
+      const drawer = wrapper.findComponent(oDrawerStub);
+      drawer.vm.$emit("update:open", false);
+      await flushPromises();
+
+      expect(wrapper.vm.searchObj.meta.showDetailTab).toBe(false);
+      expect(reDrawSpy).toHaveBeenCalled();
+    });
+
+    it("does NOT call reDrawChart when update:open=true is emitted (only on close)", async () => {
+      wrapper.vm.searchObj.meta.showDetailTab = true;
+      await flushPromises();
+
+      const reDrawSpy = vi.spyOn(wrapper.vm, "reDrawChart");
+      const drawer = wrapper.findComponent(oDrawerStub);
+      drawer.vm.$emit("update:open", true);
+      await flushPromises();
+
+      expect(reDrawSpy).not.toHaveBeenCalled();
+    });
+
+    it("closes the Detail ODrawer when update:open=false is emitted a second time", async () => {
+      wrapper.vm.searchObj.meta.showDetailTab = true;
+      await flushPromises();
+
+      const drawer = wrapper.findComponent(oDrawerStub);
+      drawer.vm.$emit("update:open", false);
+      await flushPromises();
+
+      expect(wrapper.vm.searchObj.meta.showDetailTab).toBe(false);
+    });
+  });
+  describe("streaming results grid (#14303)", () => {
+    const hits = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ _timestamp: i, log: `line-${i}` }));
+
+    const setState = async (loading: boolean, rows: any[]) => {
+      wrapper.vm.searchObj.loading = loading;
+      wrapper.vm.searchObj.data.queryResults = { hits: rows };
+      await wrapper.vm.$nextTick();
+      await flushPromises();
+    };
+
+    const table = () => wrapper.findComponent({ name: "OTable" });
+
+    it("shows the skeleton on first paint: loading with no rows", async () => {
+      await setState(true, []);
+      expect(table().props("loading")).toBe(true);
+      expect(table().props("streaming")).toBe(false);
+    });
+
+    it("switches to streaming once rows exist while still loading", async () => {
+      await setState(true, hits(3));
+      expect(table().props("loading")).toBe(false);
+      expect(table().props("streaming")).toBe(true);
+    });
+
+    it("is neither loading nor streaming once the search settles with rows", async () => {
+      await setState(false, hits(3));
+      expect(table().props("loading")).toBe(false);
+      expect(table().props("streaming")).toBe(false);
+    });
+
+    it("is neither loading nor streaming when the search settles with no rows", async () => {
+      await setState(false, []);
+      expect(table().props("loading")).toBe(false);
+      expect(table().props("streaming")).toBe(false);
+    });
+
+    it("tracks the latest hits array across successive replacements", async () => {
+      await setState(true, hits(2));
+      expect(table().props("data").length).toBe(2);
+      await setState(true, hits(5));
+      expect(table().props("data").length).toBe(5);
+      await setState(true, hits(9));
+      expect(table().props("data").length).toBe(9);
+    });
+
+    it("never remounts the grid across successive replacements", async () => {
+      await setState(true, hits(2));
+      const uid = table().vm.$.uid;
+      await setState(true, hits(5));
+      expect(table().vm.$.uid).toBe(uid);
+      await setState(true, hits(9));
+      expect(table().vm.$.uid).toBe(uid);
+      await setState(false, hits(9));
+      expect(table().vm.$.uid).toBe(uid);
+    });
+
+    it("returns streaming to false when the hits are emptied mid-search", async () => {
+      await setState(true, hits(3));
+      expect(table().props("streaming")).toBe(true);
+      await setState(true, []);
+      expect(table().props("streaming")).toBe(false);
+    });
+
+    it("passes a loading-banner slot so OTable suppresses its default banner", async () => {
+      await setState(true, hits(3));
+      expect(wrapper.find('[data-test="otable-stub-has-loading-banner-slot"]').exists()).toBe(true);
+    });
+  });
+  describe("results progress bar (#14303)", () => {
+    const progressBars = () => wrapper.findAllComponents({ name: "LoadingProgress" });
+    const barsLoading = () => progressBars().filter((bar: any) => bar.props("loading") === true);
+
+    const setProgress = async (loading: boolean, percentage: number | undefined) => {
+      wrapper.vm.searchObj.loading = loading;
+      wrapper.vm.searchObj.loadingProgressPercentage = percentage;
+      wrapper.vm.searchObj.loadingHistogram = false;
+      wrapper.vm.searchObj.loadingHistogramProgressPercentage = 0;
+      await wrapper.vm.$nextTick();
+      await flushPromises();
+    };
+
+    it("binds the streaming results percentage to its own progress bar", async () => {
+      await setProgress(true, 42);
+      expect(barsLoading()).toHaveLength(1);
+      expect(barsLoading()[0].props("loadingProgressPercentage")).toBe(42);
+    });
+
+    it("falls back to 0 when no progress has been reported yet", async () => {
+      await setProgress(true, undefined);
+      expect(barsLoading()).toHaveLength(1);
+      expect(barsLoading()[0].props("loadingProgressPercentage")).toBe(0);
+    });
+
+    it("stays mounted with loading=false so it can run its own fade-out", async () => {
+      await setProgress(false, 37);
+      const settled = progressBars().filter(
+        (bar: any) => bar.props("loadingProgressPercentage") === 37,
+      );
+      expect(settled).toHaveLength(1);
+      expect(settled[0].props("loading")).toBe(false);
+    });
+
+    it("does not let the histogram bar stand in for the results bar", async () => {
+      await setProgress(true, 42);
+      expect(barsLoading()).toHaveLength(1);
+      expect(barsLoading()[0].props("loadingProgressPercentage")).toBe(42);
+      expect(wrapper.vm.searchObj.loadingHistogram).toBe(false);
     });
   });
 });

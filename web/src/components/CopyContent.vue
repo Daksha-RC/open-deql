@@ -15,40 +15,52 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="tabContent">
-    <div class="tabContent__head">
-      <div>
-        <div class="copy_action">
-          <q-btn
-            data-test="rum-copy-btn"
-            flat
-            round
-            size="0.5rem"
-            padding="0.6rem"
-            icon="content_copy"
-            color="grey"
-            @click="copyToClipboardFn()"
-          />
-        </div>
-      </div>
+  <!-- an empty passcode would substitute into a valid-looking but non-functional snippet -->
+  <OBanner
+    v-if="passcodeForbidden && contentNeedsPasscode"
+    variant="warning"
+    data-test="copy-content-passcode-forbidden"
+    :content="t('ingestion.passcodeForbiddenMessage')"
+  />
+  <div v-else class="rounded-default copy-content-block bg-surface-subtle relative overflow-hidden">
+    <div class="absolute top-2 right-2 z-10">
+      <OButton
+        data-test="rum-copy-btn"
+        variant="ghost"
+        size="icon-xs-sq"
+        @click="copyToClipboardFn()"
+      >
+        <OIcon name="content-copy" size="sm" />
+        <OTooltip :content="t('common.copy')" side="top" />
+      </OButton>
     </div>
-    <pre data-test="rum-content-text">{{ computedContent }}</pre>
+    <pre
+      data-test="rum-content-text"
+      class="m-0 p-3 pe-10 text-sm leading-5 wrap-break-word whitespace-pre-wrap"
+      >{{ computedContent }}</pre>
   </div>
 </template>
 
 <script lang="ts">
 // @ts-nocheck
-import { defineComponent, ref } from "vue";
-import { useI18n } from "vue-i18n";
+import { defineComponent, ref, type PropType } from "vue";
+import { type I18nText, useI18nTyped } from "@/types/i18n";
 import { useStore } from "vuex";
-import { useQuasar, copyToClipboard } from "quasar";
+import { copyToClipboard } from "@/utils/clipboard";
 import { maskText, b64EncodeStandard } from "../utils/zincutils";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OBanner from "@/lib/feedback/Banner/OBanner.vue";
+
+const PASSCODE_PLACEHOLDERS = ["[PASSCODE]", "[BASIC_PASSCODE]"];
 
 export default defineComponent({
   name: "CopyContent",
+  components: { OButton, OIcon, OTooltip, OBanner },
   props: {
     content: {
-      type: String,
+      type: String as unknown as PropType<I18nText>,
       default: "", // Default value for content prop (empty string in this case)
     },
     displayContent: {
@@ -56,10 +68,9 @@ export default defineComponent({
       default: "", // Default value for displayContent prop (empty string in this case)
     },
   },
-  setup(props, { emit }) {
+  setup(props) {
     const store = useStore();
-    const { t } = useI18n();
-    const q = useQuasar();
+    const { t } = useI18nTyped();
     const email = ref(store.state.userInfo.email);
     const passcode = ref(store.state.organizationData.organizationPasscode);
     const basicPasscode = ref();
@@ -68,7 +79,7 @@ export default defineComponent({
       email.value = store.state.userInfo.email;
       passcode.value = store.state.organizationData.organizationPasscode;
       basicPasscode.value = b64EncodeStandard(
-        `${store.state.userInfo.email}:${store.state.organizationData.organizationPasscode}`
+        `${email.value}:${store.state.organizationData.organizationPasscode}`,
       );
       if (isMask) {
         return data
@@ -85,21 +96,11 @@ export default defineComponent({
 
     const copyToClipboardFn = () => {
       const content = replaceValues(props.content, false);
-      copyToClipboard(content)
-        .then(() => {
-          q.notify({
-            type: "positive",
-            message: "Content Copied Successfully!",
-            timeout: 5000,
-          });
-        })
-        .catch(() => {
-          q.notify({
-            type: "negative",
-            message: "Error while copy content.",
-            timeout: 5000,
-          });
-        });
+      copyToClipboard(content, t, {
+        successMessage: t("common.contentCopiedSuccessfully"),
+        errorMessage: t("common.copyContentError"),
+        timeout: 5000,
+      });
     };
 
     const displayData = ref(props.displayContent || props.content);
@@ -123,6 +124,13 @@ export default defineComponent({
   computed: {
     computedData() {
       return this.store.state.organizationData.organizationPasscode;
+    },
+    passcodeForbidden() {
+      return !!this.store.state.organizationData.organizationPasscodeForbidden;
+    },
+    contentNeedsPasscode() {
+      const source = this.displayContent || this.content || "";
+      return PASSCODE_PLACEHOLDERS.some((token) => source.includes(token));
     },
   },
   watch: {

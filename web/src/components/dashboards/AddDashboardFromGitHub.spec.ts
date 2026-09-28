@@ -1,46 +1,200 @@
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Notify } from "quasar";
 import AddDashboardFromGitHub from "./AddDashboardFromGitHub.vue";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
 
 // Mock dashboards service
-vi.mock("@/services/dashboards", () => ({
-  default: {
-    list_Folders: vi.fn(),
-    list: vi.fn(),
-    create: vi.fn(),
-    delete: vi.fn(),
-  },
-}));
+vi.mock("@/services/dashboards", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      list_Folders: vi.fn(),
+      list: vi.fn(),
+      create: vi.fn(),
+      delete: vi.fn(),
+    },
+  });
+});
 
 // Mock AddFolder component
 vi.mock("@/components/dashboards/AddFolder.vue", () => ({
   default: {
     name: "AddFolder",
     template: '<div class="add-folder-mock"></div>',
-    emits: ["update:modelValue"],
+    emits: ["update:modelValue", "close"],
   },
 }));
 
 // Mock global fetch
 const mockFetch = vi.fn();
 
-installQuasar({ plugins: [Notify] });
+// Helper to generate S3 ListObjectsV2 XML for folder listing (CommonPrefixes)
+const s3FolderListXml = (folders: string[]): string => {
+  const prefixes = folders
+    .map((f) => `  <CommonPrefixes><Prefix>dashboards/${f}/</Prefix></CommonPrefixes>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n${prefixes}\n</ListBucketResult>`;
+};
+
+// Helper to generate S3 ListObjectsV2 XML for file listing (Contents/Key)
+const s3FileListXml = (folderPath: string, files: string[]): string => {
+  const keys = files
+    .map((f) => `  <Contents><Key>dashboards/${folderPath}/${f}</Key></Contents>`)
+    .join("\n");
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">\n${keys}\n</ListBucketResult>`;
+};
 
 import dashboardsService from "@/services/dashboards";
+
+const OIconStub = {
+  name: "OIcon",
+  props: ["name", "size"],
+  template: '<span class="OIcon">{{ name }}</span>',
+};
+
+const OSpinnerStub = {
+  name: "OSpinner",
+  props: ["size"],
+  template: '<div data-test-stub="o-spinner" :data-size="size"></div>',
+};
+
+const OInputStub = {
+  name: "OInput",
+  props: ["modelValue", "placeholder", "clearable"],
+  emits: ["update:modelValue"],
+  template: `
+    <div data-test-stub="o-input">
+      <slot name="icon-left" />
+      <input
+        :value="modelValue"
+        :placeholder="placeholder"
+        :data-test="$attrs['data-test']"
+        @input="$emit('update:modelValue', $event.target.value)"
+      />
+    </div>
+  `,
+};
+
+const OCheckboxStub = {
+  name: "OCheckbox",
+  props: ["modelValue"],
+  emits: ["update:modelValue"],
+  template:
+    '<input type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />',
+};
+
+const OSelectStub = {
+  name: "OSelect",
+  props: ["modelValue", "options", "label"],
+  emits: ["update:modelValue"],
+  template: `
+    <div data-test-stub="o-select" :data-test="$attrs['data-test']">
+      <select :value="modelValue" @change="$emit('update:modelValue', $event.target.value)">
+        <option v-for="opt in options" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+      </select>
+    </div>
+  `,
+};
+const ODrawerStub = {
+  name: "ODrawer",
+  props: [
+    "open",
+    "side",
+    "size",
+    "width",
+    "title",
+    "subTitle",
+    "showClose",
+    "persistent",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral", "close"],
+  template: `
+    <div
+      data-test-stub="o-drawer"
+      :data-open="open"
+      :data-title="title"
+      :data-size="size"
+      :data-side="side"
+      :data-primary-label="primaryButtonLabel"
+      :data-secondary-label="secondaryButtonLabel"
+      :data-primary-disabled="primaryButtonDisabled"
+      :data-primary-loading="primaryButtonLoading"
+    >
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+    </div>
+  `,
+};
+
+const ODialogStub = {
+  name: "ODialog",
+  props: [
+    "open",
+    "size",
+    "width",
+    "title",
+    "subTitle",
+    "showClose",
+    "persistent",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test-stub="o-dialog"
+      :data-open="open"
+      :data-title="title"
+      :data-size="size"
+      :data-persistent="persistent"
+      :data-primary-label="primaryButtonLabel"
+      :data-secondary-label="secondaryButtonLabel"
+      :data-primary-disabled="primaryButtonDisabled"
+      :data-primary-loading="primaryButtonLoading"
+    >
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+    </div>
+  `,
+};
+
+const OButtonStub = {
+  name: "OButton",
+  props: ["variant", "size", "disabled", "loading"],
+  emits: ["click"],
+  inheritAttrs: false,
+  template: `<button data-test-stub="o-button" :data-test="$attrs['data-test']" :disabled="disabled" @click="$emit('click', $event)"><slot name="icon-left" /><slot /></button>`,
+};
 
 describe("AddDashboardFromGitHub Component", () => {
   let wrapper: any;
 
-  const mockGitHubFolders = [
-    { name: "aws", type: "dir" },
-    { name: "nginx", type: "dir" },
-    { name: "kubernetes", type: "dir" },
-    { name: ".github", type: "dir" }, // Should be filtered
-  ];
+  const mockS3Folders = ["aws", "nginx", "kubernetes", ".github"];
 
   const mockFolderList = {
     data: {
@@ -60,68 +214,14 @@ describe("AddDashboardFromGitHub Component", () => {
       global: {
         plugins: [i18n, store],
         stubs: {
-          "q-dialog": {
-            template: '<div class="q-dialog"><slot /></div>',
-            props: ["modelValue"],
-          },
-          "q-card": {
-            template: '<div class="q-card"><slot /></div>',
-          },
-          "q-card-section": {
-            template: '<div class="q-card-section"><slot /></div>',
-          },
-          "q-card-actions": {
-            template: '<div class="q-card-actions"><slot /></div>',
-          },
-          "q-separator": {
-            template: '<hr class="q-separator" />',
-          },
-          "q-btn": {
-            template:
-              '<button @click="$emit(\'click\')" :data-test="$attrs[\'data-test\']" :disabled="$attrs.disable"><slot />{{ $attrs.label }}</button>',
-            emits: ["click"],
-          },
-          "q-spinner": {
-            template: '<div class="q-spinner"></div>',
-          },
-          "q-icon": {
-            template: '<span class="q-icon">{{ $attrs.name }}</span>',
-          },
-          "q-input": {
-            template:
-              '<input :value="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" :data-test="$attrs[\'data-test\']" />',
-            props: ["modelValue"],
-            emits: ["update:modelValue"],
-          },
-          "q-list": {
-            template: '<ul class="q-list"><slot /></ul>',
-          },
-          "q-item": {
-            template:
-              '<li class="q-item" @click="$emit(\'click\')" :data-test="$attrs[\'data-test\']"><slot /></li>',
-            emits: ["click"],
-          },
-          "q-item-section": {
-            template: '<div class="q-item-section"><slot /></div>',
-          },
-          "q-item-label": {
-            template: '<span class="q-item-label"><slot /></span>',
-          },
-          "q-checkbox": {
-            template:
-              '<input type="checkbox" :checked="modelValue" @change="$emit(\'update:modelValue\', $event.target.checked)" />',
-            props: ["modelValue"],
-            emits: ["update:modelValue"],
-          },
-          "q-select": {
-            template:
-              '<select :data-test="$attrs[\'data-test\']"><slot /></select>',
-            props: ["modelValue", "options"],
-          },
-          AddFolder: {
-            template: '<div class="add-folder-mock"></div>',
-            emits: ["update:modelValue"],
-          },
+          ODrawer: ODrawerStub,
+          ODialog: ODialogStub,
+          OButton: OButtonStub,
+          OIcon: OIconStub,
+          OSpinner: OSpinnerStub,
+          OInput: OInputStub,
+          OCheckbox: OCheckboxStub,
+          OSelect: OSelectStub,
         },
       },
     });
@@ -149,16 +249,17 @@ describe("AddDashboardFromGitHub Component", () => {
     // Default fetch mock - return empty folders
     mockFetch.mockResolvedValue(new Response("[]", { status: 200 }));
 
-    vi.mocked(dashboardsService.list_Folders).mockResolvedValue(
-      mockFolderList as any
-    );
+    vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
   });
 
   afterEach(() => {
     if (wrapper) {
-      wrapper.unmount();
+      try {
+        wrapper.unmount();
+      } catch {
+        // Component may already be destroyed — ignore unmount errors
+      }
     }
-    vi.unstubAllGlobals();
   });
 
   describe("Component Initialization", () => {
@@ -227,9 +328,26 @@ describe("AddDashboardFromGitHub Component", () => {
     beforeEach(() => {
       wrapper = createWrapper({ modelValue: false });
       wrapper.vm.dashboards = [
-        { name: "aws_ec2", displayName: "AWS EC2", description: "EC2 monitoring", folderPath: "aws_ec2", jsonFiles: [] },
-        { name: "nginx_web", displayName: "Nginx Web", description: "Nginx web server", folderPath: "nginx_web", jsonFiles: [] },
-        { name: "kubernetes_cluster", displayName: "Kubernetes Cluster", folderPath: "kubernetes_cluster", jsonFiles: [] },
+        {
+          name: "aws_ec2",
+          displayName: "AWS EC2",
+          description: "EC2 monitoring",
+          folderPath: "aws_ec2",
+          jsonFiles: [],
+        },
+        {
+          name: "nginx_web",
+          displayName: "Nginx Web",
+          description: "Nginx web server",
+          folderPath: "nginx_web",
+          jsonFiles: [],
+        },
+        {
+          name: "kubernetes_cluster",
+          displayName: "Kubernetes Cluster",
+          folderPath: "kubernetes_cluster",
+          jsonFiles: [],
+        },
       ];
     });
 
@@ -273,12 +391,22 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should return false when dashboard is not selected", () => {
-      const dashboard = { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] };
+      const dashboard = {
+        name: "aws_ec2",
+        displayName: "AWS EC2",
+        folderPath: "aws_ec2",
+        jsonFiles: [],
+      };
       expect(wrapper.vm.isSelected(dashboard)).toBe(false);
     });
 
     it("should return true when dashboard is selected", () => {
-      const dashboard = { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] };
+      const dashboard = {
+        name: "aws_ec2",
+        displayName: "AWS EC2",
+        folderPath: "aws_ec2",
+        jsonFiles: [],
+      };
       wrapper.vm.selectedDashboards.push(dashboard);
       expect(wrapper.vm.isSelected(dashboard)).toBe(true);
     });
@@ -290,20 +418,35 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should add dashboard to selectedDashboards when not selected", () => {
-      const dashboard = { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] };
+      const dashboard = {
+        name: "aws_ec2",
+        displayName: "AWS EC2",
+        folderPath: "aws_ec2",
+        jsonFiles: [],
+      };
       wrapper.vm.toggleDashboard(dashboard);
       expect(wrapper.vm.selectedDashboards).toContainEqual(dashboard);
     });
 
     it("should remove dashboard from selectedDashboards when already selected", () => {
-      const dashboard = { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] };
+      const dashboard = {
+        name: "aws_ec2",
+        displayName: "AWS EC2",
+        folderPath: "aws_ec2",
+        jsonFiles: [],
+      };
       wrapper.vm.selectedDashboards.push(dashboard);
       wrapper.vm.toggleDashboard(dashboard);
       expect(wrapper.vm.selectedDashboards).not.toContain(dashboard);
     });
 
     it("should toggle correctly on multiple calls", () => {
-      const dashboard = { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] };
+      const dashboard = {
+        name: "aws_ec2",
+        displayName: "AWS EC2",
+        folderPath: "aws_ec2",
+        jsonFiles: [],
+      };
       wrapper.vm.toggleDashboard(dashboard);
       expect(wrapper.vm.selectedDashboards).toHaveLength(1);
       wrapper.vm.toggleDashboard(dashboard);
@@ -324,12 +467,8 @@ describe("AddDashboardFromGitHub Component", () => {
       mockFetch.mockImplementation(
         () =>
           new Promise((resolve) =>
-            setTimeout(
-              () =>
-                resolve(new Response("[]", { status: 200 })),
-              100
-            )
-          )
+            setTimeout(() => resolve(new Response(s3FolderListXml([]), { status: 200 })), 100),
+          ),
       );
       wrapper = createWrapper({ modelValue: false });
       const loadPromise = wrapper.vm.loadDashboards();
@@ -355,7 +494,7 @@ describe("AddDashboardFromGitHub Component", () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it("should fetch from GitHub when cache is expired", async () => {
+    it("should fetch from S3 when cache is expired", async () => {
       (store.state as any).githubDashboardGallery = {
         dashboards: [],
         lastFetched: Date.now() - 400000, // expired
@@ -363,9 +502,7 @@ describe("AddDashboardFromGitHub Component", () => {
         dashboardJsonCache: {},
       };
 
-      mockFetch.mockResolvedValue(
-        new Response(JSON.stringify(mockGitHubFolders), { status: 200 })
-      );
+      mockFetch.mockResolvedValue(new Response(s3FolderListXml(mockS3Folders), { status: 200 }));
 
       wrapper = createWrapper({ modelValue: false });
       await wrapper.vm.loadDashboards();
@@ -375,9 +512,7 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should filter out dot-prefixed directories", async () => {
-      mockFetch.mockResolvedValue(
-        new Response(JSON.stringify(mockGitHubFolders), { status: 200 })
-      );
+      mockFetch.mockResolvedValue(new Response(s3FolderListXml(mockS3Folders), { status: 200 }));
 
       wrapper = createWrapper({ modelValue: false });
       await wrapper.vm.loadDashboards();
@@ -385,22 +520,26 @@ describe("AddDashboardFromGitHub Component", () => {
 
       const names = wrapper.vm.dashboards.map((d: any) => d.name);
       expect(names).not.toContain(".github");
+      expect(names).toContain("aws");
+      expect(names).toContain("nginx");
     });
 
-    it("should filter out non-directory items", async () => {
-      const items = [
-        { name: "aws", type: "dir" },
-        { name: "README.md", type: "file" },
-      ];
-      mockFetch.mockResolvedValue(
-        new Response(JSON.stringify(items), { status: 200 })
-      );
+    it("should only include folders from S3 CommonPrefixes response", async () => {
+      // S3 ListObjectsV2 with delimiter=/ returns CommonPrefixes for folders
+      // and Contents for files at the root level. parseS3Folders only reads CommonPrefixes.
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <CommonPrefixes><Prefix>dashboards/aws/</Prefix></CommonPrefixes>
+  <Contents><Key>dashboards/README.md</Key></Contents>
+</ListBucketResult>`;
+      mockFetch.mockResolvedValue(new Response(xml, { status: 200 }));
 
       wrapper = createWrapper({ modelValue: false });
       await wrapper.vm.loadDashboards();
       await flushPromises();
 
       const names = wrapper.vm.dashboards.map((d: any) => d.name);
+      expect(names).toContain("aws");
       expect(names).not.toContain("README.md");
     });
 
@@ -425,13 +564,8 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should sort dashboards alphabetically", async () => {
-      const unsortedFolders = [
-        { name: "z_last", type: "dir" },
-        { name: "a_first", type: "dir" },
-        { name: "m_middle", type: "dir" },
-      ];
       mockFetch.mockResolvedValue(
-        new Response(JSON.stringify(unsortedFolders), { status: 200 })
+        new Response(s3FolderListXml(["z_last", "a_first", "m_middle"]), { status: 200 }),
       );
 
       wrapper = createWrapper({ modelValue: false });
@@ -459,14 +593,9 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should call loadFolders when dashboards are selected", async () => {
-      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(
-        mockFolderList as any
-      );
-      const mockJsonFiles = [
-        { name: "dashboard.json", type: "file" },
-      ];
+      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
       mockFetch.mockResolvedValue(
-        new Response(JSON.stringify(mockJsonFiles), { status: 200 })
+        new Response(s3FileListXml("aws_ec2", ["dashboard.json"]), { status: 200 }),
       );
 
       wrapper = createWrapper({ modelValue: false });
@@ -481,14 +610,17 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should show folder selection dialog after successful next", async () => {
-      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(
-        mockFolderList as any
-      );
+      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
       mockFetch.mockResolvedValue(new Response("[]", { status: 200 }));
 
       wrapper = createWrapper({ modelValue: false });
       wrapper.vm.selectedDashboards = [
-        { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: ["dash.json"] },
+        {
+          name: "aws_ec2",
+          displayName: "AWS EC2",
+          folderPath: "aws_ec2",
+          jsonFiles: ["dash.json"],
+        },
       ];
 
       await wrapper.vm.handleNext();
@@ -507,9 +639,7 @@ describe("AddDashboardFromGitHub Component", () => {
     });
 
     it("should auto-select newly created folder", async () => {
-      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(
-        mockFolderList as any
-      );
+      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
       wrapper = createWrapper({ modelValue: false });
 
       await wrapper.vm.updateFolderList({
@@ -517,10 +647,7 @@ describe("AddDashboardFromGitHub Component", () => {
       });
       await flushPromises();
 
-      expect(wrapper.vm.selectedFolderObj).toEqual({
-        label: "New Folder",
-        value: "new-folder-id",
-      });
+      expect(wrapper.vm.selectedFolderObj).toBe("new-folder-id");
     });
 
     it("should not update selectedFolderObj when newFolder has no data", async () => {
@@ -579,6 +706,21 @@ describe("AddDashboardFromGitHub Component", () => {
 
       expect(wrapper.vm.showFolderSelection).toBe(false);
     });
+
+    it("resolves a pending replace-confirm as declined when the dialog closes", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+
+      // A parked confirm would otherwise never settle and leak `importing` as true.
+      const resolveSpy = vi.fn();
+      wrapper.vm.replaceConfirm = { title: "Host Metrics", resolve: resolveSpy };
+
+      await wrapper.setProps({ modelValue: false });
+      await wrapper.vm.$nextTick();
+
+      expect(resolveSpy).toHaveBeenCalledWith(false);
+      expect(wrapper.vm.replaceConfirm).toBeNull();
+    });
   });
 
   describe("loadFolders Function", () => {
@@ -587,9 +729,7 @@ describe("AddDashboardFromGitHub Component", () => {
     const preloadedDashboard = { name: "nginx", folderPath: "nginx", jsonFiles: ["nginx.json"] };
 
     it("should populate folderOptions from dashboards service", async () => {
-      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(
-        mockFolderList as any
-      );
+      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
 
       wrapper = createWrapper({ modelValue: false });
       wrapper.vm.selectedDashboards = [preloadedDashboard];
@@ -617,26 +757,26 @@ describe("AddDashboardFromGitHub Component", () => {
       expect(wrapper.vm.folderOptions[0].value).toBe("default");
     });
 
-    it("should set selectedFolderObj to null after loading", async () => {
-      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(
-        mockFolderList as any
-      );
+    it("should auto-select default folder when previous selection is no longer valid", async () => {
+      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
 
       wrapper = createWrapper({ modelValue: false });
       wrapper.vm.selectedDashboards = [preloadedDashboard];
-      wrapper.vm.selectedFolderObj = { label: "Old Folder", value: "old" };
+      wrapper.vm.selectedFolderObj = "old";
       await wrapper.vm.handleNext();
       await flushPromises();
 
-      expect(wrapper.vm.selectedFolderObj).toBeNull();
+      expect(wrapper.vm.selectedFolderObj).toBe("default");
     });
   });
 
   describe("Template Rendering", () => {
-    it("should render close button", async () => {
+    it("should render the ODrawer wrapper with the gallery title", async () => {
       wrapper = createWrapper({ modelValue: true });
       await flushPromises();
-      expect(wrapper.find('[data-test="add-dashboard-github-close"]').exists()).toBe(true);
+      const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+      expect(drawer.exists()).toBe(true);
+      expect(drawer.attributes("data-title")).toBe("Add Dashboard from Gallery");
     });
 
     it("should render search input", async () => {
@@ -645,23 +785,47 @@ describe("AddDashboardFromGitHub Component", () => {
       expect(wrapper.find('[data-test="add-dashboard-github-search"]').exists()).toBe(true);
     });
 
-    it("should render cancel button", async () => {
+    it("should expose the Cancel label on the ODrawer secondary button", async () => {
       wrapper = createWrapper({ modelValue: true });
       await flushPromises();
-      expect(wrapper.find('[data-test="add-dashboard-github-cancel"]').exists()).toBe(true);
+      const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+      expect(drawer.attributes("data-secondary-label")).toBe("Cancel");
     });
 
-    it("should render next button", async () => {
+    it("should expose the select prompt on the ODrawer primary button when nothing is selected", async () => {
       wrapper = createWrapper({ modelValue: true });
       await flushPromises();
-      expect(wrapper.find('[data-test="add-dashboard-github-next"]').exists()).toBe(true);
+      const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+      expect(drawer.attributes("data-primary-label")).toBe("Select dashboards");
     });
 
-    it("should disable next button when no dashboards selected", async () => {
+    it("should reflect updated selection count in the ODrawer primary label", async () => {
       wrapper = createWrapper({ modelValue: true });
       await flushPromises();
-      const nextBtn = wrapper.find('[data-test="add-dashboard-github-next"]');
-      expect(nextBtn.element.disabled).toBe(true);
+      wrapper.vm.selectedDashboards = [
+        { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] },
+      ];
+      await wrapper.vm.$nextTick();
+      const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+      expect(drawer.attributes("data-primary-label")).toBe("Add 1 dashboard");
+    });
+
+    it("should disable the ODrawer primary button when no dashboards selected", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+      expect(drawer.attributes("data-primary-disabled")).toBe("true");
+    });
+
+    it("should enable the ODrawer primary button once a dashboard is selected", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.selectedDashboards = [
+        { name: "aws_ec2", displayName: "AWS EC2", folderPath: "aws_ec2", jsonFiles: [] },
+      ];
+      await wrapper.vm.$nextTick();
+      const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+      expect(drawer.attributes("data-primary-disabled")).toBe("false");
     });
 
     it("should show dashboard items when dashboards are loaded", async () => {
@@ -671,6 +835,326 @@ describe("AddDashboardFromGitHub Component", () => {
       ];
       await wrapper.vm.$nextTick();
       expect(wrapper.find('[data-test="add-dashboard-github-item"]').exists()).toBe(true);
+    });
+  });
+
+  describe("ODrawer event wiring", () => {
+    it("should close the drawer when secondary (Cancel) is emitted", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+
+      const drawer = wrapper.findComponent({ name: "ODrawer" });
+      await drawer.vm.$emit("click:secondary");
+
+      expect(wrapper.emitted("update:modelValue")).toBeTruthy();
+      // Last emitted value should be false (drawer closed)
+      const emits = wrapper.emitted("update:modelValue") as any[];
+      expect(emits[emits.length - 1][0]).toBe(false);
+    });
+
+    it("should invoke handleNext when primary (Next) is emitted", async () => {
+      vi.mocked(dashboardsService.list_Folders).mockResolvedValue(mockFolderList as any);
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+
+      wrapper.vm.selectedDashboards = [
+        {
+          name: "aws_ec2",
+          displayName: "AWS EC2",
+          folderPath: "aws_ec2",
+          jsonFiles: ["dash.json"],
+        },
+      ];
+      await wrapper.vm.$nextTick();
+
+      const drawer = wrapper.findComponent({ name: "ODrawer" });
+      await drawer.vm.$emit("click:primary");
+      await flushPromises();
+
+      expect(wrapper.vm.showFolderSelection).toBe(true);
+    });
+  });
+
+  describe("Folder Selection ODialog", () => {
+    it("should render the folder selection dialog when showFolderSelection is true", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+
+      wrapper.vm.showFolderSelection = true;
+      await wrapper.vm.$nextTick();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.exists()).toBe(true);
+      expect(dialog.attributes("data-title")).toBe("Select Destination Folder");
+      expect(dialog.attributes("data-primary-label")).toBe("Add Dashboard");
+      expect(dialog.attributes("data-secondary-label")).toBe("Back");
+    });
+
+    it("should disable the dialog primary button when no folder is selected", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.showFolderSelection = true;
+      wrapper.vm.selectedFolderObj = null;
+      await wrapper.vm.$nextTick();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.attributes("data-primary-disabled")).toBe("true");
+    });
+
+    it("should enable the dialog primary button once a folder is selected", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.showFolderSelection = true;
+      wrapper.vm.selectedFolderObj = "default";
+      await wrapper.vm.$nextTick();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.attributes("data-primary-disabled")).toBe("false");
+    });
+
+    it("should reflect importing loading state on the dialog primary button", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.showFolderSelection = true;
+      wrapper.vm.importing = true;
+      await wrapper.vm.$nextTick();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.attributes("data-primary-loading")).toBe("true");
+    });
+
+    it("should close the dialog when secondary (Back) is emitted", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.showFolderSelection = true;
+      await wrapper.vm.$nextTick();
+
+      const dialog = wrapper.findComponent({ name: "ODialog" });
+      await dialog.vm.$emit("click:secondary");
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.showFolderSelection).toBe(false);
+    });
+
+    it("should invoke confirmAdd when primary (Add Dashboard) is emitted", async () => {
+      // Set up a successful import flow.
+      vi.mocked(dashboardsService.list).mockResolvedValue({
+        data: { dashboards: [] },
+      } as any);
+      vi.mocked(dashboardsService.create).mockResolvedValue({ data: {} } as any);
+
+      const cacheKey = "aws_ec2/dash.json";
+      (store.state as any).githubDashboardGallery = {
+        dashboards: [],
+        lastFetched: null,
+        cacheExpiry: 300000,
+        dashboardJsonCache: {
+          [cacheKey]: { title: "AWS EC2 Dash" },
+        },
+      };
+
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+
+      wrapper.vm.selectedDashboards = [
+        {
+          name: "aws_ec2",
+          displayName: "AWS EC2",
+          folderPath: "aws_ec2",
+          jsonFiles: ["dash.json"],
+        },
+      ];
+      wrapper.vm.selectedFolderObj = "default";
+      wrapper.vm.showFolderSelection = true;
+      await wrapper.vm.$nextTick();
+
+      const dialog = wrapper.findComponent({ name: "ODialog" });
+      await dialog.vm.$emit("click:primary");
+      await flushPromises();
+
+      expect(dashboardsService.create).toHaveBeenCalled();
+      // confirmAdd should emit "added" on success
+      expect(wrapper.emitted("added")).toBeTruthy();
+    });
+  });
+
+  describe("Add Folder ODialog (nested)", () => {
+    it("should not render the AddFolder dialog as open by default", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+
+      // The Add Folder button uses an ODialog (not a second ODrawer).
+      const dialogs = wrapper.findAllComponents({ name: "ODialog" });
+      expect(dialogs.length).toBeGreaterThanOrEqual(1);
+      // The nested add-folder dialog should be closed by default.
+      const addFolderDialog = wrapper.findComponent(
+        '[data-test="add-dashboard-github-add-folder-dialog"]',
+      );
+      expect(addFolderDialog.exists()).toBe(true);
+      expect(addFolderDialog.props("open")).toBe(false);
+    });
+
+    it("should open the AddFolder dialog when showAddFolderDialog is true", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.showAddFolderDialog = true;
+      await wrapper.vm.$nextTick();
+
+      const addFolderDialog = wrapper.findComponent(
+        '[data-test="add-dashboard-github-add-folder-dialog"]',
+      );
+      expect(addFolderDialog.exists()).toBe(true);
+      expect(addFolderDialog.props("open")).toBe(true);
+    });
+
+    it("should close the AddFolder dialog when its close event is emitted", async () => {
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.showAddFolderDialog = true;
+      await wrapper.vm.$nextTick();
+
+      const addFolderDialog = wrapper.findComponent(
+        '[data-test="add-dashboard-github-add-folder-dialog"]',
+      );
+      // The ODialog uses v-model:open, so closing it emits update:open with false.
+      await addFolderDialog.vm.$emit("update:open", false);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.showAddFolderDialog).toBe(false);
+    });
+  });
+
+  // INF.4 (design 4.9/§6): workload pages open the drawer pre-seeded at their templates.
+  describe("initialSearch prop", () => {
+    it("seeds the search box when the drawer opens", async () => {
+      wrapper = createWrapper({ modelValue: true, initialSearch: "kubernetes" });
+      await flushPromises();
+      expect(wrapper.vm.searchQuery).toBe("kubernetes");
+      const input = wrapper.find('[data-test="add-dashboard-github-search"] input');
+      expect((input.element as HTMLInputElement).value).toBe("kubernetes");
+    });
+  });
+
+  // T1.3 (design 4.3/§6): the gallery replace path now requires an explicit user confirm.
+  describe("confirmed replace on import", () => {
+    const seedSelection = async (jsonFiles: string[], jsonByFile: Record<string, any>) => {
+      (store.state as any).githubDashboardGallery = {
+        dashboards: [],
+        lastFetched: null,
+        cacheExpiry: 300000,
+        dashboardJsonCache: Object.fromEntries(
+          jsonFiles.map((f) => [`hostmetrics/${f}`, jsonByFile[f]]),
+        ),
+      };
+      wrapper = createWrapper({ modelValue: true });
+      await flushPromises();
+      wrapper.vm.selectedDashboards = [
+        {
+          name: "hostmetrics",
+          displayName: "Host Metrics",
+          folderPath: "hostmetrics",
+          jsonFiles,
+        },
+      ];
+      wrapper.vm.selectedFolderObj = "default";
+      await wrapper.vm.$nextTick();
+    };
+
+    const replaceDialog = () =>
+      wrapper.findComponent('[data-test="add-dashboard-github-replace-confirm"]');
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("shows a confirm dialog listing the conflicting title instead of deleting silently", async () => {
+      vi.mocked(dashboardsService.list).mockResolvedValue({
+        data: { dashboards: [{ dashboard_id: "d1", title: "Host Metrics" }] },
+      } as any);
+      await seedSelection(["hm.json"], { "hm.json": { title: "Host Metrics", version: 8 } });
+
+      const pending = wrapper.vm.confirmAdd();
+      await flushPromises();
+
+      expect(replaceDialog().exists()).toBe(true);
+      expect(replaceDialog().props("open")).toBe(true);
+      expect(wrapper.text()).toContain("Host Metrics");
+      // Nothing is destroyed before the user answers.
+      expect(dashboardsService.delete).not.toHaveBeenCalled();
+      expect(dashboardsService.create).not.toHaveBeenCalled();
+
+      await replaceDialog().vm.$emit("click:secondary");
+      await pending;
+    });
+
+    it("confirming runs delete → 500ms settle → create", async () => {
+      vi.useFakeTimers();
+      vi.mocked(dashboardsService.list).mockResolvedValue({
+        data: { dashboards: [{ dashboard_id: "d1", title: "Host Metrics" }] },
+      } as any);
+      vi.mocked(dashboardsService.delete).mockResolvedValue({} as any);
+      vi.mocked(dashboardsService.create).mockResolvedValue({ data: {} } as any);
+      await seedSelection(["hm.json"], { "hm.json": { title: "Host Metrics", version: 8 } });
+
+      const pending = wrapper.vm.confirmAdd();
+      await flushPromises();
+      await replaceDialog().vm.$emit("click:primary");
+      await flushPromises();
+
+      expect(dashboardsService.delete).toHaveBeenCalledWith("default", "d1", "default");
+      // The AWS-tile mechanics: the create waits out the settle window.
+      expect(dashboardsService.create).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(500);
+      await flushPromises();
+      expect(dashboardsService.create).toHaveBeenCalledTimes(1);
+      await pending;
+    });
+
+    it("declining skips the conflicting file while the rest of the batch proceeds", async () => {
+      vi.mocked(dashboardsService.list).mockResolvedValue({
+        data: { dashboards: [{ dashboard_id: "d1", title: "Host Metrics" }] },
+      } as any);
+      vi.mocked(dashboardsService.create).mockResolvedValue({ data: {} } as any);
+      await seedSelection(["hm.json", "other.json"], {
+        "hm.json": { title: "Host Metrics", version: 8 },
+        "other.json": { title: "Fresh Title", version: 8 },
+      });
+
+      const pending = wrapper.vm.confirmAdd();
+      await flushPromises();
+      await replaceDialog().vm.$emit("click:secondary");
+      await flushPromises();
+      await pending;
+
+      // The conflicting file: no delete, no create. The clean file: created.
+      expect(dashboardsService.delete).not.toHaveBeenCalled();
+      expect(dashboardsService.create).toHaveBeenCalledTimes(1);
+      expect(vi.mocked(dashboardsService.create).mock.calls[0][1]).toEqual(
+        expect.objectContaining({ title: "Fresh Title" }),
+      );
+    });
+
+    it("closing the drawer mid-batch stops further imports and parks no new confirm", async () => {
+      vi.mocked(dashboardsService.list).mockResolvedValue({
+        data: { dashboards: [{ dashboard_id: "d1", title: "Host Metrics" }] },
+      } as any);
+      vi.mocked(dashboardsService.create).mockResolvedValue({ data: {} } as any);
+      // Both files conflict — without the cancel flag the second would park a NEW confirm.
+      await seedSelection(["hm.json", "hm2.json"], {
+        "hm.json": { title: "Host Metrics", version: 8 },
+        "hm2.json": { title: "Host Metrics", version: 8 },
+      });
+
+      const pending = wrapper.vm.confirmAdd();
+      await flushPromises();
+      expect(replaceDialog().props("open")).toBe(true);
+      await wrapper.setProps({ modelValue: false });
+      await flushPromises();
+      await pending;
+
+      expect(wrapper.vm.replaceConfirm).toBeNull();
+      expect(dashboardsService.delete).not.toHaveBeenCalled();
+      expect(dashboardsService.create).not.toHaveBeenCalled();
     });
   });
 });

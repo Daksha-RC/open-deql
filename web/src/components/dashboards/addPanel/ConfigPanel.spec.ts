@@ -16,23 +16,28 @@
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { computed } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
-
 // Mock the useDashboardPanelData composable
 vi.mock("@/composables/dashboard/useDashboardPanel", () => ({
   default: vi.fn(),
   useDashboardPanelData: vi.fn(),
 }));
 
+// In the app all config sections start collapsed (see searchLabelsConfig +
+// useConfigPanel.spec, which owns that behaviour). This integration spec
+// asserts that the correct controls render/bind *when a section is open*, so we
+// force every section expanded at mount by overriding DEFAULT_EXPANDED_SECTIONS.
+vi.mock("@/utils/dashboard/searchLabelsConfig", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  const allExpanded = Object.fromEntries(
+    Object.keys(actual.DEFAULT_EXPANDED_SECTIONS as Record<string, boolean>).map((k) => [k, true]),
+  );
+  return { ...actual, DEFAULT_EXPANDED_SECTIONS: allExpanded };
+});
+
 import ConfigPanel from "@/components/dashboards/addPanel/ConfigPanel.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import useDashboardPanelData from "@/composables/dashboard/useDashboardPanel";
-
-installQuasar({
-  plugins: [Dialog, Notify],
-});
 
 const mockDashboardPanelData = {
   data: {
@@ -141,12 +146,10 @@ describe("ConfigPanel", () => {
 
     // Update the mock to return the correct promqlMode value and selectedStreamFields
     vi.mocked(useDashboardPanelData).mockReturnValue({
-      dashboardPanelData:
-        props.dashboardPanelData || defaultProps.dashboardPanelData,
+      dashboardPanelData: props.dashboardPanelData || defaultProps.dashboardPanelData,
       promqlMode: !!options.promqlMode,
       isPivotMode: computed(() => false),
-      selectedStreamFields:
-        props.dashboardPanelData?.meta?.stream?.selectedStreamFields || [],
+      selectedStreamFields: props.dashboardPanelData?.meta?.stream?.selectedStreamFields || [],
     });
 
     return mount(ConfigPanel, {
@@ -181,9 +184,7 @@ describe("ConfigPanel", () => {
     it("should render config panel with description field", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.find('[data-test="dashboard-config-description"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-description"]').exists()).toBe(true);
       expect(wrapper.text()).toContain("Description");
     });
 
@@ -195,21 +196,15 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: customChartData });
 
-      expect(
-        wrapper.find('[data-test="dashboard-config-description"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-description"]').exists()).toBe(true);
       // Custom chart should have simpler layout
-      expect(
-        wrapper.find('[data-test="dashboard-config-step-value"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-config-step-value"]').exists()).toBe(false);
     });
 
     it("should render standard panel layout for non-custom chart types", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.find('[data-test="dashboard-config-description"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-description"]').exists()).toBe(true);
       // Should have more configuration options for standard charts
       expect(wrapper.text()).toContain("Description");
     });
@@ -256,23 +251,17 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({ dashboardPanelData: panelDataWithDescription });
       await wrapper.vm.$nextTick();
 
-      // Check if the prop was received correctly
-      expect(wrapper.props().dashboardPanelData.data.description).toBe(
-        "Test description",
-      );
+      // ConfigPanel reads panel data from useDashboardPanelData, not from a prop
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe("Test description");
     });
 
     it("should update description when input changes", async () => {
       wrapper = createWrapper();
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
-      await descriptionInput.setValue("New description");
+      const descriptionInput = wrapper.findComponent('[data-test="dashboard-config-description"]');
+      await descriptionInput.vm.$emit("update:modelValue", "New description");
 
-      expect(wrapper.vm.dashboardPanelData.data.description).toBe(
-        "New description",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe("New description");
     });
 
     it("should handle empty description", () => {
@@ -288,17 +277,57 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({ dashboardPanelData: freshMockData });
 
       // Check that the component has the expected initial structure
-      expect(wrapper.props().dashboardPanelData.data.description).toBe("");
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe("");
     });
 
     it("should support multiline descriptions with autogrow", () => {
       wrapper = createWrapper();
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
+      const descriptionInput = wrapper.find('[data-test="dashboard-config-description"]');
       // Check if the component has autogrow prop
       expect(descriptionInput.exists()).toBe(true);
+    });
+  });
+
+  describe("Show exemplars switch", () => {
+    const promqlPanel = (type: string, queryType = "range", showExemplars?: boolean) => ({
+      ...mockDashboardPanelData,
+      data: {
+        ...mockDashboardPanelData.data,
+        type,
+        queryType: "promql",
+        queries: [{ query: "rate(x_bucket[5m])", config: { query_type: queryType } }],
+        config: { ...mockDashboardPanelData.data.config, show_exemplars: showExemplars },
+      },
+    });
+
+    it("appears off by default for an eligible PromQL panel and binds config.show_exemplars", async () => {
+      const panel = promqlPanel("line");
+      wrapper = createWrapper({ dashboardPanelData: panel }, { promqlMode: true });
+      const toggle = wrapper.findComponent('[data-test="dashboard-config-show-exemplars"]');
+      expect(toggle.exists()).toBe(true);
+      expect(toggle.props("modelValue")).toBeFalsy();
+      await toggle.vm.$emit("update:modelValue", true);
+      expect(panel.data.config.show_exemplars).toBe(true);
+    });
+
+    it.each([
+      ["h-bar", "range"],
+      ["stacked", "range"],
+      ["table", "range"],
+      ["heatmap", "range"],
+      ["line", "instant"],
+    ])("is absent for %s (%s)", (type, queryType) => {
+      wrapper = createWrapper(
+        { dashboardPanelData: promqlPanel(type, queryType) },
+        { promqlMode: true },
+      );
+      expect(wrapper.find('[data-test="dashboard-config-show-exemplars"]').exists()).toBe(false);
+    });
+
+    it("is absent outside PromQL mode", () => {
+      wrapper = createWrapper({ dashboardPanelData: promqlPanel("line") }, { promqlMode: false });
+      expect(wrapper.find('[data-test="dashboard-config-show-exemplars"]').exists()).toBe(false);
     });
   });
 
@@ -307,18 +336,14 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.find('[data-test="dashboard-config-step-value"]');
       expect(stepValueInput.exists()).toBe(true);
     });
 
     it("should hide step value input when not in PromQL mode", () => {
       wrapper = createWrapper({}, { promqlMode: false });
 
-      expect(
-        wrapper.find('[data-test="dashboard-config-step-value"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-config-step-value"]').exists()).toBe(false);
     });
 
     it("should bind step value to input", async () => {
@@ -366,20 +391,16 @@ describe("ConfigPanel", () => {
       );
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.props().dashboardPanelData.data.config.step_value).toBe(
-        30,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe(30);
     });
 
     it("should update step value when input changes", async () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.findComponent('[data-test="dashboard-config-step-value"]');
       if (stepValueInput.exists()) {
-        await stepValueInput.setValue("60");
+        await stepValueInput.vm.$emit("update:modelValue", "60");
         expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe("60");
       } else {
         // Just verify the component exists
@@ -392,9 +413,7 @@ describe("ConfigPanel", () => {
       await wrapper.vm.$nextTick();
 
       // Look for any info icons in the component
-      const infoIcons = wrapper.findAll(
-        '[data-test="dashboard-config-top_results-info"]',
-      );
+      const infoIcons = wrapper.findAll('[data-test="dashboard-config-top_results-info"]');
       if (infoIcons.length > 0) {
         expect(infoIcons[0].exists()).toBe(true);
       } else {
@@ -446,63 +465,32 @@ describe("ConfigPanel", () => {
     it("should emit configuration changes", async () => {
       wrapper = createWrapper();
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
-      await descriptionInput.setValue("Updated description");
+      const descriptionInput = wrapper.findComponent('[data-test="dashboard-config-description"]');
+      await descriptionInput.vm.$emit("update:modelValue", "Updated description");
 
       // Check if the component data was updated
-      expect(wrapper.vm.dashboardPanelData.data.description).toBe(
-        "Updated description",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe("Updated description");
     });
 
-    it("should handle reactive prop updates", async () => {
+    it("should reflect updates to the shared panel data", async () => {
       wrapper = createWrapper();
 
-      const newPanelData = {
-        data: {
-          id: "panel-1",
-          title: "Test Panel",
-          description: "Updated from parent",
-          type: "line",
-          config: {
-            step_value: 0,
-            top_results: 10,
-            trellis_layout: "horizontal",
-            trellis: {
-              layout: "horizontal",
-            },
-          },
-        },
-        meta: {
-          dateTime: {
-            start_time: new Date("2023-01-01T00:00:00Z"),
-            end_time: new Date("2023-01-01T23:59:59Z"),
-          },
-        },
-      };
-
-      await wrapper.setProps({ dashboardPanelData: newPanelData });
+      // Panel data reaches ConfigPanel through the useDashboardPanelData store —
+      // shared reactive state, so updates arrive by mutation rather than by prop.
+      wrapper.vm.dashboardPanelData.data.description = "Updated from parent";
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.props().dashboardPanelData.data.description).toBe(
-        "Updated from parent",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe("Updated from parent");
     });
 
     it("should preserve configuration when switching modes", async () => {
       wrapper = createWrapper({}, { promqlMode: false });
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
-      await descriptionInput.setValue("Test description");
+      const descriptionInput = wrapper.findComponent('[data-test="dashboard-config-description"]');
+      await descriptionInput.vm.$emit("update:modelValue", "Test description");
 
       // Verify description was set
-      expect(wrapper.vm.dashboardPanelData.data.description).toBe(
-        "Test description",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe("Test description");
     });
   });
 
@@ -519,9 +507,7 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper();
 
       // Should not show trellis for simple charts by default
-      expect(
-        wrapper.find('[data-test="dashboard-config-trellis"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-config-trellis"]').exists()).toBe(false);
     });
   });
 
@@ -530,14 +516,10 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.findComponent('[data-test="dashboard-config-step-value"]');
       if (stepValueInput.exists()) {
-        await stepValueInput.setValue("-1");
-        expect(
-          wrapper.vm.dashboardPanelData.data.config.step_value,
-        ).toBeDefined();
+        await stepValueInput.vm.$emit("update:modelValue", "-1");
+        expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBeDefined();
       } else {
         expect(wrapper.exists()).toBe(true);
       }
@@ -547,14 +529,10 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.findComponent('[data-test="dashboard-config-step-value"]');
       if (stepValueInput.exists()) {
-        await stepValueInput.setValue("invalid");
-        expect(
-          wrapper.vm.dashboardPanelData.data.config.step_value,
-        ).toBeDefined();
+        await stepValueInput.vm.$emit("update:modelValue", "invalid");
+        expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBeDefined();
       } else {
         expect(wrapper.exists()).toBe(true);
       }
@@ -573,18 +551,14 @@ describe("ConfigPanel", () => {
     it("should have proper labels for form inputs", () => {
       wrapper = createWrapper();
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
+      const descriptionInput = wrapper.find('[data-test="dashboard-config-description"]');
       expect(descriptionInput.exists()).toBe(true);
     });
 
     it("should provide tooltips for complex fields", () => {
       wrapper = createWrapper({}, { promqlMode: true });
 
-      const infoIcons = wrapper.findAll(
-        '[data-test="dashboard-config-top_results-info"]',
-      );
+      const infoIcons = wrapper.findAll('[data-test="dashboard-config-top_results-info"]');
       if (infoIcons.length > 0) {
         expect(infoIcons[0].exists()).toBe(true);
       } else {
@@ -596,14 +570,10 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
+      const descriptionInput = wrapper.find('[data-test="dashboard-config-description"]');
       expect(descriptionInput.exists()).toBe(true);
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.find('[data-test="dashboard-config-step-value"]');
       if (stepValueInput.exists()) {
         await stepValueInput.trigger("focus");
         expect(stepValueInput.exists()).toBe(true);
@@ -615,9 +585,7 @@ describe("ConfigPanel", () => {
 
   describe("Error Handling", () => {
     it("should handle missing panel data gracefully", () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, "warn")
-        .mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       wrapper = createWrapper({ dashboardPanelData: null });
 
@@ -690,18 +658,14 @@ describe("ConfigPanel", () => {
     it("should render show gridlines toggle", () => {
       wrapper = createWrapper();
 
-      const gridlinesToggle = wrapper.find(
-        '[data-test="dashboard-config-show-gridlines"]',
-      );
+      const gridlinesToggle = wrapper.find('[data-test="dashboard-config-show-gridlines"]');
       expect(gridlinesToggle.exists()).toBe(true);
     });
 
     it("should initialize gridlines to true by default", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBe(
-        true,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBe(true);
     });
 
     it("should bind gridlines value to toggle", async () => {
@@ -718,18 +682,14 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: panelDataWithGridlines });
 
-      const gridlinesToggle = wrapper.find(
-        '[data-test="dashboard-config-show-gridlines"]',
-      );
+      const gridlinesToggle = wrapper.find('[data-test="dashboard-config-show-gridlines"]');
       expect(gridlinesToggle.exists()).toBe(true);
     });
 
     it("should update gridlines value when toggle changes", async () => {
       wrapper = createWrapper();
 
-      const gridlinesToggle = wrapper.find(
-        '[data-test="dashboard-config-show-gridlines"]',
-      );
+      const gridlinesToggle = wrapper.find('[data-test="dashboard-config-show-gridlines"]');
 
       // Toggle the value
       await gridlinesToggle.trigger("click");
@@ -744,9 +704,7 @@ describe("ConfigPanel", () => {
       // Set gridlines to false
       wrapper.vm.dashboardPanelData.data.config.show_gridlines = false;
 
-      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBe(
-        false,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBe(false);
     });
   });
 
@@ -776,18 +734,14 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: trellisEnabledData });
 
-      const trellisToggle = wrapper.find(
-        '[data-test="dashboard-config-trellis-group-by-y-axis"]',
-      );
+      const trellisToggle = wrapper.find('[data-test="dashboard-config-trellis-group-by-y-axis"]');
       expect(trellisToggle.exists()).toBe(true);
     });
 
     it("should initialize group_by_y_axis as false by default", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.trellis.group_by_y_axis,
-      ).toBe(false);
+      expect(wrapper.vm.dashboardPanelData.data.config.trellis.group_by_y_axis).toBe(false);
     });
 
     it("should show helpful tooltip for trellis group by y-axis", () => {
@@ -826,9 +780,7 @@ describe("ConfigPanel", () => {
     it("should initialize top_results_others as false by default", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.top_results_others).toBe(
-        false,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.top_results_others).toBe(false);
     });
 
     it("should show top results others toggle for supported chart types", () => {
@@ -876,17 +828,14 @@ describe("ConfigPanel", () => {
     it("should handle top results others when no breakdown field", () => {
       wrapper = createWrapper(); // Default has empty breakdown
 
-      const topResultsOthersToggle = wrapper.find(
+      const topResultsOthersToggle = wrapper.findComponent(
         '[data-test="dashboard-config-top_results_others"]',
       );
       // The toggle exists for line charts even without breakdown
       expect(topResultsOthersToggle.exists()).toBe(true);
 
-      // Check if it has disabled attribute or class
-      const isDisabled =
-        topResultsOthersToggle.attributes("disabled") !== undefined ||
-        topResultsOthersToggle.classes().includes("disabled");
-      expect(isDisabled).toBe(true);
+      // The OSwitch should have disabled=true prop because breakdown is empty
+      expect(topResultsOthersToggle.props("disabled")).toBe(true);
     });
   });
 
@@ -894,9 +843,7 @@ describe("ConfigPanel", () => {
     it("should initialize connect_nulls as false by default", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.connect_nulls).toBe(
-        false,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.connect_nulls).toBe(false);
     });
 
     it("should show connect nulls toggle for area and line charts", () => {
@@ -948,9 +895,7 @@ describe("ConfigPanel", () => {
     it("should initialize no_value_replacement as empty string by default", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.no_value_replacement,
-      ).toBe("");
+      expect(wrapper.vm.dashboardPanelData.data.config.no_value_replacement).toBe("");
     });
 
     it("should show no value replacement input for supported chart types", () => {
@@ -987,14 +932,12 @@ describe("ConfigPanel", () => {
     it("should update no value replacement when input changes", async () => {
       wrapper = createWrapper();
 
-      const noValueReplacementInput = wrapper.find(
+      const noValueReplacementInput = wrapper.findComponent(
         '[data-test="dashboard-config-no-value-replacement"]',
       );
       if (noValueReplacementInput.exists()) {
-        await noValueReplacementInput.setValue("N/A");
-        expect(
-          wrapper.vm.dashboardPanelData.data.config.no_value_replacement,
-        ).toBe("N/A");
+        await noValueReplacementInput.vm.$emit("update:modelValue", "N/A");
+        expect(wrapper.vm.dashboardPanelData.data.config.no_value_replacement).toBe("N/A");
       }
     });
   });
@@ -1003,17 +946,13 @@ describe("ConfigPanel", () => {
     it("should initialize table_transpose as false by default", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.table_transpose).toBe(
-        false,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.table_transpose).toBe(false);
     });
 
     it("should initialize table_dynamic_columns as false by default", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.table_dynamic_columns,
-      ).toBe(false);
+      expect(wrapper.vm.dashboardPanelData.data.config.table_dynamic_columns).toBe(false);
     });
 
     it("should show table transpose toggle for table panels", () => {
@@ -1024,9 +963,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      const tableTransposeToggle = wrapper.find(
-        '[data-test="dashboard-config-table_transpose"]',
-      );
+      const tableTransposeToggle = wrapper.find('[data-test="dashboard-config-table_transpose"]');
       expect(tableTransposeToggle.exists()).toBe(true);
     });
 
@@ -1047,15 +984,42 @@ describe("ConfigPanel", () => {
     it("should hide table-specific options for non-table panels", () => {
       wrapper = createWrapper(); // Default is line chart
 
-      const tableTransposeToggle = wrapper.find(
-        '[data-test="dashboard-config-table_transpose"]',
-      );
+      const tableTransposeToggle = wrapper.find('[data-test="dashboard-config-table_transpose"]');
       const tableDynamicColumnsToggle = wrapper.find(
         '[data-test="dashboard-config-table_dynamic_columns"]',
       );
 
       expect(tableTransposeToggle.exists()).toBe(false);
       expect(tableDynamicColumnsToggle.exists()).toBe(false);
+    });
+  });
+
+  describe("Field Overrides button", () => {
+    it("should render its own button and emit open-field-overrides on click", async () => {
+      const tableData = {
+        ...mockDashboardPanelData,
+        data: { ...mockDashboardPanelData.data, type: "table" },
+      };
+
+      wrapper = createWrapper({ dashboardPanelData: tableData });
+
+      const addBtn = wrapper.find(
+        '[data-test="dashboard-addpanel-config-override-config-add-btn"]',
+      );
+      expect(addBtn.exists()).toBe(true);
+
+      await addBtn.trigger("click");
+
+      expect(wrapper.emitted("open-field-overrides")).toBeTruthy();
+    });
+
+    it("should not render for non-table panels", () => {
+      wrapper = createWrapper(); // Default is line chart
+
+      const addBtn = wrapper.find(
+        '[data-test="dashboard-addpanel-config-override-config-add-btn"]',
+      );
+      expect(addBtn.exists()).toBe(false);
     });
   });
 
@@ -1163,40 +1127,36 @@ describe("ConfigPanel", () => {
         },
       ];
 
-      chartConfigs.forEach(
-        ({ type, shouldHaveGridlines, shouldHaveConnectNulls }) => {
-          const panelData = {
-            ...mockDashboardPanelData,
-            data: { ...mockDashboardPanelData.data, type },
-          };
+      chartConfigs.forEach(({ type, shouldHaveGridlines }) => {
+        const panelData = {
+          ...mockDashboardPanelData,
+          data: { ...mockDashboardPanelData.data, type },
+        };
 
-          wrapper = createWrapper({ dashboardPanelData: panelData });
+        wrapper = createWrapper({ dashboardPanelData: panelData });
 
-          const gridlinesToggle = wrapper.find(
-            '[data-test="dashboard-config-show-gridlines"]',
-          );
+        const gridlinesToggle = wrapper.find('[data-test="dashboard-config-show-gridlines"]');
+        expect(gridlinesToggle.exists()).toBe(shouldHaveGridlines);
+
+        const connectNullsToggle = wrapper.find(
+          '[data-test="dashboard-config-connect-null-values"]',
+        );
+        // Some components may render but be hidden via CSS
+        // Just check if the expected behavior matches the actual presence
+        if (type === "area") {
+          expect(connectNullsToggle.exists()).toBe(true);
+        } else if (type === "line") {
+          // Line charts may or may not show connect nulls based on specific conditions
+          expect(connectNullsToggle.exists()).toBeTruthy();
+        } else {
+          // For other types, just verify the component structure is correct
           expect(gridlinesToggle.exists()).toBe(shouldHaveGridlines);
+        }
 
-          const connectNullsToggle = wrapper.find(
-            '[data-test="dashboard-config-connect-null-values"]',
-          );
-          // Some components may render but be hidden via CSS
-          // Just check if the expected behavior matches the actual presence
-          if (type === "area") {
-            expect(connectNullsToggle.exists()).toBe(true);
-          } else if (type === "line") {
-            // Line charts may or may not show connect nulls based on specific conditions
-            expect(connectNullsToggle.exists()).toBeTruthy();
-          } else {
-            // For other types, just verify the component structure is correct
-            expect(gridlinesToggle.exists()).toBe(shouldHaveGridlines);
-          }
-
-          if (wrapper) {
-            wrapper.unmount();
-          }
-        },
-      );
+        if (wrapper) {
+          wrapper.unmount();
+        }
+      });
     });
 
     it("should respect promql mode restrictions", () => {
@@ -1227,9 +1187,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: panelWithBreakdown });
 
-      const topResultsInput = wrapper.find(
-        '[data-test="dashboard-config-top_results"]',
-      );
+      const topResultsInput = wrapper.find('[data-test="dashboard-config-top_results"]');
       if (topResultsInput.exists()) {
         expect(topResultsInput.attributes("disabled")).toBeUndefined();
       }
@@ -1253,14 +1211,12 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper();
       const emitSpy = vi.spyOn(wrapper.vm, "$emit");
 
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
+      const descriptionInput = wrapper.findComponent('[data-test="dashboard-config-description"]');
 
       // Rapid changes
-      await descriptionInput.setValue("A");
-      await descriptionInput.setValue("AB");
-      await descriptionInput.setValue("ABC");
+      await descriptionInput.vm.$emit("update:modelValue", "A");
+      await descriptionInput.vm.$emit("update:modelValue", "AB");
+      await descriptionInput.vm.$emit("update:modelValue", "ABC");
 
       // Should not emit for every character change
       expect(emitSpy).not.toHaveBeenCalledTimes(3);
@@ -1276,15 +1232,9 @@ describe("ConfigPanel", () => {
 
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBe(
-        false,
-      );
-      expect(wrapper.vm.dashboardPanelData.data.config.connect_nulls).toBe(
-        true,
-      );
-      expect(wrapper.vm.dashboardPanelData.data.config.wrap_table_cells).toBe(
-        true,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBe(false);
+      expect(wrapper.vm.dashboardPanelData.data.config.connect_nulls).toBe(true);
+      expect(wrapper.vm.dashboardPanelData.data.config.wrap_table_cells).toBe(true);
     });
   });
 
@@ -1309,9 +1259,7 @@ describe("ConfigPanel", () => {
 
         wrapper = createWrapper({ dashboardPanelData: panelData });
 
-        const gridlinesToggle = wrapper.find(
-          '[data-test="dashboard-config-show-gridlines"]',
-        );
+        const gridlinesToggle = wrapper.find('[data-test="dashboard-config-show-gridlines"]');
         expect(gridlinesToggle.exists()).toBe(true);
 
         if (wrapper) {
@@ -1343,17 +1291,14 @@ describe("ConfigPanel", () => {
               ...mockDashboardPanelData.data.config,
               // Add type-specific config for geomap
               base_map: type === "geomap" ? { type: "osm" } : undefined,
-              map_view:
-                type === "geomap" ? { lat: 0, lng: 0, zoom: 1 } : undefined,
+              map_view: type === "geomap" ? { lat: 0, lng: 0, zoom: 1 } : undefined,
             },
           },
         };
 
         wrapper = createWrapper({ dashboardPanelData: panelData });
 
-        const gridlinesToggle = wrapper.find(
-          '[data-test="dashboard-config-show-gridlines"]',
-        );
+        const gridlinesToggle = wrapper.find('[data-test="dashboard-config-show-gridlines"]');
         expect(gridlinesToggle.exists()).toBe(false);
 
         if (wrapper) {
@@ -1438,9 +1383,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: panelData });
 
-      const legendTypeSelector = wrapper.find(
-        '[data-test="dashboard-config-legends-scrollable"]',
-      );
+      const legendTypeSelector = wrapper.find('[data-test="dashboard-config-legends-scrollable"]');
       if (legendTypeSelector.exists()) {
         const displayValue = legendTypeSelector.attributes("display-value");
         if (displayValue) {
@@ -1469,9 +1412,7 @@ describe("ConfigPanel", () => {
       wrapper.vm.dashboardPanelData.data.config.legends_type = "plain";
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.legends_type).toBe(
-        "plain",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.legends_type).toBe("plain");
     });
 
     it("should handle legend type scroll configuration", async () => {
@@ -1489,9 +1430,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: panelData });
 
-      expect(wrapper.vm.dashboardPanelData.data.config.legends_type).toBe(
-        "scroll",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.legends_type).toBe("scroll");
     });
   });
 
@@ -1513,8 +1452,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: extremePanelData });
       // Component may reset legend_width based on visibility conditions
-      const legendWidth =
-        wrapper.vm.dashboardPanelData.data.config.legend_width;
+      const legendWidth = wrapper.vm.dashboardPanelData.data.config.legend_width;
       expect(legendWidth).toBeDefined();
     });
 
@@ -1532,9 +1470,7 @@ describe("ConfigPanel", () => {
       };
 
       wrapper = createWrapper({ dashboardPanelData: percentagePanelData });
-      expect(wrapper.vm.dashboardPanelData.data.config.legend_width.unit).toBe(
-        "%",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.legend_width.unit).toBe("%");
     });
 
     it("should handle negative step values gracefully", async () => {
@@ -1552,53 +1488,39 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      wrapper.vm.dashboardPanelData.data.config.step_value =
-        Number.MAX_SAFE_INTEGER;
+      wrapper.vm.dashboardPanelData.data.config.step_value = Number.MAX_SAFE_INTEGER;
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe(
-        Number.MAX_SAFE_INTEGER,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe(Number.MAX_SAFE_INTEGER);
     });
 
     it("should handle special characters in description field", async () => {
       wrapper = createWrapper();
 
       const specialCharsDescription = "Special chars: <>\"'&\n\t\n\\/@#$%^&*()";
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
-      await descriptionInput.setValue(specialCharsDescription);
+      const descriptionInput = wrapper.findComponent('[data-test="dashboard-config-description"]');
+      await descriptionInput.vm.$emit("update:modelValue", specialCharsDescription);
 
-      expect(wrapper.vm.dashboardPanelData.data.description).toBe(
-        specialCharsDescription,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe(specialCharsDescription);
     });
 
     it("should handle very long description text", async () => {
       wrapper = createWrapper();
 
       const longDescription = "A".repeat(10000); // Very long description
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
-      await descriptionInput.setValue(longDescription);
+      const descriptionInput = wrapper.findComponent('[data-test="dashboard-config-description"]');
+      await descriptionInput.vm.$emit("update:modelValue", longDescription);
 
-      expect(wrapper.vm.dashboardPanelData.data.description).toBe(
-        longDescription,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.description).toBe(longDescription);
     });
 
     it("should maintain focus when toggling between configurations", async () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.findComponent('[data-test="dashboard-config-step-value"]');
       if (stepValueInput.exists()) {
-        await stepValueInput.trigger("focus");
-        await stepValueInput.setValue("30");
+        await stepValueInput.vm.$emit("update:modelValue", "30");
 
         expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe("30");
       }
@@ -1632,12 +1554,8 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: trellisData });
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.trellis.num_of_columns,
-      ).toBe(16);
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.trellis.group_by_y_axis,
-      ).toBe(true);
+      expect(wrapper.vm.dashboardPanelData.data.config.trellis.num_of_columns).toBe(16);
+      expect(wrapper.vm.dashboardPanelData.data.config.trellis.group_by_y_axis).toBe(true);
     });
 
     it("should handle trellis column number validation", async () => {
@@ -1663,9 +1581,7 @@ describe("ConfigPanel", () => {
       await wrapper.vm.$nextTick();
 
       // The component doesn't automatically clamp the value, so we just check it's set
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.trellis.num_of_columns,
-      ).toBe(20);
+      expect(wrapper.vm.dashboardPanelData.data.config.trellis.num_of_columns).toBe(20);
     });
 
     it("should handle trellis with different chart types", () => {
@@ -1697,9 +1613,7 @@ describe("ConfigPanel", () => {
 
         wrapper = createWrapper({ dashboardPanelData: trellisData });
         expect(wrapper.vm.dashboardPanelData.data.type).toBe(type);
-        expect(
-          wrapper.vm.dashboardPanelData.data.config.trellis.group_by_y_axis,
-        ).toBe(true);
+        expect(wrapper.vm.dashboardPanelData.data.config.trellis.group_by_y_axis).toBe(true);
 
         if (wrapper) {
           wrapper.unmount();
@@ -1752,14 +1666,10 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const stepValueInput = wrapper.find(
-        '[data-test="dashboard-config-step-value"]',
-      );
+      const stepValueInput = wrapper.findComponent('[data-test="dashboard-config-step-value"]');
       if (stepValueInput.exists()) {
-        await stepValueInput.setValue("30.5");
-        expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe(
-          "30.5",
-        );
+        await stepValueInput.vm.$emit("update:modelValue", "30.5");
+        expect(wrapper.vm.dashboardPanelData.data.config.step_value).toBe("30.5");
       }
     });
 
@@ -1778,9 +1688,7 @@ describe("ConfigPanel", () => {
       };
 
       wrapper = createWrapper({ dashboardPanelData: nonStandardData });
-      expect(wrapper.vm.dashboardPanelData.data.config.custom_property).toBe(
-        "test",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.custom_property).toBe("test");
     });
   });
 
@@ -1795,9 +1703,7 @@ describe("ConfigPanel", () => {
         await wrapper.vm.$nextTick();
       }
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.show_gridlines,
-      ).toBeDefined();
+      expect(wrapper.vm.dashboardPanelData.data.config.show_gridlines).toBeDefined();
     });
 
     it("should handle large number of breakdown fields efficiently", () => {
@@ -1821,9 +1727,7 @@ describe("ConfigPanel", () => {
       };
 
       wrapper = createWrapper({ dashboardPanelData: largeBreakdownData });
-      expect(
-        wrapper.vm.dashboardPanelData.data.queries[0].fields.breakdown,
-      ).toHaveLength(50);
+      expect(wrapper.vm.dashboardPanelData.data.queries[0].fields.breakdown).toHaveLength(50);
     });
 
     it("should handle complex nested configuration updates", async () => {
@@ -1836,17 +1740,13 @@ describe("ConfigPanel", () => {
 
       await wrapper.vm.$nextTick();
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.map_symbol_style.size_by_value
-          .min,
-      ).toBe(0.1);
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.map_symbol_style.size_by_value
-          .max,
-      ).toBe(999.9);
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.label_option.rotate,
-      ).toBe(45);
+      expect(wrapper.vm.dashboardPanelData.data.config.map_symbol_style.size_by_value.min).toBe(
+        0.1,
+      );
+      expect(wrapper.vm.dashboardPanelData.data.config.map_symbol_style.size_by_value.max).toBe(
+        999.9,
+      );
+      expect(wrapper.vm.dashboardPanelData.data.config.label_option.rotate).toBe(45);
     });
   });
 
@@ -1859,9 +1759,7 @@ describe("ConfigPanel", () => {
       };
 
       wrapper = createWrapper({ colorBySeriesData });
-      const colorBySeriesStub = wrapper.find(
-        '[data-test="color-by-series-stub"]',
-      );
+      const colorBySeriesStub = wrapper.find('[data-test="color-by-series-stub"]');
       expect(colorBySeriesStub.exists()).toBe(true);
     });
 
@@ -1955,9 +1853,7 @@ describe("ConfigPanel", () => {
     });
 
     it("should handle undefined dashboard panel data gracefully", () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, "warn")
-        .mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
       wrapper = createWrapper({ dashboardPanelData: undefined });
       expect(wrapper.exists()).toBe(true);
@@ -1984,7 +1880,7 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
       await wrapper.vm.$nextTick();
 
-      const formElements = wrapper.findAll("input, select, textarea, button");
+      const formElements = wrapper.findAll("[data-test]");
       expect(formElements.length).toBeGreaterThan(0);
 
       // Each form element should be keyboard accessible
@@ -1997,9 +1893,7 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper({}, { promqlMode: true });
 
       // Check for accessibility attributes on key elements
-      const descriptionInput = wrapper.find(
-        '[data-test="dashboard-config-description"]',
-      );
+      const descriptionInput = wrapper.find('[data-test="dashboard-config-description"]');
       expect(descriptionInput.exists()).toBe(true);
     });
 
@@ -2007,9 +1901,7 @@ describe("ConfigPanel", () => {
       wrapper = createWrapper();
 
       // Component should render without errors in different display modes
-      expect(
-        wrapper.find('[data-test="dashboard-config-description"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-description"]').exists()).toBe(true);
     });
   });
 
@@ -2104,9 +1996,7 @@ describe("ConfigPanel", () => {
       await flushPromises();
 
       // Legend height should be cleared due to watchEffect
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.legend_height.value,
-      ).toBe(null);
+      expect(wrapper.vm.dashboardPanelData.data.config.legend_height.value).toBe(null);
     });
 
     it("should clear legend height when legends_position is null and legends_type is null", async () => {
@@ -2130,9 +2020,7 @@ describe("ConfigPanel", () => {
       await flushPromises();
 
       // Legend height should be cleared due to watchEffect
-      expect(
-        wrapper.vm.dashboardPanelData.data.config.legend_height.value,
-      ).toBe(null);
+      expect(wrapper.vm.dashboardPanelData.data.config.legend_height.value).toBe(null);
     });
 
     it("should handle legend height when conditions don't match", async () => {
@@ -2156,8 +2044,7 @@ describe("ConfigPanel", () => {
       await flushPromises();
 
       // Component may clear legend height based on watchEffect conditions
-      const legendHeight =
-        wrapper.vm.dashboardPanelData.data.config.legend_height;
+      const legendHeight = wrapper.vm.dashboardPanelData.data.config.legend_height;
       expect(legendHeight).toBeDefined();
     });
 
@@ -2195,18 +2082,14 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      const paginationToggle = wrapper.find(
-        '[data-test="dashboard-config-show-pagination"]',
-      );
+      const paginationToggle = wrapper.find('[data-test="dashboard-config-show-pagination"]');
       expect(paginationToggle.exists()).toBe(true);
     });
 
     it("should hide pagination toggle for non-table panels", () => {
       wrapper = createWrapper(); // Default is line chart
 
-      const paginationToggle = wrapper.find(
-        '[data-test="dashboard-config-show-pagination"]',
-      );
+      const paginationToggle = wrapper.find('[data-test="dashboard-config-show-pagination"]');
       expect(paginationToggle.exists()).toBe(false);
     });
 
@@ -2225,9 +2108,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination).toBe(
-        false,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination).toBe(false);
     });
 
     it("should toggle pagination value when clicked", async () => {
@@ -2249,9 +2130,7 @@ describe("ConfigPanel", () => {
       wrapper.vm.dashboardPanelData.data.config.table_pagination = true;
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination).toBe(
-        true,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination).toBe(true);
     });
 
     it("should show rows per page input when pagination is enabled", () => {
@@ -2269,9 +2148,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      const rowsPerPageInput = wrapper.find(
-        '[data-test="dashboard-config-rows-per-page"]',
-      );
+      const rowsPerPageInput = wrapper.find('[data-test="dashboard-config-rows-per-page"]');
       expect(rowsPerPageInput.exists()).toBe(true);
     });
 
@@ -2290,9 +2167,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      const rowsPerPageInput = wrapper.find(
-        '[data-test="dashboard-config-rows-per-page"]',
-      );
+      const rowsPerPageInput = wrapper.find('[data-test="dashboard-config-rows-per-page"]');
       expect(rowsPerPageInput.exists()).toBe(false);
     });
 
@@ -2312,15 +2187,12 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      const rowsPerPageInput = wrapper.find(
+      const rowsPerPageInput = wrapper.findComponent(
         '[data-test="dashboard-config-rows-per-page"]',
       );
       if (rowsPerPageInput.exists()) {
-        await rowsPerPageInput.setValue(25);
-        expect(
-          wrapper.vm.dashboardPanelData.data.config
-            .table_pagination_rows_per_page,
-        ).toBe(25);
+        await rowsPerPageInput.vm.$emit("update:modelValue", 25);
+        expect(wrapper.vm.dashboardPanelData.data.config.table_pagination_rows_per_page).toBe(25);
       }
     });
 
@@ -2339,9 +2211,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      const infoIcon = wrapper.find(
-        '[data-test="dashboard-config-rows-per-page-info"]',
-      );
+      const infoIcon = wrapper.find('[data-test="dashboard-config-rows-per-page-info"]');
       expect(infoIcon.exists()).toBe(true);
     });
 
@@ -2361,13 +2231,8 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination).toBe(
-        true,
-      );
-      expect(
-        wrapper.vm.dashboardPanelData.data.config
-          .table_pagination_rows_per_page,
-      ).toBe(50);
+      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination).toBe(true);
+      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination_rows_per_page).toBe(50);
     });
 
     it("should handle table_pagination_rows_per_page as null when not set", () => {
@@ -2386,10 +2251,7 @@ describe("ConfigPanel", () => {
 
       wrapper = createWrapper({ dashboardPanelData: tableData });
 
-      expect(
-        wrapper.vm.dashboardPanelData.data.config
-          .table_pagination_rows_per_page,
-      ).toBeNull();
+      expect(wrapper.vm.dashboardPanelData.data.config.table_pagination_rows_per_page).toBeNull();
     });
 
     it("should hide pagination toggle and rows per page for non-table chart types", () => {
@@ -2403,12 +2265,8 @@ describe("ConfigPanel", () => {
 
         wrapper = createWrapper({ dashboardPanelData: panelData });
 
-        const paginationToggle = wrapper.find(
-          '[data-test="dashboard-config-show-pagination"]',
-        );
-        const rowsPerPageInput = wrapper.find(
-          '[data-test="dashboard-config-rows-per-page"]',
-        );
+        const paginationToggle = wrapper.find('[data-test="dashboard-config-show-pagination"]');
+        const rowsPerPageInput = wrapper.find('[data-test="dashboard-config-rows-per-page"]');
 
         expect(paginationToggle.exists()).toBe(false);
         expect(rowsPerPageInput.exists()).toBe(false);
@@ -2427,7 +2285,7 @@ describe("ConfigPanel", () => {
   describe("Search Bar Rendering", () => {
     it("should render the config-search-wrapper for non-custom_chart panels", () => {
       wrapper = createWrapper();
-      expect(wrapper.find(".config-search-wrapper").exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-search-wrapper"]').exists()).toBe(true);
     });
 
     it("should NOT render config-search-wrapper for custom_chart panel type", () => {
@@ -2436,13 +2294,13 @@ describe("ConfigPanel", () => {
         data: { ...mockDashboardPanelData.data, type: "custom_chart" },
       };
       wrapper = createWrapper({ dashboardPanelData: customChartData });
-      expect(wrapper.find(".config-search-wrapper").exists()).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-config-search-wrapper"]').exists()).toBe(false);
     });
 
     it("should render the expand/collapse toggle button", () => {
       wrapper = createWrapper();
       // The toggle-all button appears inside config-search-wrapper
-      const btn = wrapper.find(".config-search-wrapper .q-btn");
+      const btn = wrapper.find('[data-test="dashboard-config-toggle-all-sections-btn"]');
       expect(btn.exists()).toBe(true);
     });
   });
@@ -2474,10 +2332,24 @@ describe("ConfigPanel", () => {
     it("should have an entry for every expected section", () => {
       wrapper = createWrapper();
       const expectedSections = [
-        "general", "geographic", "legend", "data", "axis",
-        "labels", "lineStyle", "table", "valueTransformations",
-        "fieldOverrides", "map", "gauge", "layout", "colors",
-        "drilldown", "comparison", "markLines", "background",
+        "general",
+        "geographic",
+        "legend",
+        "data",
+        "axis",
+        "labels",
+        "lineStyle",
+        "table",
+        "valueTransformations",
+        "fieldOverrides",
+        "map",
+        "gauge",
+        "layout",
+        "colors",
+        "drilldown",
+        "comparison",
+        "markLines",
+        "background",
       ];
       for (const s of expectedSections) {
         expect(wrapper.vm.expandedSections).toHaveProperty(s);
@@ -2583,9 +2455,7 @@ describe("ConfigPanel", () => {
 
     it("returns false for unknown sectionId + optionId combinations", () => {
       wrapper = createWrapper();
-      expect(
-        wrapper.vm.isConfigOptionVisible("nonexistent" as any, "nonexistent"),
-      ).toBe(false);
+      expect(wrapper.vm.isConfigOptionVisible("nonexistent" as any, "nonexistent")).toBe(false);
     });
 
     it("returns false when search query does not match the option label", async () => {
@@ -2627,21 +2497,23 @@ describe("ConfigPanel", () => {
   describe("No results empty state", () => {
     it("is not shown when no search query", () => {
       wrapper = createWrapper();
-      expect(wrapper.find(".config-no-results").exists()).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-config-no-results"]').exists()).toBe(false);
     });
 
     it("is shown when search query matches nothing", async () => {
       wrapper = createWrapper();
       wrapper.vm.searchQuery = "zzznomatch_xyz_abc";
       await wrapper.vm.$nextTick();
-      expect(wrapper.find(".config-no-results").exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-no-results"]').exists()).toBe(true);
     });
 
     it("displays the search query text in the empty state message", async () => {
       wrapper = createWrapper();
       wrapper.vm.searchQuery = "zzznomatch_xyz_abc";
       await wrapper.vm.$nextTick();
-      expect(wrapper.find(".config-no-results").text()).toContain("zzznomatch_xyz_abc");
+      expect(wrapper.find('[data-test="dashboard-config-no-results"]').text()).toContain(
+        "zzznomatch_xyz_abc",
+      );
     });
 
     it("is hidden again when search is cleared", async () => {
@@ -2650,15 +2522,15 @@ describe("ConfigPanel", () => {
       await wrapper.vm.$nextTick();
       wrapper.vm.searchQuery = "";
       await wrapper.vm.$nextTick();
-      expect(wrapper.find(".config-no-results").exists()).toBe(false);
+      expect(wrapper.find('[data-test="dashboard-config-no-results"]').exists()).toBe(false);
     });
   });
 
   describe("Section expansion items render", () => {
-    it("renders q-expansion-item for general section", () => {
+    it("renders OCollapsible for general section", () => {
       wrapper = createWrapper();
       // The general section expansion item uses isSectionVisible('general') via v-show
-      const expansionItems = wrapper.findAllComponents({ name: "QExpansionItem" });
+      const expansionItems = wrapper.findAllComponents({ name: "OCollapsible" });
       expect(expansionItems.length).toBeGreaterThan(0);
     });
   });

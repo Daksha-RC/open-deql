@@ -1,85 +1,111 @@
 <template>
-  <div v-if="visible" class="confirmation-overlay">
+  <div v-if="visible" class="confirmation-overlay mb-2 w-full">
     <div
-      class="confirmation-dialog"
-      :class="theme === 'dark' ? 'dark-mode' : 'light-mode'"
+      class="confirmation-dialog rounded-default bg-surface-base border-border-default flex w-full flex-col gap-3.5 border-2 px-4 pt-4 pb-3.5 shadow-sm dark:shadow-sm"
       @keydown="handleDialogKeydown"
       @click="handleDialogClick"
     >
-      <div class="confirmation-header">
-        <q-icon name="help_outline" size="20px" class="confirmation-icon" />
-        <span class="confirmation-title">{{ formattedMessage }}</span>
+      <div class="confirmation-header flex items-start gap-3">
+        <OIcon
+          name="help-outline"
+          size="md"
+          class="confirmation-icon text-icon-color mt-0.5 shrink-0"
+        />
+        <span
+          class="confirmation-title text-text-heading flex-1 text-sm leading-normal font-medium"
+          >{{ formattedMessage }}</span
+        >
       </div>
 
-      <div class="confirmation-buttons">
+      <div
+        class="confirmation-buttons border-border-default mt-1 flex w-full flex-col gap-2.5 border-t pt-3.5"
+      >
         <!-- For navigation actions, show 3 buttons -->
         <template v-if="isNavigationAction">
-          <q-btn
+          <OButton
             ref="yesButtonRef"
-            unelevated
-            no-caps
-            label="Allow"
-            class="confirmation-btn confirm-btn"
-            :class="{ 'btn-focused': isFocusedYes }"
+            variant="outline"
+            :block="true"
+            class="confirmation-btn rounded-default text-theme-accent border-border-default bg-surface-base hover:bg-button-ghost-primary-hover-bg hover:border-theme-accent w-full border-2 text-sm font-semibold tracking-normal normal-case transition-all duration-200"
+            :class="
+              isFocusedYes
+                ? 'bg-theme-accent! border-theme-accent! ring-theme-accent/40 text-white! ring-3'
+                : ''
+            "
             tabindex="0"
             @click="handleConfirm"
             @focus="handleYesFocus"
             @blur="handleYesBlur"
-          />
-          <q-btn
+            >{{ t("aiAssistant.confirmDialog.allow") }}</OButton
+          >
+          <OButton
             ref="alwaysButtonRef"
-            unelevated
-            no-caps
-            label="Always Allow"
-            class="confirmation-btn always-btn"
-            :class="{ 'btn-focused': isFocusedAlways }"
+            variant="outline"
+            :block="true"
+            class="confirmation-btn rounded-default text-status-positive border-border-default bg-surface-base hover:bg-button-ghost-success-hover-bg hover:border-status-positive w-full border-2 text-sm font-semibold tracking-normal normal-case transition-all duration-200"
+            :class="
+              isFocusedAlways
+                ? 'bg-status-positive! border-status-positive! ring-status-positive/40 text-white! ring-3'
+                : ''
+            "
             tabindex="1"
             @click="handleAlwaysConfirm"
             @focus="handleAlwaysFocus"
             @blur="handleAlwaysBlur"
-          />
-          <q-btn
+            >{{ t("aiAssistant.confirmDialog.alwaysAllow") }}</OButton
+          >
+          <OButton
             ref="noButtonRef"
-            unelevated
-            no-caps
-            outline
-            label="No"
-            class="confirmation-btn cancel-btn"
-            :class="{ 'btn-focused': isFocusedNo }"
+            variant="outline"
+            :block="true"
+            class="confirmation-btn rounded-default text-text-body border-border-default bg-surface-base hover:bg-button-ghost-destructive-hover-bg hover:border-status-negative w-full border-2 text-sm font-semibold tracking-normal normal-case transition-all duration-200"
+            :class="
+              isFocusedNo
+                ? 'bg-status-negative! border-status-negative! ring-status-negative/40 text-white! ring-3'
+                : ''
+            "
             tabindex="2"
             @click="handleCancel"
             @focus="handleNoFocus"
             @blur="handleNoBlur"
-          />
+            >{{ t("aiAssistant.confirmDialog.no") }}</OButton
+          >
         </template>
 
         <!-- For other actions, show 2 buttons -->
         <template v-else>
-          <q-btn
+          <OButton
             ref="yesButtonRef"
-            unelevated
-            no-caps
-            :label="confirmLabel"
-            class="confirmation-btn confirm-btn"
-            :class="{ 'btn-focused': isFocusedYes }"
+            variant="outline"
+            :block="true"
+            class="confirmation-btn rounded-default text-theme-accent border-border-default bg-surface-base hover:bg-button-ghost-primary-hover-bg hover:border-theme-accent w-full border-2 text-sm font-semibold tracking-normal normal-case transition-all duration-200"
+            :class="
+              isFocusedYes
+                ? 'bg-theme-accent! border-theme-accent! ring-theme-accent/40 text-white! ring-3'
+                : ''
+            "
             tabindex="0"
             @click="handleConfirm"
             @focus="handleYesFocus"
             @blur="handleYesBlur"
-          />
-          <q-btn
+            >{{ resolvedConfirmLabel }}</OButton
+          >
+          <OButton
             ref="noButtonRef"
-            unelevated
-            no-caps
-            outline
-            :label="cancelLabel"
-            class="confirmation-btn cancel-btn"
-            :class="{ 'btn-focused': isFocusedNo }"
+            variant="outline"
+            :block="true"
+            class="confirmation-btn rounded-default text-text-body border-border-default bg-surface-base hover:bg-button-ghost-destructive-hover-bg hover:border-status-negative w-full border-2 text-sm font-semibold tracking-normal normal-case transition-all duration-200"
+            :class="
+              isFocusedNo
+                ? 'bg-status-negative! border-status-negative! ring-status-negative/40 text-white! ring-3'
+                : ''
+            "
             tabindex="1"
             @click="handleCancel"
             @focus="handleNoFocus"
             @blur="handleNoBlur"
-          />
+            >{{ resolvedCancelLabel }}</OButton
+          >
         </template>
       </div>
     </div>
@@ -87,27 +113,47 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, nextTick, computed, onMounted, onUnmounted } from 'vue';
-import { useStore } from 'vuex';
+import { ref, watch, nextTick, computed, onMounted, onUnmounted } from "vue";
+import { useI18nTyped, type I18nText } from "@/types/i18n";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
 
 interface ConfirmationData {
   tool?: string;
   args?: Record<string, any>;
-  message?: string;
+  message?: I18nText;
 }
 
 interface Props {
   visible: boolean;
   confirmation: ConfirmationData | null;
-  confirmLabel?: string;
-  cancelLabel?: string;
+  confirmLabel?: I18nText;
+  cancelLabel?: I18nText;
 }
 
+const { t } = useI18nTyped();
+
+/** Keep in sync with `aiAssistant.aiChat.entity.*`; anything absent renders raw English. */
+const DELETABLE_ENTITIES = new Set([
+  "alert",
+  "dashboard",
+  "pipeline",
+  "report",
+  "function",
+  "stream",
+  "folder",
+  "panel",
+  "user",
+  "action",
+]);
+
 const props = withDefaults(defineProps<Props>(), {
-  confirmLabel: 'Yes',
-  cancelLabel: 'No',
   confirmation: null,
 });
+
+// Render-time defaults — a withDefaults literal would freeze the English text.
+const resolvedConfirmLabel = computed(() => props.confirmLabel ?? t("common.yes"));
+const resolvedCancelLabel = computed(() => props.cancelLabel ?? t("common.no"));
 
 const emit = defineEmits<{
   confirm: [];
@@ -115,53 +161,60 @@ const emit = defineEmits<{
   alwaysConfirm: [];
 }>();
 
-const store = useStore();
-const theme = computed(() => store.state.theme);
-
 // Check if this is a navigation action
-const isNavigationAction = computed(() => props.confirmation?.tool === 'navigation_action');
+const isNavigationAction = computed(() => props.confirmation?.tool === "navigation_action");
 
 // Format message based on confirmation data
 const formattedMessage = computed(() => {
-  if (!props.confirmation) return '';
+  if (!props.confirmation) return "";
 
   // Handle navigation_action
   if (isNavigationAction.value) {
     // Use the label/message from the navigation action
     const message = props.confirmation.message;
     if (message) {
-      return `Allow O2 Assistant to ${message}?`;
+      return t("aiAssistant.aiChat.allowAssistantTo", { action: message });
     }
 
     // Fallback: format based on target
     const target = props.confirmation.args;
     if (target?.name) {
-      return `Allow O2 Assistant to navigate to ${target.name}?`;
+      return t("aiAssistant.aiChat.allowAssistantNavigateTo", { name: target.name });
     }
 
-    return 'Allow O2 Assistant to navigate?';
+    return t("aiAssistant.aiChat.navigateConfirmQuestion");
   }
 
   // Handle Delete* operations generically (DeleteAlert, DeleteDashboard, DeletePipeline, etc.)
-  if (props.confirmation.tool && props.confirmation.tool.startsWith('Delete')) {
+  if (props.confirmation.tool && props.confirmation.tool.startsWith("Delete")) {
     // Extract entity type (e.g., "Alert" from "DeleteAlert")
-    const entityType = props.confirmation.tool.replace('Delete', '');
-    const entityTypeLower = entityType.toLowerCase();
+    const entityType = props.confirmation.tool.replace("Delete", "");
+    // The noun is server-supplied English, so it needs translating before it goes into
+    // a translated sentence. Gated on a list, not te(): te() ignores the fallback locale,
+    // so it returns false for every non-English user until the entity keys are translated.
+    const lowerEntity = entityType.toLowerCase();
+    const entityTypeLower = DELETABLE_ENTITIES.has(lowerEntity)
+      ? t(`aiAssistant.aiChat.entity.${lowerEntity}`)
+      : lowerEntity;
     const args = props.confirmation.args || {};
 
     // Try to find a name or title for the entity
-    const name = args.name || args.title || args.alert_id || args.dashboard_id || args.pipeline_id || args.id;
+    const name =
+      args.name || args.title || args.alert_id || args.dashboard_id || args.pipeline_id || args.id;
 
     if (name) {
-      return `Do you really want to delete the "${name}" ${entityTypeLower}?`;
+      return t("aiAssistant.aiChat.confirmDeleteNamedEntity", {
+        name,
+        entity: entityTypeLower,
+      });
     }
 
     // Fallback if no identifier found
-    return `Do you really want to delete this ${entityTypeLower}?`;
+    return t("aiAssistant.aiChat.confirmDeleteEntity", { entity: entityTypeLower });
   }
 
   // Fallback to message property
-  return props.confirmation.message || '';
+  return props.confirmation.message || "";
 });
 
 const yesButtonRef = ref<any>(null);
@@ -181,7 +234,7 @@ watch(
       nextTick(() => {
         setTimeout(() => {
           // Check if this is a delete operation
-          const isDeleteOperation = props.confirmation?.tool?.startsWith('Delete');
+          const isDeleteOperation = props.confirmation?.tool?.startsWith("Delete");
 
           if (isDeleteOperation) {
             // Focus "No" button for delete operations
@@ -201,19 +254,19 @@ watch(
         }, 100);
       });
     }
-  }
+  },
 );
 
 const handleConfirm = () => {
-  emit('confirm');
+  emit("confirm");
 };
 
 const handleCancel = () => {
-  emit('cancel');
+  emit("cancel");
 };
 
 const handleAlwaysConfirm = () => {
-  emit('alwaysConfirm');
+  emit("alwaysConfirm");
 };
 
 const focusYes = () => {
@@ -270,7 +323,7 @@ const handleAlwaysBlur = () => {
 const handleDialogClick = (event: MouseEvent) => {
   // If click is not on a button, refocus the last focused button
   const target = event.target as HTMLElement;
-  if (!target.closest('.confirmation-btn')) {
+  if (!target.closest(".confirmation-btn")) {
     nextTick(() => {
       if (isFocusedNo.value) {
         focusNo();
@@ -284,8 +337,7 @@ const handleDialogClick = (event: MouseEvent) => {
 };
 
 const handleDialogKeydown = (event: KeyboardEvent) => {
-
-  if (event.key === 'Enter') {
+  if (event.key === "Enter") {
     event.preventDefault();
     if (isFocusedYes.value) {
       handleConfirm();
@@ -294,7 +346,7 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
     } else if (isFocusedNo.value) {
       handleCancel();
     }
-  } else if (event.key === 'ArrowDown' || event.key === 'Down') {
+  } else if (event.key === "ArrowDown" || event.key === "Down") {
     event.preventDefault();
     if (isNavigationAction.value) {
       // For navigation: Allow -> Always Allow -> No -> Allow
@@ -309,7 +361,7 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
       // For other actions: Yes -> No -> Yes
       focusNo();
     }
-  } else if (event.key === 'ArrowUp' || event.key === 'Up') {
+  } else if (event.key === "ArrowUp" || event.key === "Up") {
     event.preventDefault();
     if (isNavigationAction.value) {
       // For navigation: No -> Always Allow -> Allow -> No
@@ -344,10 +396,10 @@ onMounted(() => {
 
     if (yesBtnEl) {
       yesBtnHandler = (e: KeyboardEvent) => {
-        if (e.key === 'Enter') {
+        if (e.key === "Enter") {
           e.preventDefault();
           handleConfirm();
-        } else if (e.key === 'ArrowDown') {
+        } else if (e.key === "ArrowDown") {
           e.preventDefault();
           if (isNavigationAction.value) {
             focusAlways();
@@ -356,31 +408,31 @@ onMounted(() => {
           }
         }
       };
-      yesBtnEl.addEventListener('keydown', yesBtnHandler);
+      yesBtnEl.addEventListener("keydown", yesBtnHandler);
     }
 
     if (alwaysBtnEl) {
       alwaysBtnHandler = (e: KeyboardEvent) => {
-        if (e.key === 'Enter') {
+        if (e.key === "Enter") {
           e.preventDefault();
           handleAlwaysConfirm();
-        } else if (e.key === 'ArrowDown') {
+        } else if (e.key === "ArrowDown") {
           e.preventDefault();
           focusNo();
-        } else if (e.key === 'ArrowUp') {
+        } else if (e.key === "ArrowUp") {
           e.preventDefault();
           focusYes();
         }
       };
-      alwaysBtnEl.addEventListener('keydown', alwaysBtnHandler);
+      alwaysBtnEl.addEventListener("keydown", alwaysBtnHandler);
     }
 
     if (noBtnEl) {
       noBtnHandler = (e: KeyboardEvent) => {
-        if (e.key === 'Enter') {
+        if (e.key === "Enter") {
           e.preventDefault();
           handleCancel();
-        } else if (e.key === 'ArrowUp') {
+        } else if (e.key === "ArrowUp") {
           e.preventDefault();
           if (isNavigationAction.value) {
             focusAlways();
@@ -389,240 +441,40 @@ onMounted(() => {
           }
         }
       };
-      noBtnEl.addEventListener('keydown', noBtnHandler);
+      noBtnEl.addEventListener("keydown", noBtnHandler);
     }
   });
 });
 
 onUnmounted(() => {
   if (yesBtnEl && yesBtnHandler) {
-    yesBtnEl.removeEventListener('keydown', yesBtnHandler);
+    yesBtnEl.removeEventListener("keydown", yesBtnHandler);
   }
   if (alwaysBtnEl && alwaysBtnHandler) {
-    alwaysBtnEl.removeEventListener('keydown', alwaysBtnHandler);
+    alwaysBtnEl.removeEventListener("keydown", alwaysBtnHandler);
   }
   if (noBtnEl && noBtnHandler) {
-    noBtnEl.removeEventListener('keydown', noBtnHandler);
+    noBtnEl.removeEventListener("keydown", noBtnHandler);
   }
 });
 </script>
 
-<style scoped lang="scss">
+<style scoped>
+/* keep(keyframes): the inline confirmation entrance is used only by this dialog.
+   The `animation` is declared here, not as a template `[animation:…]` utility, so
+   Vue's scoped compiler renames the keyframe and this reference together. */
 .confirmation-overlay {
-  width: 100%;
-  margin-bottom: 8px;
-  animation: slideUp 0.25s ease-out;
+  animation: slide-up 0.25s ease-out;
 }
 
-@keyframes slideUp {
+@keyframes slide-up {
   from {
     opacity: 0;
-    transform: translateY(10px);
+    transform: translateY(0.625rem);
   }
   to {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-
-.confirmation-dialog {
-  width: 100%;
-  padding: 16px 16px 14px 16px;
-  border-radius: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.2);
-
-  &.light-mode {
-    background: #ffffff;
-    border: 2px solid #e4e7ec;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  }
-  &.dark-mode {
-    background: #1e1e1e;
-    border: 2px solid #323232;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-  }
-}
-
-.confirmation-header {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-
-  .confirmation-icon {
-    flex-shrink: 0;
-    margin-top: 2px;
-
-    .light-mode & {
-      color: #6b7280;
-    }
-    .dark-mode & {
-      color: #9ca3af;
-    }
-  }
-
-  .confirmation-title {
-    flex: 1;
-    font-size: 15px;
-    font-weight: 500;
-    line-height: 1.5;
-
-    .light-mode & {
-      color: #1f2937;
-    }
-    .dark-mode & {
-      color: #f3f4f6;
-    }
-  }
-}
-
-.confirmation-buttons {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  width: 100%;
-  padding-top: 14px;
-  margin-top: 4px;
-
-  .light-mode & {
-    border-top: 1px solid #e5e7eb;
-  }
-  .dark-mode & {
-    border-top: 1px solid #374151;
-  }
-
-  .confirmation-btn {
-    width: 100%;
-    font-size: 14px;
-    font-weight: 600;
-    // padding: 11px 20px;
-    border-radius: 6px;
-    text-transform: none;
-    letter-spacing: 0;
-    transition: all 0.2s ease;
-
-    &.confirm-btn {
-      .light-mode & {
-        color: var(--q-primary);
-        border: 2px solid #d1d5db;
-        background: #ffffff;
-
-        &:hover {
-          background: #eff6ff;
-          border-color: var(--q-primary);
-        }
-
-        &.btn-focused {
-          color: #ffffff !important;
-          background-color: var(--q-primary) !important;
-          border-color: var(--q-primary) !important;
-          box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.4) !important;
-        }
-      }
-
-      .dark-mode & {
-        color: var(--q-primary);
-         border: 2px solid #4b5563;
-        background: transparent;
-
-        &:hover {
-          background: rgba(59, 130, 246, 0.1);
-          border-color: var(--q-primary);
-        }
-
-        &.btn-focused {
-          color: #ffffff !important;
-          background-color: var(--q-primary) !important;
-          border-color: var(--q-primary) !important;
-          box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.4) !important;
-        }
-      }
-    }
-
-    &.always-btn {
-      .light-mode & {
-        color: #059669;
-        border: 2px solid #d1d5db;
-        background: #ffffff;
-
-        &:hover {
-          background: #f0fdf4;
-          border-color: #34d399;
-        }
-
-        &.btn-focused {
-          color: #ffffff !important;
-          background-color: #059669 !important;
-          border-color: #059669 !important;
-          box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.4) !important;
-        }
-      }
-
-      .dark-mode & {
-        color: #34d399;
-        border: 2px solid #4b5563;
-        background: transparent;
-
-        &:hover {
-          background: rgba(5, 150, 105, 0.1);
-          border-color: #34d399;
-        }
-
-        &.btn-focused {
-          color: #ffffff !important;
-          background-color: #059669 !important;
-          border-color: #059669 !important;
-          box-shadow: 0 0 0 3px rgba(5, 150, 105, 0.4) !important;
-        }
-      }
-    }
-
-    &.cancel-btn {
-      .light-mode & {
-        color: #374151;
-        border: 2px solid #d1d5db;
-        background: #ffffff;
-
-        &:hover {
-          background: #fef2f2;
-          border-color: #fca5a5;
-        }
-
-        &.btn-focused {
-          color: #ffffff !important;
-          background-color: #ef4444 !important;
-          border-color: #ef4444 !important;
-          box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.4) !important;
-        }
-      }
-
-      .dark-mode & {
-        color: #e5e7eb;
-        border: 2px solid #4b5563;
-        background: transparent;
-
-        &:hover {
-          background: rgba(239, 68, 68, 0.1);
-          border-color: #f87171;
-        }
-
-        &.btn-focused {
-          color: #ffffff !important;
-          background-color: #dc2626 !important;
-          border-color: #dc2626 !important;
-          box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.4) !important;
-        }
-      }
-    }
-  }
-}
-
-// Target Quasar's focus helper
-.confirmation-btn {
-  :deep(.q-focus-helper) {
-    display: none !important;
   }
 }
 </style>

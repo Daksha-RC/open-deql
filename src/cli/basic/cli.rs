@@ -17,11 +17,11 @@ use std::path::PathBuf;
 
 use chrono::TimeZone;
 use clap::{Arg, ArgAction, Command};
-use config::utils::file::set_permission;
-use infra::{
-    db::{ORM_CLIENT, connect_to_orm},
-    file_list as infra_file_list, table,
-};
+use common::{infra::config::USERS, meta};
+use config::{DEFAULT_ORG, utils::file::set_permission};
+use db;
+use infra::{db::get_orm_client_rw, file_list as infra_file_list, table};
+use openobserve_core::users;
 
 use crate::{
     cli::data::{
@@ -29,9 +29,7 @@ use crate::{
         cli::{Cli as dataCli, args as dataArgs},
         export, import,
     },
-    common::{infra::config::USERS, meta},
     migration,
-    service::{compact, db, file_list, users},
 };
 
 /// Not to be confused with [`clap::arg`] macro, this is a custom macro that
@@ -51,8 +49,9 @@ fn create_cli_app() -> Command {
         .subcommands(&[
             Command::new("reset")
                 .about("reset openobserve data")
-                .arg(arg!("component", 'c', "component", "reset data of the component: root, user, alert, dashboard, function, stream-stats, file-list-jobs", true))
-                .arg(arg!("time", 't', "time", "timestamp in microseconds, only used by file-list-jobs (default: 0)")),
+                .arg(arg!("component", 'c', "component", "reset data of the component: root, user, alert, dashboard, function, stream-stats, file-list-jobs, index-updated-at", true))
+                .arg(arg!("time", 't', "time", "timestamp in microseconds, used by file-list-jobs (default: 0) and index-updated-at (default: stream min data date)"))
+                .arg(arg!("stream", 's', "stream", "stream key org/stream_type/stream_name, used by stream-stats, file-list-jobs and index-updated-at (default: all streams)")),
             Command::new("import")
                 .about("import openobserve data").args(dataArgs()),
             Command::new("export")
@@ -99,11 +98,18 @@ fn create_cli_app() -> Command {
                     arg!("account", 'a', "account", "the account name", false).value_name("account"),
                     arg!("file", 'f', "file", "the parquet file name", true).value_name("file"),
                 ]),
-            Command::new("recover-file-list").about("recover file list from s3")
+            Command::new("recover-file-list").about("recover file list from remote object store")
                 .args([
                     arg!("account", 'a', "account", "the account name", true).value_name("account"),
                     arg!("prefix", 'p', "prefix", "only migrate specified prefix", true).value_name("prefix"),
                     arg!("insert", 'i', "insert", "insert file list into db", false).value_name("insert").action(ArgAction::SetTrue),
+                ]),
+            Command::new("gc-file-list")
+                .about("delete stale stream files from remote storage that are past data retention")
+                .args([
+                    arg!("account", 'a', "account", "override storage account to list/delete, required for file_hash multi-account setups (default: resolve per stream)", false).value_name("account"),
+                    arg!("stream", 's', "stream", "only clean a specific stream, format: org/stream_type/stream_name (default: all streams)", false).value_name("stream"),
+                    arg!("dry-run", 'd', "dry-run", "only print what would be deleted, don't touch storage", false).action(ArgAction::SetTrue),
                 ]),
                 Command::new("node").about("node command").subcommands([
                 Command::new("offline").about("offline node"),
@@ -146,7 +152,14 @@ fn create_cli_app() -> Command {
                     arg!("stream-name", 's', "stream-name", "stream-name"),
                     arg!("top-x", 'x', "top-x", "top-x").default_value("5"),
                     arg!("org-id", 'o', "org-id", "org-id").default_value("default"),
-            ])
+            ]),
+            Command::new("bloom-inspect").about("dump fields + file names of a `.bf` file").args([
+                arg!("file", 'f', "file", "path to a `.bf` file (e.g. data/.../bloom/.../{ver}.bf)", true),
+            ]),
+            Command::new("ttv-inspect").about("dump properties + contents of a `.ttv` (tantivy index) file").args([
+                arg!("file", 'f', "file", "path to a `.ttv` file (e.g. data/.../index/.../{id}.ttv)", true),
+                arg!("raw", 'r', "raw", "also print the raw tantivy meta.json", false).action(ArgAction::SetTrue),
+            ]),
         ])
 }
 
@@ -157,7 +170,7 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
     if let Some(config_file_path) = app.get_one::<String>("config") {
         let path = PathBuf::from(config_file_path);
         config::config_path_manager::set_config_file_path(path.clone())
-            .and_then(|_| crate::job::config_watcher::reload_config(&path))
+            .and_then(|_| openobserve_jobs::job::config_watcher::reload_config(&path))
             .map_err(|e|
                 anyhow::anyhow!(
                     "set config from file path {config_file_path} failed with {e}, stopping boot up... ",
@@ -181,6 +194,28 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
         println!("init dir {path} successfully");
         return Ok(true);
     }
+    if name == "bloom-inspect" {
+        let file = command
+            .get_one::<String>("file")
+            .ok_or_else(|| anyhow::anyhow!("please set --file"))?;
+        // Resolving file_list ids → file names needs the DB; best-effort so
+        // the tool still works (showing bare ids) where it isn't reachable.
+        if let Err(e) = infra::init().await {
+            eprintln!("warning: infra init failed ({e}); file names will not be resolved");
+        }
+        super::bloom::inspect(file).await?;
+        return Ok(true);
+    }
+    if name == "ttv-inspect" {
+        // Pure local-file inspection: parses the puffin footer + embedded
+        // tantivy meta.json. No object-store or DB needed.
+        let file = command
+            .get_one::<String>("file")
+            .ok_or_else(|| anyhow::anyhow!("please set --file"))?;
+        let raw = command.get_flag("raw");
+        super::ttv::inspect(file, raw)?;
+        return Ok(true);
+    }
 
     // init infra, create data dir & tables
     let cfg = config::get_config();
@@ -188,11 +223,19 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
         "reset" => {
             infra::init().await?;
             db::org_users::cache().await?;
+            db::org_ingestion_tokens::cache().await?;
             let component = command.get_one::<String>("component").unwrap();
             match component.as_str() {
                 "root" => {
+                    if let Err(msg) =
+                        db::password_policy::validate_password(&cfg.auth.root_user_password).await
+                    {
+                        return Err(anyhow::anyhow!(
+                            "ZO_ROOT_USER_PASSWORD does not meet policy: {msg}"
+                        ));
+                    }
                     let ret = users::update_user(
-                        meta::organization::DEFAULT_ORG,
+                        DEFAULT_ORG,
                         cfg.auth.root_user_email.as_str(),
                         meta::user::UserUpdateMode::CliUpdate,
                         cfg.auth.root_user_email.as_str(),
@@ -200,7 +243,7 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                             change_password: true,
                             old_password: None,
                             new_password: Some(cfg.auth.root_user_password.clone()),
-                            role: Some(crate::common::meta::user::UserRoleRequest {
+                            role: Some(common::meta::user::UserRoleRequest {
                                 role: config::meta::user::UserRole::Root.to_string(),
                                 custom: None,
                             }),
@@ -211,6 +254,7 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                             } else {
                                 Some(cfg.auth.root_user_token.clone())
                             },
+                            remove_lockout: false,
                         },
                     )
                     .await?;
@@ -231,29 +275,34 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                     table::dashboards::delete_all().await?;
                 }
                 "report" => {
-                    let conn = ORM_CLIENT.get_or_init(connect_to_orm).await;
+                    let conn = get_orm_client_rw().await;
                     db::dashboards::reports::reset(conn).await?;
                 }
                 "function" => {
                     db::functions::reset().await?;
                 }
                 "stream-stats" => {
-                    // reset stream stats update offset
-                    db::compact::stats::set_offset(0, None).await?;
-                    // reset stream stats table data
-                    infra_file_list::reset_stream_stats().await?;
-                    // load stream list
-                    db::schema::cache().await?;
-                    // update stats from file list
-                    compact::stats::update_stats_from_file_list()
-                        .await
-                        .expect("file list remote calculate stats failed");
+                    if let Some(stream) = command.get_one::<String>("stream") {
+                        super::stream::reset_stream_stats(stream).await?;
+                    } else {
+                        // reset stream stats update offset
+                        db::compact::stats::set_offset(0, None).await?;
+                        // reset stream stats table data
+                        infra_file_list::reset_stream_stats().await?;
+                        // load stream list
+                        db::schema::cache().await?;
+                        // update stats from file list
+                        compaction::stats::update_stats_from_file_list()
+                            .await
+                            .expect("file list remote calculate stats failed");
+                    }
                 }
                 "file-list-jobs" => {
                     let time = command
                         .get_one::<String>("time")
                         .map(|s| s.parse::<i64>().unwrap_or(0))
                         .unwrap_or(0);
+                    let stream = command.get_one::<String>("stream").map(|s| s.as_str());
                     // check if any compactor node is running in the cluster
                     let nodes = infra::cluster::list_nodes().await.unwrap_or_default();
                     let compactor_nodes: Vec<_> = nodes
@@ -283,11 +332,27 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                         );
                     }
                     // 1. reset file offset in meta table
-                    let n = db::compact::files::reset_offset(time).await?;
-                    println!("reset {n} compact file offsets to {time}");
-                    // 2. set all file list jobs to pending
-                    let rows = infra_file_list::set_job_pending(&[]).await?;
-                    println!("reset {rows} file_list_jobs to pending");
+                    let n = db::compact::files::reset_offset(time, stream).await?;
+                    println!(
+                        "reset {n} compact file offsets to {time} (stream: {})",
+                        stream.unwrap_or("*")
+                    );
+                    // 2. set file list jobs to pending
+                    let rows = infra_file_list::set_job_pending(&[], time, stream).await?;
+                    println!(
+                        "reset {rows} file_list_jobs to pending (offsets >= {time}, stream: {})",
+                        stream.unwrap_or("*")
+                    );
+                }
+                "index-updated-at" => {
+                    let time = command
+                        .get_one::<String>("time")
+                        .map(|s| s.parse::<i64>().unwrap_or(0));
+                    let stream = command
+                        .get_one::<String>("stream")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    super::stream::reset_index_updated_at(stream, time).await?;
                 }
                 _ => {
                     return Err(anyhow::anyhow!(
@@ -306,6 +371,7 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
                 "user" => {
                     db::user::cache().await?;
                     db::org_users::cache().await?;
+                    db::org_ingestion_tokens::cache().await?;
                     let mut id = 0;
                     for user in USERS.iter() {
                         id += 1;
@@ -371,7 +437,7 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
         "delete-parquet" => {
             let account = command.remove_one::<String>("account").unwrap_or_default();
             let file = command.get_one::<String>("file").unwrap();
-            match file_list::delete_parquet_file(&account, file, true).await {
+            match infra_file_list::delete_parquet_file(&account, file, true).await {
                 Ok(_) => {
                     println!("delete parquet file {file} successfully");
                 }
@@ -381,13 +447,13 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
             }
         }
         "import" => {
-            crate::common::infra::init().await?;
-            crate::common::infra::cluster::register_and_keep_alive().await?;
+            openobserve_core::bootstrap::init().await?;
+            common::infra::cluster::register_and_keep_alive().await?;
             import::Import::operator(dataCli::arg_matches(command.clone())).await?;
         }
         "export" => {
-            crate::common::infra::init().await?;
-            crate::common::infra::cluster::register_and_keep_alive().await?;
+            openobserve_core::bootstrap::init().await?;
+            common::infra::cluster::register_and_keep_alive().await?;
             export::Export::operator(dataCli::arg_matches(command.clone())).await?;
         }
         "recover-file-list" => {
@@ -398,6 +464,12 @@ pub async fn cli() -> Result<bool, anyhow::Error> {
             let prefix = command.get_one::<String>("prefix").unwrap();
             let insert = command.get_flag("insert");
             super::load::load_file_list_from_s3(&account, prefix, insert).await?;
+        }
+        "gc-file-list" => {
+            let account = command.get_one::<String>("account").map(|s| s.as_str());
+            let stream = command.get_one::<String>("stream").map(|s| s.as_str());
+            let dry_run = command.get_flag("dry-run");
+            super::gc::run(account, stream, dry_run).await?;
         }
         "node" => {
             let command = command.subcommand();
@@ -930,6 +1002,54 @@ mod tests {
             sub_sub_matches.get_one::<String>("group_size").unwrap(),
             "5"
         );
+    }
+
+    #[test]
+    fn test_reset_index_updated_at_component_parsing() {
+        let app = create_test_app();
+        let matches = app
+            .try_get_matches_from([
+                "openobserve",
+                "reset",
+                "--component",
+                "index-updated-at",
+                "--stream",
+                "default/logs/test",
+                "--time",
+                "1700000000000000",
+            ])
+            .unwrap();
+        let (name, sub_matches) = matches.subcommand().unwrap();
+        assert_eq!(name, "reset");
+        assert_eq!(
+            sub_matches.get_one::<String>("component").unwrap(),
+            "index-updated-at"
+        );
+        assert_eq!(
+            sub_matches.get_one::<String>("stream").unwrap(),
+            "default/logs/test"
+        );
+        assert_eq!(
+            sub_matches.get_one::<String>("time").unwrap(),
+            "1700000000000000"
+        );
+    }
+
+    #[test]
+    fn test_reset_index_updated_at_component_defaults() {
+        let app = create_test_app();
+        let matches = app
+            .try_get_matches_from(["openobserve", "reset", "--component", "index-updated-at"])
+            .unwrap();
+        let (name, sub_matches) = matches.subcommand().unwrap();
+        assert_eq!(name, "reset");
+        assert_eq!(
+            sub_matches.get_one::<String>("component").unwrap(),
+            "index-updated-at"
+        );
+        // stream and time are unset: all streams, use min date
+        assert!(sub_matches.get_one::<String>("stream").is_none());
+        assert!(sub_matches.get_one::<String>("time").is_none());
     }
 
     #[test]

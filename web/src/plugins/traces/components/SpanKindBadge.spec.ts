@@ -15,23 +15,15 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import SpanKindBadge from "./SpanKindBadge.vue";
-
-installQuasar();
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const tooltipStub = {
-  template: '<span data-test="tooltip-stub"><slot /></span>',
-};
-
 function mountBadge(kind: string): VueWrapper {
   return mount(SpanKindBadge, {
     props: { kind },
-    global: { stubs: { "q-tooltip": tooltipStub } },
   });
 }
 
@@ -127,39 +119,39 @@ describe("SpanKindBadge", () => {
   // -------------------------------------------------------------------------
 
   describe("CSS modifier class", () => {
-    it('should apply "span-kind-badge--client" class when kind is "Client"', () => {
+    it('should apply "bg-badge-blue-soft-bg" class when kind is "Client"', () => {
       wrapper = mountBadge("Client");
       const badge = wrapper.find('[data-test="trace-tree-span-kind-badge-client"]');
 
-      expect(badge.classes()).toContain("span-kind-badge--client");
+      expect(badge.classes()).toContain("bg-badge-blue-soft-bg");
     });
 
-    it('should apply "span-kind-badge--server" class when kind is "Server"', () => {
+    it('should apply "bg-badge-purple-soft-bg" class when kind is "Server"', () => {
       wrapper = mountBadge("Server");
       const badge = wrapper.find('[data-test="trace-tree-span-kind-badge-server"]');
 
-      expect(badge.classes()).toContain("span-kind-badge--server");
+      expect(badge.classes()).toContain("bg-badge-purple-soft-bg");
     });
 
-    it('should apply "span-kind-badge--producer" class when kind is "Producer"', () => {
+    it('should apply "bg-badge-teal-soft-bg" class when kind is "Producer"', () => {
       wrapper = mountBadge("Producer");
       const badge = wrapper.find('[data-test="trace-tree-span-kind-badge-producer"]');
 
-      expect(badge.classes()).toContain("span-kind-badge--producer");
+      expect(badge.classes()).toContain("bg-badge-teal-soft-bg");
     });
 
-    it('should apply "span-kind-badge--consumer" class when kind is "Consumer"', () => {
+    it('should apply "bg-badge-amber-soft-bg" class when kind is "Consumer"', () => {
       wrapper = mountBadge("Consumer");
       const badge = wrapper.find('[data-test="trace-tree-span-kind-badge-consumer"]');
 
-      expect(badge.classes()).toContain("span-kind-badge--consumer");
+      expect(badge.classes()).toContain("bg-badge-amber-soft-bg");
     });
 
-    it('should apply "span-kind-badge--internal" class when kind is "Internal"', () => {
+    it('should apply "bg-badge-default-soft-bg" class when kind is "Internal"', () => {
       wrapper = mountBadge("Internal");
       const badge = wrapper.find('[data-test="trace-tree-span-kind-badge-internal"]');
 
-      expect(badge.classes()).toContain("span-kind-badge--internal");
+      expect(badge.classes()).toContain("bg-badge-default-soft-bg");
     });
   });
 
@@ -168,25 +160,26 @@ describe("SpanKindBadge", () => {
   // -------------------------------------------------------------------------
 
   describe("tooltip content", () => {
-    it('should render a tooltip with text "Client" when kind is "Client"', () => {
+    it('should render a tooltip with content "Client" when kind is "Client"', () => {
       wrapper = mountBadge("Client");
-      const tooltip = wrapper.find('[data-test="tooltip-stub"]');
-      expect(tooltip.exists()).toBe(true);
-      expect(tooltip.text()).toBe("Client");
+      // OTooltip uses :content prop, not slot — find component and check prop
+      const tooltipComp = wrapper.findComponent({ name: "OTooltip" });
+      expect(tooltipComp.exists()).toBe(true);
+      expect(tooltipComp.props("content")).toBe("Client");
     });
 
-    it('should render a tooltip with text "Server" when kind is "Server"', () => {
+    it('should render a tooltip with content "Server" when kind is "Server"', () => {
       wrapper = mountBadge("Server");
-      const tooltip = wrapper.find('[data-test="tooltip-stub"]');
-      expect(tooltip.exists()).toBe(true);
-      expect(tooltip.text()).toBe("Server");
+      const tooltipComp = wrapper.findComponent({ name: "OTooltip" });
+      expect(tooltipComp.exists()).toBe(true);
+      expect(tooltipComp.props("content")).toBe("Server");
     });
 
-    it('should render a tooltip with text "Consumer" when kind is "Consumer"', () => {
+    it('should render a tooltip with content "Consumer" when kind is "Consumer"', () => {
       wrapper = mountBadge("Consumer");
-      const tooltip = wrapper.find('[data-test="tooltip-stub"]');
-      expect(tooltip.exists()).toBe(true);
-      expect(tooltip.text()).toBe("Consumer");
+      const tooltipComp = wrapper.findComponent({ name: "OTooltip" });
+      expect(tooltipComp.exists()).toBe(true);
+      expect(tooltipComp.props("content")).toBe("Consumer");
     });
   });
 });

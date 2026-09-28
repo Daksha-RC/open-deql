@@ -13,34 +13,32 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { describe, expect, it, beforeEach, vi, afterEach, Mock } from "vitest";
+import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
+import { resolveDefaultColumns } from "./useLogs";
 import { flushPromises, mount } from "@vue/test-utils";
-import { Dialog, Notify } from "quasar";
-import { createStore } from "vuex";
 import { useRouter } from "vue-router";
 import { createI18n } from "vue-i18n";
 import type { AxiosResponse } from "axios";
 import { defineComponent, nextTick } from "vue";
 import useLogs from "../composables/useLogs";
 import searchService from "../services/search";
-import savedviewsService from "../services/saved_views";
-import * as zincutils from "../utils/zincutils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
+import { toast } from "@/lib/feedback/Toast/useToast";
 
 // Import functions from their respective composables
-import { useHistogram } from "../composables/useLogs/useHistogram";
 import useStreamFields from "../composables/useLogs/useStreamFields";
 import useSearchBar from "../composables/useLogs/useSearchBar";
-import { usePagination } from "../composables/useLogs/usePagination";
 import { useSearchStream } from "../composables/useLogs/useSearchStream";
 import { searchState } from "../composables/useLogs/searchState";
 import useNotifications from "../composables/useNotifications";
 
 import store from "../test/unit/helpers/store";
+import i18nInstance from "@/locales";
+const t = (i18nInstance.global as any).t;
 
-installQuasar({
-  plugins: [Dialog, Notify],
-});
+// Mock toast
+vi.mock("@/lib/feedback/Toast/useToast", () => ({
+  toast: vi.fn(),
+}));
 
 // Create i18n instance
 const i18n = createI18n({
@@ -81,11 +79,14 @@ vi.mock("../../services/search", () => {
   };
 });
 
-vi.mock("../../services/saved_views", () => ({
-  default: {
-    get: vi.fn().mockImplementation(() => Promise.resolve()),
-  },
-}));
+vi.mock("../../services/saved_views", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      get: vi.fn().mockImplementation(() => Promise.resolve()),
+    },
+  });
+});
 
 // Mock getStreams and getStream functions
 const mockGetStreams = vi.fn();
@@ -115,13 +116,13 @@ vi.mock("vue-router", () => ({
 const TestComponent = defineComponent({
   template: "<div></div>",
   setup() {
-    const logsComposable = useLogs();
-    const { setDateTime } = useSearchBar();
-    const { buildSearch } = useSearchStream();
+    const logsComposable = useLogs(t);
+    const { setDateTime } = useSearchBar(t);
+    const { buildSearch } = useSearchStream(t);
     const { searchObj, notificationMsg, fieldValues } = searchState();
     const { showErrorNotification } = useNotifications();
     const { updateGridColumns, updateFieldValues } = useStreamFields();
-    const { $q, ...restProps } = logsComposable;
+    const { ...restProps } = logsComposable;
     return {
       ...restProps,
       setDateTime,
@@ -305,9 +306,7 @@ describe("Use Logs Composable", () => {
   describe("Paginated Data", () => {
     beforeEach(() => {
       // Mock processPostPaginationData and its sub-functions
-      vi.spyOn(wrapper.vm, "processPostPaginationData").mockImplementation(
-        () => {},
-      );
+      vi.spyOn(wrapper.vm, "processPostPaginationData").mockImplementation(() => {});
     });
 
     afterEach(() => {
@@ -377,10 +376,7 @@ describe("Use Logs Composable", () => {
                   _next: null,
                 };
               }),
-              sqlify: vi.fn(
-                (ast) =>
-                  `SELECT * FROM \`${ast.from?.[0]?.table || "UNKNOWN"}\``,
-              ),
+              sqlify: vi.fn((ast) => `SELECT * FROM \`${ast.from?.[0]?.table || "UNKNOWN"}\``),
               columnList: vi.fn(),
               tableList: vi.fn(),
               whiteListCheck: vi.fn(),
@@ -536,6 +532,28 @@ describe("Use Logs Composable", () => {
       expect(wrapper.vm.searchObj.data.datetime.relativeTimePeriod).toBe("15m");
     });
 
+    it("should decode the SQL query and flag pendingUrlQueryRestore (share-link restore guard)", async () => {
+      // base64 of: SELECT * FROM "e2e_automate"  (matches the real short-URL `query` param)
+      wrapper.vm.router.currentRoute.value.query = {
+        stream: "e2e_automate",
+        period: "15m",
+        sql_mode: "true",
+        query: "U0VMRUNUICogRlJPTSAiZTJlX2F1dG9tYXRlIg==",
+      };
+
+      const { restoreUrlQueryParams } = wrapper.vm;
+      await restoreUrlQueryParams();
+      await nextTick();
+
+      // Query is decoded into state and SQL mode restored
+      expect(wrapper.vm.searchObj.data.query).toBe('SELECT * FROM "e2e_automate"');
+      expect(wrapper.vm.searchObj.data.editorValue).toBe('SELECT * FROM "e2e_automate"');
+      expect(wrapper.vm.searchObj.meta.sqlMode).toBe(true);
+      // Restore is flagged pending so the lazy editor's transient empty emission
+      // can't wipe the restored query in updateQueryValue().
+      expect(wrapper.vm.searchObj.meta.pendingUrlQueryRestore).toBe(true);
+    });
+
     it("should handle SQL mode and encoded query", async () => {
       const encodedQuery = btoa("SELECT * FROM logs");
       wrapper.vm.router.currentRoute.value.query = {
@@ -590,8 +608,6 @@ describe("Use Logs Composable", () => {
     describe("clearSearchObj", () => {
       it("should clear and reset search object to default state", () => {
         // Set some values in searchObj first
-        const originalOrganizationId =
-          wrapper.vm.searchObj.organizationIdentifier;
         wrapper.vm.searchObj.data = wrapper.vm.searchObj.data || {};
         wrapper.vm.searchObj.data.query = "test query";
         wrapper.vm.searchObj.loading = true;
@@ -645,9 +661,7 @@ describe("Use Logs Composable", () => {
           // Test the core reset functionality that should exist
           expect(wrapper.vm.searchObj.data.stream.streamLists).toEqual([]);
           expect(wrapper.vm.searchObj.data.stream.selectedStream).toEqual([]);
-          expect(wrapper.vm.searchObj.data.stream.selectedStreamFields).toEqual(
-            [],
-          );
+          expect(wrapper.vm.searchObj.data.stream.selectedStreamFields).toEqual([]);
           expect(wrapper.vm.searchObj.data.queryResults).toEqual({});
           expect(wrapper.vm.searchObj.data.sortedQueryResults).toEqual([]);
           expect(wrapper.vm.searchObj.meta.sqlMode).toBe(false);
@@ -732,9 +746,7 @@ describe("Use Logs Composable", () => {
         const { initialLogsState } = wrapper.vm;
 
         if (initialLogsState) {
-          const consoleSpy = vi
-            .spyOn(console, "error")
-            .mockImplementation(() => {});
+          const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
           try {
             const result = await initialLogsState();
@@ -813,7 +825,6 @@ describe("Use Logs Composable", () => {
   });
 
   describe("refreshData", () => {
-    let notifySpy: any;
     beforeEach(() => {
       // Mock store
       wrapper.vm.store = {
@@ -825,7 +836,6 @@ describe("Use Logs Composable", () => {
 
       // Mock getQueryData
       wrapper.vm.getQueryData = vi.fn();
-      notifySpy = vi.spyOn(wrapper.vm.$q, "notify");
 
       // Mock clearInterval and setInterval
       vi.spyOn(global, "clearInterval");
@@ -853,11 +863,9 @@ describe("Use Logs Composable", () => {
 
       await wrapper.vm.$nextTick();
 
-      expect(notifySpy).toHaveBeenCalledWith({
+      expect(toast).toHaveBeenCalledWith({
+        variant: "info",
         message: `Live mode is enabled. Only top ${wrapper.vm.searchObj.meta.resultGrid.rowsPerPage} results are shown.`,
-        color: "positive",
-        position: "top",
-        timeout: 1000,
       });
     });
 
@@ -869,7 +877,7 @@ describe("Use Logs Composable", () => {
       refreshData();
       expect(global.setInterval).not.toHaveBeenCalled();
 
-      expect(notifySpy).not.toHaveBeenCalled();
+      expect(toast).not.toHaveBeenCalled();
     });
   });
 
@@ -879,15 +887,14 @@ describe("Use Logs Composable", () => {
         // The parser might not be directly accessible, so let's test differently
         wrapper.vm.searchObj = wrapper.vm.searchObj || {};
         wrapper.vm.searchObj.data = wrapper.vm.searchObj.data || {};
-        wrapper.vm.searchObj.data.query =
-          "SELECT * FROM logs WHERE level = 'error'";
+        wrapper.vm.searchObj.data.query = "SELECT * FROM logs WHERE level = 'error'";
       });
 
       it("should parse SQL query successfully", () => {
         const { fnParsedSQL } = wrapper.vm;
 
         if (fnParsedSQL) {
-          const result = fnParsedSQL();
+          fnParsedSQL();
           // Since we can't directly mock the internal parser, just verify the function exists
           // and returns something reasonable (could be undefined, array, or object)
           expect(typeof fnParsedSQL).toBe("function");
@@ -902,7 +909,7 @@ describe("Use Logs Composable", () => {
         const { fnParsedSQL } = wrapper.vm;
 
         if (fnParsedSQL) {
-          const result = fnParsedSQL(customQuery);
+          fnParsedSQL(customQuery);
           // Just verify the function can be called with a parameter
           expect(typeof fnParsedSQL).toBe("function");
         } else {
@@ -915,7 +922,7 @@ describe("Use Logs Composable", () => {
 
         if (fnParsedSQL) {
           // Test with invalid SQL
-          const result = fnParsedSQL("INVALID SQL SYNTAX");
+          fnParsedSQL("INVALID SQL SYNTAX");
           // Function should not throw, regardless of result
           expect(typeof fnParsedSQL).toBe("function");
         } else {
@@ -927,7 +934,7 @@ describe("Use Logs Composable", () => {
         const { fnParsedSQL } = wrapper.vm;
 
         if (fnParsedSQL) {
-          const result = fnParsedSQL();
+          fnParsedSQL();
           // Should handle null/undefined gracefully - result can be anything
           expect(fnParsedSQL).toBeDefined();
         } else {
@@ -1023,8 +1030,7 @@ describe("Use Logs Composable", () => {
       });
 
       it("should build search request with aggregation mode", () => {
-        wrapper.vm.searchObj.data.query =
-          "SELECT count(*) FROM logs GROUP BY level";
+        wrapper.vm.searchObj.data.query = "SELECT count(*) FROM logs GROUP BY level";
         wrapper.vm.searchObj.data.stream.selectedStream = ["logs"];
 
         const { buildSearch } = wrapper.vm;
@@ -1085,11 +1091,7 @@ describe("Use Logs Composable", () => {
       });
 
       it("should handle multiple selected streams", () => {
-        wrapper.vm.searchObj.data.stream.selectedStream = [
-          "logs",
-          "metrics",
-          "traces",
-        ];
+        wrapper.vm.searchObj.data.stream.selectedStream = ["logs", "metrics", "traces"];
         wrapper.vm.searchObj.data.query = "SELECT * FROM INDEX_NAME";
         wrapper.vm.searchObj.meta.sqlMode = true;
 
@@ -1151,8 +1153,7 @@ describe("Use Logs Composable", () => {
 
         // Call handlePageCountError indirectly by triggering an error scenario
         wrapper.vm.searchObj.loading = false;
-        wrapper.vm.searchObj.data.countErrorMsg =
-          "Error while retrieving total events: ";
+        wrapper.vm.searchObj.data.countErrorMsg = "Error while retrieving total events: ";
         wrapper.vm.searchObj.data.errorCode = error.response.data.code;
 
         expect(wrapper.vm.searchObj.loading).toBe(false);
@@ -1191,9 +1192,7 @@ describe("Use Logs Composable", () => {
           "Error while retrieving total events: " + error.response.data.message;
 
         expect(wrapper.vm.searchObj.loading).toBe(false);
-        expect(wrapper.vm.searchObj.data.countErrorMsg).toContain(
-          "Too many requests",
-        );
+        expect(wrapper.vm.searchObj.data.countErrorMsg).toContain("Too many requests");
       });
 
       it("should handle error without response data", async () => {
@@ -1217,9 +1216,7 @@ describe("Use Logs Composable", () => {
           "Error while retrieving total events: TraceID:" + error.trace_id;
 
         expect(wrapper.vm.searchObj.loading).toBe(false);
-        expect(wrapper.vm.searchObj.data.countErrorMsg).toContain(
-          "TraceID:direct-trace-456",
-        );
+        expect(wrapper.vm.searchObj.data.countErrorMsg).toContain("TraceID:direct-trace-456");
       });
     });
   });
@@ -1237,10 +1234,9 @@ describe("Use Logs Composable", () => {
         wrapper.vm.routeToSearchSchedule();
 
         expect(mockPush).toHaveBeenCalledWith({
+          name: "searchScheduler",
           query: {
-            action: "search_scheduler",
             org_identifier: "default",
-            type: "search_scheduler_list",
           },
         });
       });
@@ -1253,9 +1249,9 @@ describe("Use Logs Composable", () => {
 
         expect(mockPush).toHaveBeenCalledTimes(1);
         expect(mockPush).toHaveBeenCalledWith({
+          name: "searchScheduler",
           query: expect.objectContaining({
-            action: "search_scheduler",
-            type: "search_scheduler_list",
+            org_identifier: expect.anything(),
           }),
         });
       });
@@ -1377,9 +1373,7 @@ describe("Use Logs Composable", () => {
 
         expect(wrapper.vm.searchObj.data.resultGrid.columns).toBeDefined();
         // Just check it's defined, don't worry about the exact count
-        expect(
-          Array.isArray(wrapper.vm.searchObj.data.resultGrid.columns),
-        ).toBe(true);
+        expect(Array.isArray(wrapper.vm.searchObj.data.resultGrid.columns)).toBe(true);
       });
 
       it("should handle selected fields configuration", async () => {
@@ -1700,10 +1694,7 @@ describe("Use Logs Composable", () => {
     describe("validateFilterForMultiStream", () => {
       it("should validate filter conditions for multi-stream scenarios", async () => {
         // Set up multi-stream scenario
-        wrapper.vm.searchObj.data.stream.selectedStream = [
-          "stream1",
-          "stream2",
-        ];
+        wrapper.vm.searchObj.data.stream.selectedStream = ["stream1", "stream2"];
         wrapper.vm.searchObj.data.query = "field1 = 'value1'";
 
         const result = wrapper.vm.validateFilterForMultiStream();
@@ -1721,10 +1712,7 @@ describe("Use Logs Composable", () => {
       });
 
       it("should handle empty filter conditions", async () => {
-        wrapper.vm.searchObj.data.stream.selectedStream = [
-          "stream1",
-          "stream2",
-        ];
+        wrapper.vm.searchObj.data.stream.selectedStream = ["stream1", "stream2"];
         wrapper.vm.searchObj.data.query = "";
 
         // Since the function has internal dependencies that are hard to mock,
@@ -1741,10 +1729,7 @@ describe("Use Logs Composable", () => {
       });
 
       it("should handle complex filter expressions", async () => {
-        wrapper.vm.searchObj.data.stream.selectedStream = [
-          "stream1",
-          "stream2",
-        ];
+        wrapper.vm.searchObj.data.stream.selectedStream = ["stream1", "stream2"];
         wrapper.vm.searchObj.data.query = "field1 = 'value1' AND field2 > 100";
 
         const result = wrapper.vm.validateFilterForMultiStream();
@@ -1794,7 +1779,7 @@ describe("Use Logs Composable", () => {
 
     describe("getRegionInfo", () => {
       it("should return current region information", async () => {
-        const result = wrapper.vm.getRegionInfo();
+        wrapper.vm.getRegionInfo();
 
         // Just check the function exists and doesn't throw
         expect(typeof wrapper.vm.getRegionInfo).toBe("function");
@@ -1832,9 +1817,7 @@ describe("Use Logs Composable", () => {
 
         wrapper.vm.searchAroundData(searchData);
 
-        expect(
-          wrapper.vm.searchObj.data.searchAround.indexTimestamp,
-        ).toBeDefined();
+        expect(wrapper.vm.searchObj.data.searchAround.indexTimestamp).toBeDefined();
       });
 
       it("should handle missing timestamp in search data", async () => {
@@ -1857,9 +1840,7 @@ describe("Use Logs Composable", () => {
         wrapper.vm.searchAroundData(searchData);
 
         expect(wrapper.vm.searchObj.data.searchAround).toBeDefined();
-        expect(
-          wrapper.vm.searchObj.data.searchAround.indexTimestamp,
-        ).toBeDefined();
+        expect(wrapper.vm.searchObj.data.searchAround.indexTimestamp).toBeDefined();
       });
     });
 
@@ -1993,15 +1974,11 @@ describe("Use Logs Composable", () => {
 
       it("should handle errors when getting functions", async () => {
         wrapper.vm.searchObj.organizationIdentifier = "test-org";
-        mockSearchService.search_around = vi
-          .fn()
-          .mockRejectedValue(new Error("API error"));
+        mockSearchService.search_around = vi.fn().mockRejectedValue(new Error("API error"));
 
         await expect(wrapper.vm.getFunctions()).resolves.not.toThrow();
       });
     });
-
-    // getActions is not exported, removing these tests
 
     describe("updatedLocalLogFilterField", () => {
       it("should update local log filter field", () => {
@@ -2023,8 +2000,7 @@ describe("Use Logs Composable", () => {
       it("should build search request successfully", () => {
         wrapper.vm.searchObj.data.stream.selectedStream = ["test-stream"];
         wrapper.vm.searchObj.data.stream.streamType = "logs";
-        wrapper.vm.searchObj.data.datetime.startTime =
-          Date.now() * 1000 - 3600000;
+        wrapper.vm.searchObj.data.datetime.startTime = Date.now() * 1000 - 3600000;
         wrapper.vm.searchObj.data.datetime.endTime = Date.now() * 1000;
 
         const result = wrapper.vm.buildSearch();
@@ -2034,10 +2010,7 @@ describe("Use Logs Composable", () => {
       });
 
       it("should handle multiple streams", () => {
-        wrapper.vm.searchObj.data.stream.selectedStream = [
-          "stream1",
-          "stream2",
-        ];
+        wrapper.vm.searchObj.data.stream.selectedStream = ["stream1", "stream2"];
         wrapper.vm.searchObj.data.stream.streamType = "logs";
 
         const result = wrapper.vm.buildSearch();
@@ -2060,8 +2033,7 @@ describe("Use Logs Composable", () => {
     describe("generateURLQuery", () => {
       it("should generate URL query for sharing", () => {
         wrapper.vm.searchObj.data.stream.selectedStream = ["test-stream"];
-        wrapper.vm.searchObj.data.datetime.startTime =
-          Date.now() * 1000 - 3600000;
+        wrapper.vm.searchObj.data.datetime.startTime = Date.now() * 1000 - 3600000;
         wrapper.vm.searchObj.data.datetime.endTime = Date.now() * 1000;
 
         const result = wrapper.vm.generateURLQuery(true);
@@ -2097,7 +2069,6 @@ describe("Use Logs Composable", () => {
       });
 
       it("should handle dashboard panel data", () => {
-        const dashboardData = { data: { config: { chart_type: "bar" } } };
         const { updateUrlQueryParams } = wrapper.vm;
         expect(typeof updateUrlQueryParams).toBe("function");
         expect(true).toBe(true);
@@ -2205,7 +2176,6 @@ describe("Use Logs Composable", () => {
 
     describe("addTraceId", () => {
       it("should add trace ID to search object", () => {
-        const traceId = "trace-123-456";
         const { addTraceId } = wrapper.vm;
         expect(typeof addTraceId).toBe("function");
         expect(true).toBe(true);
@@ -2265,7 +2235,7 @@ describe("Use Logs Composable", () => {
       it("should initialize search connection", () => {
         const payload = { query: "test query", stream: "test-stream" };
 
-        const result = wrapper.vm.initializeSearchConnection(payload);
+        wrapper.vm.initializeSearchConnection(payload);
 
         expect(typeof wrapper.vm.initializeSearchConnection).toBe("function");
       });
@@ -2273,7 +2243,7 @@ describe("Use Logs Composable", () => {
       it("should handle connection initialization errors", () => {
         const payload = null;
 
-        const result = wrapper.vm.initializeSearchConnection(payload);
+        wrapper.vm.initializeSearchConnection(payload);
 
         expect(typeof wrapper.vm.initializeSearchConnection).toBe("function");
       });
@@ -2368,9 +2338,7 @@ describe("Use Logs Composable", () => {
       });
 
       it("should handle streams without FTS fields", () => {
-        wrapper.vm.searchObj.data.stream.selectedStreamFields = [
-          { name: "field1", ftsKey: false },
-        ];
+        wrapper.vm.searchObj.data.stream.selectedStreamFields = [{ name: "field1", ftsKey: false }];
 
         wrapper.vm.extractFTSFields();
 
@@ -2447,13 +2415,9 @@ describe("Use Logs Composable", () => {
 
       it("should handle histogram processing errors", async () => {
         const queryReq = { query: "SELECT * FROM logs" };
-        mockSearchService.search = vi
-          .fn()
-          .mockRejectedValue(new Error("Processing failed"));
+        mockSearchService.search = vi.fn().mockRejectedValue(new Error("Processing failed"));
 
-        await expect(
-          wrapper.vm.processHttpHistogramResults(queryReq),
-        ).resolves.not.toThrow();
+        await expect(wrapper.vm.processHttpHistogramResults(queryReq)).resolves.not.toThrow();
       });
     });
 
@@ -2533,9 +2497,29 @@ describe("Use Logs Composable", () => {
       wrapper.vm.searchObj.meta.sqlMode = false;
       setupStreamSchema("user", "Utf8");
 
+      expect(wrapper.vm.getFilterExpressionByFieldType("user", "alice", "include")).toBe(
+        "user = 'alice'",
+      );
+    });
+
+    // Regression: the Logs page's own include/exclude filter builder (distinct
+    // from the sidebar's) must double an embedded single quote too.
+    it("escapes an embedded single quote when including a value", () => {
+      wrapper.vm.searchObj.meta.sqlMode = false;
+      setupStreamSchema("op", "Utf8");
+
       expect(
-        wrapper.vm.getFilterExpressionByFieldType("user", "alice", "include"),
-      ).toBe("user = 'alice'");
+        wrapper.vm.getFilterExpressionByFieldType("op", "notificationHandling's", "include"),
+      ).toBe("op = 'notificationHandling''s'");
+    });
+
+    it("escapes an embedded single quote when excluding a value", () => {
+      wrapper.vm.searchObj.meta.sqlMode = false;
+      setupStreamSchema("op", "Utf8");
+
+      expect(
+        wrapper.vm.getFilterExpressionByFieldType("op", "notificationHandling's", "exclude"),
+      ).toBe("op != 'notificationHandling''s'");
     });
   });
 
@@ -2620,20 +2604,6 @@ describe("Use Logs Composable", () => {
       });
     });
 
-    describe("isActionsEnabled", () => {
-      it.skip("should check if actions are enabled", () => {
-        const { isActionsEnabled } = wrapper.vm;
-        expect(typeof isActionsEnabled).toBe("boolean");
-        expect(isActionsEnabled).toBeDefined();
-      });
-
-      it.skip("should handle different action states", () => {
-        const { isActionsEnabled } = wrapper.vm;
-        expect(typeof isActionsEnabled).toBe("boolean");
-        expect(isActionsEnabled).toBeDefined();
-      });
-    });
-
     describe("Exported Properties and Objects", () => {
       it.skip("should expose searchObj property", () => {
         // searchObj is now managed in searchState composable
@@ -2653,11 +2623,6 @@ describe("Use Logs Composable", () => {
       it("should expose router property", () => {
         const { router } = wrapper.vm;
         expect(router).toBeDefined();
-      });
-
-      it("should expose $q property", () => {
-        const { $q } = wrapper.vm;
-        expect($q).toBeDefined();
       });
 
       it("should expose initialQueryPayload property", () => {
@@ -2748,5 +2713,72 @@ describe("Use Logs Composable", () => {
         });
       });
     });
+  });
+});
+
+describe("resolveDefaultColumns", () => {
+  it("returns body field when stream has body as fts key", () => {
+    const streamFields = [
+      { name: "body", ftsKey: true },
+      { name: "severity", ftsKey: false },
+      { name: "_timestamp", ftsKey: false },
+    ];
+    const globalFtsKeys: string[] = [];
+    const result = resolveDefaultColumns(streamFields, globalFtsKeys);
+    expect(result).toEqual(["body"]);
+  });
+
+  it("prefers body over body_msg and message by static priority when no hits", () => {
+    const streamFields = [
+      { name: "message", ftsKey: true },
+      { name: "body", ftsKey: true },
+      { name: "body_msg", ftsKey: true },
+    ];
+    const result = resolveDefaultColumns(streamFields, []);
+    expect(result).toEqual(["body"]);
+  });
+
+  it("picks the field with the most non-empty values in hits", () => {
+    const streamFields = [
+      { name: "body", ftsKey: true },
+      { name: "message", ftsKey: true },
+    ];
+    const hits = [
+      { body: "", message: "hello" },
+      { body: "", message: "world" },
+      { body: "foo", message: "bar" },
+    ];
+    const result = resolveDefaultColumns(streamFields, [], hits);
+    expect(result).toEqual(["message"]); // message has 3 non-empty, body has 1
+  });
+
+  it("returns empty array when hits are provided but all candidates are empty", () => {
+    const streamFields = [{ name: "body", ftsKey: true }];
+    const hits = [{ body: "" }, { body: null }, { body: undefined }];
+    const result = resolveDefaultColumns(streamFields, [], hits as any);
+    expect(result).toEqual([]);
+  });
+
+  it("includes global fts keys that exist in the stream even if not marked ftsKey", () => {
+    const streamFields = [
+      { name: "pod_name", ftsKey: false },
+      { name: "message", ftsKey: false },
+    ];
+    const globalFtsKeys = ["message"];
+    const result = resolveDefaultColumns(streamFields, globalFtsKeys);
+    expect(result).toEqual(["message"]);
+  });
+
+  it("excludes global fts keys that do not exist in the stream", () => {
+    const streamFields = [{ name: "pod_name", ftsKey: false }];
+    const globalFtsKeys = ["message"];
+    const result = resolveDefaultColumns(streamFields, globalFtsKeys);
+    expect(result).toEqual([]);
+  });
+
+  it("returns empty array when no fts keys found", () => {
+    const streamFields = [{ name: "_timestamp", ftsKey: false }];
+    const result = resolveDefaultColumns(streamFields, []);
+    expect(result).toEqual([]);
   });
 });

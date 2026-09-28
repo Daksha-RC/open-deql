@@ -1,31 +1,39 @@
 <template>
-  <div class="tw:flex tw:items-center tw:w-full">
-    <q-btn-dropdown
-      v-if="hasDropdownSlot"
-      data-test="attribute-value-cell-dropdown-btn"
-      size="0.5rem"
-      flat
-      outlined
-      filled
-      dense
-      class="pointer"
-      :name="'img:' + getImageURL('images/common/add_icon.svg')"
-      aria-label="Add icon"
-    >
-      <q-list class="logs-table-list">
+  <div class="flex w-full items-center">
+    <ODropdown v-if="hasDropdownSlot" v-model:open="isDropdownOpen" side="bottom" align="start">
+      <template #trigger>
+        <OButton
+          data-test="attribute-value-cell-dropdown-btn"
+          size="icon-xs"
+          variant="ghost"
+          :aria-label="t('components.attributeValueCell.addIcon')"
+        >
+          <OIcon :name="isDropdownOpen ? 'expand-less' : 'expand-more'" size="xs" />
+        </OButton>
+      </template>
+      <div class="logs-table-list min-w-45">
         <slot name="dropdown" :field="field" :value="value" />
-      </q-list>
-    </q-btn-dropdown>
-    <span class="q-pl-xs tw:truncate">{{ value }}</span>
+      </div>
+    </ODropdown>
+    <span class="truncate ps-1">{{ value }}</span>
   </div>
 </template>
 
 <script lang="ts">
-import { computed, useSlots } from "vue";
+import { computed, ref, useSlots } from "vue";
+import { useI18nTyped } from "@/types/i18n";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
 import { getImageURL } from "@/utils/zincutils";
+import OButton from "@/lib/core/Button/OButton.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
 
 export default {
   name: "AttributeValueCell",
+  components: {
+    OButton,
+    ODropdown,
+    OIcon,
+  },
   props: {
     field: {
       type: String,
@@ -39,10 +47,14 @@ export default {
   setup() {
     const slots = useSlots();
     const hasDropdownSlot = computed(() => !!slots["dropdown"]);
+    const isDropdownOpen = ref(false);
+    const { t } = useI18nTyped();
 
     return {
       hasDropdownSlot,
       getImageURL,
+      isDropdownOpen,
+      t,
     };
   },
 };

@@ -22,7 +22,7 @@ use svix_ksuid::{Ksuid, KsuidLike};
 
 use super::entity::folders::{ActiveModel, Column, Entity, Model};
 use crate::{
-    db::{ORM_CLIENT, connect_to_orm},
+    db::{get_orm_client_ro, get_orm_client_rw},
     errors::{self, FromStrError},
 };
 
@@ -32,6 +32,7 @@ impl From<Model> for Folder {
             folder_id: value.folder_id.to_string(),
             name: value.name,
             description: value.description.unwrap_or_default(),
+            icon: value.icon,
         }
     }
 }
@@ -42,6 +43,9 @@ pub(crate) fn folder_type_into_i16(folder_type: FolderType) -> i16 {
         FolderType::Dashboards => 0,
         FolderType::Alerts => 1,
         FolderType::Reports => 2,
+        FolderType::Synthetics => 3,
+        FolderType::Workflows => 4,
+        FolderType::Prompts => 5,
     }
 }
 
@@ -51,7 +55,7 @@ pub async fn get(
     folder_id: &str,
     folder_type: FolderType,
 ) -> Result<Option<Folder>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let folder = get_model(client, org_id, folder_id, folder_type)
         .await
         .map(|f| f.map(Folder::from))?;
@@ -64,7 +68,7 @@ pub async fn get_by_name(
     folder_name: &str,
     folder_type: FolderType,
 ) -> Result<Option<Folder>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let folder = get_model_by_name(client, org_id, folder_name, folder_type)
         .await
         .map(|f| f.map(Folder::from))?;
@@ -86,7 +90,7 @@ pub async fn list_folders(
     org_id: &str,
     folder_type: FolderType,
 ) -> Result<Vec<Folder>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let folders = list_models(client, org_id, folder_type)
         .await?
         .into_iter()
@@ -103,7 +107,7 @@ pub async fn put(
     folder: Folder,
     folder_type: FolderType,
 ) -> Result<(Ksuid, Folder), errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
 
     let model = match get_model(client, org_id, &folder.folder_id, folder_type).await? {
         // If a folder with the given folder_id already exists, get that folder
@@ -113,6 +117,7 @@ pub async fn put(
             let mut active = model.into_active_model();
             active.name = Set(folder.name);
             active.description = Set(Some(folder.description).filter(|d| !d.is_empty()));
+            active.icon = Set(folder.icon.filter(|i| !i.is_empty()));
             let model: Model = active.update(client).await?.try_into_model()?;
             model
         }
@@ -130,17 +135,58 @@ pub async fn put(
                 r#type: Set::<i16>(folder_type_into_i16(folder_type)),
                 name: Set(folder.name),
                 description: Set(Some(folder.description).filter(|d| !d.is_empty())),
+                icon: Set(folder.icon.filter(|i| !i.is_empty())),
             };
             let model: Model = active.insert(client).await?.try_into_model()?;
             model
         }
     };
 
-    let ksuid = Ksuid::from_base62(&model.id).map_err(|_| FromStrError {
-        value: model.id.clone(),
-        ty: "svix_ksuid::Ksuid".to_owned(),
-    })?;
-    Ok((ksuid, model.into()))
+    Ok((model_ksuid(&model)?, model.into()))
+}
+
+/// Creates the folder if `(org, type, folder_id)` is still free, otherwise returns the folder that
+/// is already there. The bool reports whether this call is the one that inserted it.
+///
+/// Callers that auto-create a folder cannot check-then-insert: concurrent requests to a fresh org
+/// all see no folder and all insert, and every loser hits the unique index. Losing that race is not
+/// an error here, so the insert is attempted first and a failure is only reported when the row is
+/// still absent afterwards.
+pub async fn get_or_create(
+    org_id: &str,
+    folder: Folder,
+    folder_type: FolderType,
+) -> Result<(Ksuid, Folder, bool), errors::Error> {
+    let client = get_orm_client_rw().await;
+    let folder_id = folder.folder_id.clone();
+
+    if let Some(model) = get_model(client, org_id, &folder_id, folder_type).await? {
+        return Ok((model_ksuid(&model)?, model.into(), false));
+    }
+
+    let active = ActiveModel {
+        id: Set(Ksuid::new(None, None).to_string()),
+        org: Set(org_id.to_owned()),
+        folder_id: Set(folder.folder_id),
+        r#type: Set::<i16>(folder_type_into_i16(folder_type)),
+        name: Set(folder.name),
+        description: Set(Some(folder.description).filter(|d| !d.is_empty())),
+        icon: Set(folder.icon.filter(|i| !i.is_empty())),
+    };
+
+    match active.insert(client).await {
+        Ok(model) => {
+            let model: Model = model.try_into_model()?;
+            Ok((model_ksuid(&model)?, model.into(), true))
+        }
+        // A concurrent caller may have inserted the same folder between the read above and this
+        // write. Re-read before deciding: the row being there now means the folder exists, which is
+        // all the caller wanted. Only a still-missing row makes this a real failure.
+        Err(e) => match get_model(client, org_id, &folder_id, folder_type).await? {
+            Some(model) => Ok((model_ksuid(&model)?, model.into(), false)),
+            None => Err(e.into()),
+        },
+    }
 }
 
 /// Deletes a folder with the given `folder_id` surrogate key.
@@ -149,7 +195,7 @@ pub async fn delete(
     folder_id: &str,
     folder_type: FolderType,
 ) -> Result<(), errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     let model = get_model(client, org_id, folder_id, folder_type).await?;
 
     if let Some(model) = model {
@@ -169,10 +215,23 @@ pub async fn get_pk_by_name(
     name: &str,
     folder_type: FolderType,
 ) -> Result<Option<String>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     Ok(get_model(client, org_id, name, folder_type)
         .await?
         .map(|m| m.id))
+}
+
+/// Resolves a public folder ID to the physical `folders.id` within the
+/// caller's connection or transaction.
+pub async fn get_pk<C: ConnectionTrait>(
+    db: &C,
+    org_id: &str,
+    folder_id: &str,
+    folder_type: FolderType,
+) -> Result<Option<String>, sea_orm::DbErr> {
+    Ok(get_model(db, org_id, folder_id, folder_type)
+        .await?
+        .map(|model| model.id))
 }
 
 /// Returns the folder name (`folder_id` column) for the given primary-key `id`.
@@ -180,11 +239,39 @@ pub async fn get_pk_by_name(
 /// Used to translate the stored PK back to the user-visible name when building
 /// API responses for anomaly detection configs.
 pub async fn get_name_by_pk(pk: &str) -> Result<Option<String>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     Ok(Entity::find_by_id(pk)
         .one(client)
         .await?
         .map(|m| m.folder_id))
+}
+/// Resolves a physical folder primary key to its public folder ID through the
+/// caller's connection or transaction.
+pub async fn get_public_id_by_pk<C: ConnectionTrait>(
+    db: &C,
+    pk: &str,
+) -> Result<Option<String>, sea_orm::DbErr> {
+    Ok(Entity::find_by_id(pk)
+        .one(db)
+        .await?
+        .map(|model| model.folder_id))
+}
+
+/// Maps each primary-key `id` to its public `folder_id`; unknown keys are absent.
+pub async fn get_public_ids_by_pks<C: ConnectionTrait>(
+    db: &C,
+    pks: &[String],
+) -> Result<std::collections::HashMap<String, String>, sea_orm::DbErr> {
+    if pks.is_empty() {
+        return Ok(Default::default());
+    }
+    Ok(Entity::find()
+        .filter(Column::Id.is_in(pks))
+        .all(db)
+        .await?
+        .into_iter()
+        .map(|model| (model.id, model.folder_id))
+        .collect())
 }
 
 /// Returns `(folder name, display name)` for the given primary-key `id`.
@@ -194,7 +281,7 @@ pub async fn get_name_by_pk(pk: &str) -> Result<Option<String>, errors::Error> {
 pub async fn get_name_and_display_name_by_pk(
     pk: &str,
 ) -> Result<Option<(String, String)>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     Ok(Entity::find_by_id(pk)
         .one(client)
         .await?
@@ -202,7 +289,7 @@ pub async fn get_name_and_display_name_by_pk(
 }
 
 /// Gets a folder ORM entity by its `folder_id`.
-pub(crate) async fn get_model<C: ConnectionTrait>(
+pub async fn get_model<C: ConnectionTrait>(
     db: &C,
     org_id: &str,
     folder_id: &str,
@@ -231,6 +318,17 @@ pub(crate) async fn get_model_by_name<C: ConnectionTrait>(
         .await
 }
 
+/// Parses the primary-key `id` column as a Ksuid.
+fn model_ksuid(model: &Model) -> Result<Ksuid, errors::Error> {
+    Ksuid::from_base62(&model.id).map_err(|_| {
+        FromStrError {
+            value: model.id.clone(),
+            ty: "svix_ksuid::Ksuid".to_owned(),
+        }
+        .into()
+    })
+}
+
 /// Lists all folder ORM models with the specified type.
 async fn list_models(
     db: &DatabaseConnection,
@@ -243,6 +341,16 @@ async fn list_models(
         .order_by(Column::Id, sea_orm::Order::Asc)
         .all(db)
         .await
+}
+
+/// Deletes all folders belonging to the given org.
+pub async fn delete_by_org(org_id: &str) -> Result<(), errors::Error> {
+    let client = get_orm_client_rw().await;
+    Entity::delete_many()
+        .filter(Column::Org.eq(org_id))
+        .exec(client)
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -264,6 +372,7 @@ mod tests {
             folder_id: "fid-1".to_string(),
             name: "Alerts".to_string(),
             description: Some("My alert folder".to_string()),
+            icon: Some("🚀".to_string()),
             r#type: 1,
         };
         let folder = Folder::from(model);
@@ -280,6 +389,7 @@ mod tests {
             folder_id: "fid-2".to_string(),
             name: "Dashboards".to_string(),
             description: None,
+            icon: None,
             r#type: 0,
         };
         let folder = Folder::from(model);

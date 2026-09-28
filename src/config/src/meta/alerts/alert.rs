@@ -21,7 +21,10 @@ use utoipa::ToSchema;
 
 use crate::{
     meta::{
-        alerts::{QueryCondition, TriggerCondition, deduplication::DeduplicationConfig},
+        alerts::{
+            QueryCondition, TriggerCondition, deduplication::DeduplicationConfig,
+            priority::AlertPriority,
+        },
         stream::StreamType,
         triggers::{ScheduledTriggerData, Trigger},
     },
@@ -99,6 +102,90 @@ pub struct Alert {
     /// to any incident.
     #[serde(default)]
     pub creates_incident: bool,
+    #[serde(default)]
+    pub workflows: Vec<String>,
+    /// How much humans care about this alert (PT-1). `None` = unset, which is
+    /// every pre-Feature-2 alert.
+    ///
+    /// **Mutable** configuration — editable on any update, like `name`.
+    /// Display + propagation only: it must never influence evaluation,
+    /// silence, or delivery (PT-5 / D19). B-29 carved out one exception:
+    /// when set, it takes precedence over the eval_level default for
+    /// incident severity at creation/escalation — see
+    /// `config::meta::alerts::priority` and
+    /// `core::alerts::incidents::create_new_incident`.
+    ///
+    /// `value_type` is required here because the enum serializes as an
+    /// integer via serde `try_from`/`into`; without it the generated OpenAPI
+    /// would advertise a string enum and lie about the payload.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<u8>, example = 3)]
+    pub priority: Option<AlertPriority>,
+    /// Selection tags (PT-6): bare (`prod`) or `key:value`
+    /// (`service:checkout`), normalized and validated at save by
+    /// `tags::normalize_tags`.
+    ///
+    /// NOT `context_attributes` — that field is free-form KV shipped into
+    /// notification payloads with no validation. These are the filtering /
+    /// scoping primitive.
+    ///
+    /// Skipped when empty so alerts that set no tags serialize exactly as
+    /// they did before Feature 2 (G5).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+
+    /// On-call team this alert pages, overriding ownership discovery. `None`
+    /// means "work it out from the identity dimensions", which is the normal
+    /// case — an explicit value is for the alert whose owner the dimensions
+    /// cannot express.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oncall_team: Option<String>,
+
+    /// Where the fix for this alert is written down.
+    ///
+    /// Copied onto every on-call response record the alert opens, so the person
+    /// woken is handed the runbook in the page. Validated at save — a malformed
+    /// link is refused rather than stored, because the moment it is read is the
+    /// one moment nobody has the patience to debug a URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runbook_url: Option<String>,
+
+    #[serde(default)]
+    pub pending_period_sec: i64,
+}
+
+/// Accept a runbook link, or say why not.
+///
+/// Deliberately narrow: `http`/`https` with a host. That excludes `file:`,
+/// `javascript:` and the bare `wiki/runbooks/checkout` somebody pastes out of a
+/// browser tab — the last of which is the common case, and the one that looks
+/// like it worked right up until a responder clicks it at 3am.
+pub fn normalize_runbook_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("runbook_url is empty".to_string());
+    }
+    // Long enough for a real deep link, short enough that a paste accident is
+    // not persisted onto every response record the alert ever opens.
+    if trimmed.chars().count() > 2048 {
+        return Err("runbook_url is longer than 2048 characters".to_string());
+    }
+    let Some((scheme, rest)) = trimmed.split_once("://") else {
+        return Err("runbook_url must start with http:// or https://".to_string());
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("runbook_url must start with http:// or https://".to_string());
+    }
+    // A scheme with nothing after it is not a link, and neither is one whose
+    // authority is blank — `https:///runbooks` resolves to nothing.
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if host.trim().is_empty() {
+        return Err("runbook_url has no host".to_string());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("runbook_url contains whitespace".to_string());
+    }
+    Ok(trimmed.to_string())
 }
 
 impl MemorySize for Alert {
@@ -119,6 +206,9 @@ impl MemorySize for Alert {
             + self.owner.mem_size()
             + self.last_edited_by.mem_size()
             + self.deduplication.mem_size()
+            + self.workflows.mem_size()
+            + self.tags.mem_size()
+            + std::mem::size_of::<Option<AlertPriority>>()
     }
 }
 
@@ -133,6 +223,8 @@ impl PartialEq for Alert {
 impl Default for Alert {
     fn default() -> Self {
         Self {
+            oncall_team: None,
+            runbook_url: None,
             id: None,
             name: "".to_string(),
             org_id: "".to_string(),
@@ -156,6 +248,10 @@ impl Default for Alert {
             last_satisfied_at: None,
             deduplication: None,
             creates_incident: false,
+            workflows: vec![],
+            priority: None,
+            tags: vec![],
+            pending_period_sec: 0,
         }
     }
 }
@@ -177,8 +273,6 @@ impl Alert {
     /// Use this function instead of `get_last_satisfied_at_from_table` to get the actual timestamp.
     pub fn get_last_satisfied_at(&self, trigger: Option<&Trigger>) -> Option<i64> {
         if let Some(data) = trigger.map(|trigger| trigger.data.as_str()) {
-            log::info!("Trigger data: {data}");
-
             // last_satisfied_at is now supposed to be part of the trigger data
             // but it was previously stored in the alert table. So, in case the trigger
             // data is not yet updated, we fallback to the value in the alert table.
@@ -241,6 +335,12 @@ pub enum AlertTypeFilter {
     Scheduled,
     Realtime,
     AnomalyDetection,
+    /// Feature 5 (SA-16). Filters to alerts whose `slo_id` is set — the
+    /// column, not the JSON payload, which is why it can be a SQL predicate
+    /// rather than an app-side scan (D60).
+    Slo,
+    /// Composite definitions are stored outside the ordinary `alerts` table.
+    Composite,
 }
 
 /// Parameters for listing alerts.
@@ -273,6 +373,51 @@ pub struct ListAlertsParams {
 
     /// The optional alert type filter. Defaults to `All`.
     pub alert_type: AlertTypeFilter,
+
+    /// Optional priority filter (PT-3). Multiple values are OR-ed, so
+    /// `?priority=1&priority=2` returns P1 **or** P2.
+    ///
+    /// `None` = no filter. `Some(empty)` = the caller asked for priorities but
+    /// none were valid, which MUST match nothing — collapsing that back to
+    /// "no filter" would make `?priority=P9` return every alert, the same
+    /// match-all bug the tag filter guards against.
+    ///
+    /// Alerts with no priority are excluded whenever a filter is present:
+    /// "show me the P1s" must not surface unprioritized alerts.
+    pub priority: Option<Vec<AlertPriority>>,
+
+    /// Tag filter (PT-8), **already resolved to alert IDs** by the service
+    /// layer, which owns the in-memory alert cache the infra layer cannot
+    /// reach. `None` = no tag filter.
+    ///
+    /// `Some(empty)` means "no alert carries these tags" and MUST match
+    /// nothing — collapsing it back to `None` would turn a zero-result filter
+    /// into a match-all, the same class of bug the filter parser guards
+    /// against.
+    pub tag_alert_ids: Option<Vec<String>>,
+
+    /// Optional sort column (PT-3). `None` keeps the historical ordering
+    /// (name, then folder name).
+    pub sort_by: Option<AlertSortField>,
+
+    /// Sort direction; ignored when `sort_by` is `None`.
+    pub sort_desc: bool,
+
+    /// Filter to the alerts pointing at one SLO (B1). Reads the indexed
+    /// `slo_id` column, not the JSON payload — the same column D60 added for
+    /// the reverse lookup.
+    ///
+    /// Unlike the burn-pair lookup this does NOT filter on `enabled`: the SLO
+    /// page must show disabled alerts so they can be re-enabled.
+    pub slo_id: Option<String>,
+}
+
+/// Columns the alert list can be sorted by (PT-3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AlertSortField {
+    /// Ascending = most urgent first, because P1 stores as 1.
+    Priority,
+    Name,
 }
 
 impl ListAlertsParams {
@@ -288,7 +433,32 @@ impl ListAlertsParams {
             owner: None,
             page_size_and_idx: None,
             alert_type: AlertTypeFilter::All,
+            priority: None,
+            tag_alert_ids: None,
+            sort_by: None,
+            sort_desc: false,
+            slo_id: None,
         }
+    }
+
+    /// Filter by one or more priorities (OR). An empty vec means "matched
+    /// nothing", NOT "no filter" — see the field docs.
+    pub fn with_priorities(mut self, priorities: Vec<AlertPriority>) -> Self {
+        self.priority = Some(priorities);
+        self
+    }
+
+    /// Filter by a tag-resolved alert-ID set (see `tag_alert_ids`).
+    pub fn with_tag_alert_ids(mut self, ids: Vec<String>) -> Self {
+        self.tag_alert_ids = Some(ids);
+        self
+    }
+
+    /// Sort by a column. Ascending priority = most urgent first (PT-3).
+    pub fn sorted_by(mut self, field: AlertSortField, desc: bool) -> Self {
+        self.sort_by = Some(field);
+        self.sort_desc = desc;
+        self
     }
 
     /// Filter alerts by the given folder ID surrogate key.
@@ -335,7 +505,7 @@ mod tests {
         assert_eq!(alert.org_id, "");
         assert_eq!(alert.stream_type, StreamType::default());
         assert_eq!(alert.stream_name, "");
-        assert_eq!(alert.is_real_time, false);
+        assert!(!alert.is_real_time);
         assert_eq!(alert.query_condition, QueryCondition::default());
         assert_eq!(alert.trigger_condition, TriggerCondition::default());
         assert!(alert.destinations.is_empty());
@@ -343,7 +513,7 @@ mod tests {
         assert_eq!(alert.row_template, "");
         assert_eq!(alert.row_template_type, RowTemplateType::String);
         assert_eq!(alert.description, "");
-        assert_eq!(alert.enabled, false);
+        assert!(!alert.enabled);
         assert_eq!(alert.tz_offset, 0);
         assert_eq!(alert.last_triggered_at, None);
         assert_eq!(alert.last_satisfied_at, None);
@@ -575,6 +745,16 @@ mod tests {
     }
 
     #[test]
+    fn alert_type_filter_composite_has_a_stable_wire_discriminator() {
+        let encoded = serde_json::to_string(&AlertTypeFilter::Composite).unwrap();
+        assert_eq!(encoded, r#""composite""#);
+        assert_eq!(
+            serde_json::from_str::<AlertTypeFilter>(&encoded).unwrap(),
+            AlertTypeFilter::Composite
+        );
+    }
+
+    #[test]
     fn test_list_alerts_params_in_folder() {
         let params = ListAlertsParams::new("test_org").in_folder("test_folder");
 
@@ -654,7 +834,7 @@ mod tests {
             "tz_offset": 0
         }"#;
         let alert: Alert = serde_json::from_str(json).unwrap();
-        assert_eq!(alert.creates_incident, false);
+        assert!(!alert.creates_incident);
     }
 
     #[test]
@@ -736,5 +916,225 @@ mod tests {
         assert!(obj.contains_key("context_attributes"));
         assert!(obj.contains_key("updated_at"));
         assert!(obj.contains_key("deduplication"));
+    }
+
+    // ── Feature 2: list params (PT-3, PT-8) ─────────────────────────────────
+
+    #[test]
+    fn test_list_params_default_to_no_priority_tag_or_sort_filters() {
+        let p = ListAlertsParams::new("org");
+        assert_eq!(p.priority, None);
+        assert_eq!(p.tag_alert_ids, None, "None = no tag filter at all");
+        assert_eq!(p.sort_by, None, "None keeps the historical ordering");
+        assert!(!p.sort_desc);
+    }
+
+    #[test]
+    fn test_priority_filter_accepts_multiple_values_for_or_semantics() {
+        let p = ListAlertsParams::new("org")
+            .with_priorities(vec![AlertPriority::P1, AlertPriority::P2]);
+        assert_eq!(p.priority, Some(vec![AlertPriority::P1, AlertPriority::P2]));
+    }
+
+    /// Same distinction the tag filter needs: "no filter" and "a filter that
+    /// matched nothing" must not collapse together, or `?priority=P9` returns
+    /// every alert instead of none.
+    #[test]
+    fn test_empty_priority_set_is_distinct_from_no_priority_filter() {
+        let no_filter = ListAlertsParams::new("org");
+        assert_eq!(no_filter.priority, None);
+
+        let matched_nothing = ListAlertsParams::new("org").with_priorities(vec![]);
+        assert_eq!(matched_nothing.priority, Some(vec![]));
+        assert_ne!(no_filter.priority, matched_nothing.priority);
+    }
+
+    /// The distinction that prevents a match-all bug: "no tag filter" (`None`)
+    /// and "a tag filter that matched nothing" (`Some(vec![])`) must stay
+    /// different, or a zero-result filter silently returns every alert.
+    #[test]
+    fn test_empty_resolved_tag_set_is_distinct_from_no_tag_filter() {
+        let no_filter = ListAlertsParams::new("org");
+        assert_eq!(no_filter.tag_alert_ids, None);
+
+        let matched_nothing = ListAlertsParams::new("org").with_tag_alert_ids(vec![]);
+        assert_eq!(matched_nothing.tag_alert_ids, Some(vec![]));
+        assert_ne!(no_filter.tag_alert_ids, matched_nothing.tag_alert_ids);
+    }
+
+    #[test]
+    fn test_sort_builder_records_field_and_direction() {
+        let asc = ListAlertsParams::new("org").sorted_by(AlertSortField::Priority, false);
+        assert_eq!(asc.sort_by, Some(AlertSortField::Priority));
+        assert!(!asc.sort_desc);
+
+        let desc = ListAlertsParams::new("org").sorted_by(AlertSortField::Name, true);
+        assert_eq!(desc.sort_by, Some(AlertSortField::Name));
+        assert!(desc.sort_desc);
+    }
+
+    // ── Feature 2: priority & tags (PT-1, PT-6) ─────────────────────────────
+    // These test the PRODUCTION `Alert`, unlike the stand-in pattern test in
+    // `priority.rs` which proves only serde-attribute behaviour.
+
+    #[test]
+    fn test_alert_defaults_have_no_priority_and_no_tags() {
+        let alert = Alert::default();
+        assert_eq!(alert.priority, None, "unset is the default, never P1");
+        assert!(alert.tags.is_empty());
+    }
+
+    /// G5: an alert that configures neither field must serialize EXACTLY as it
+    /// did before Feature 2 — no new keys, so stored JSON and API payloads are
+    /// byte-identical for every existing alert.
+    #[test]
+    fn test_unset_priority_and_empty_tags_are_omitted_entirely() {
+        let alert = Alert::default();
+        let json = serde_json::to_value(&alert).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(
+            !obj.contains_key("priority"),
+            "unset priority must not appear"
+        );
+        assert!(!obj.contains_key("tags"), "empty tags must not appear");
+    }
+
+    #[test]
+    fn test_priority_and_tags_round_trip_through_serde() {
+        let alert = Alert {
+            priority: Some(AlertPriority::P2),
+            tags: vec!["prod".to_string(), "service:checkout".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&alert).unwrap();
+        // Integer wire form (D17) — matches the storage column exactly.
+        assert_eq!(json["priority"], serde_json::json!(2));
+        assert_eq!(
+            json["tags"],
+            serde_json::json!(["prod", "service:checkout"])
+        );
+
+        let back: Alert = serde_json::from_value(json).unwrap();
+        assert_eq!(back.priority, Some(AlertPriority::P2));
+        assert_eq!(back.tags, alert.tags);
+    }
+
+    /// PT-1: priority is MUTABLE static configuration. "Static" contrasts it
+    /// with evaluated state; it does not mean write-once. An edit must be able
+    /// to raise it, lower it, and clear it back to unset.
+    #[test]
+    fn test_priority_is_mutable_including_back_to_unset() {
+        let mut alert = Alert {
+            priority: Some(AlertPriority::P4),
+            ..Default::default()
+        };
+        assert_eq!(alert.priority, Some(AlertPriority::P4));
+
+        alert.priority = Some(AlertPriority::P1); // raised
+        assert_eq!(alert.priority, Some(AlertPriority::P1));
+
+        alert.priority = None; // cleared
+        let json = serde_json::to_value(&alert).unwrap();
+        assert!(
+            !json.as_object().unwrap().contains_key("priority"),
+            "clearing must return to absent, not leave a stale value"
+        );
+    }
+
+    #[test]
+    fn test_tags_are_mutable_including_back_to_empty() {
+        let mut alert = Alert {
+            tags: vec!["prod".to_string()],
+            ..Default::default()
+        };
+        alert.tags.clear();
+        let json = serde_json::to_value(&alert).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("tags"));
+    }
+
+    /// PT-1/PT-6: unlike the warning family (rejected on realtime by D12),
+    /// priority and tags are inert metadata and ARE allowed on realtime
+    /// alerts — excluding them would punch holes in list filtering.
+    #[test]
+    fn test_realtime_alerts_may_carry_priority_and_tags() {
+        let alert = Alert {
+            is_real_time: true,
+            priority: Some(AlertPriority::P3),
+            tags: vec!["prod".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&alert).unwrap();
+        assert_eq!(json["priority"], serde_json::json!(3));
+        assert_eq!(json["tags"], serde_json::json!(["prod"]));
+    }
+
+    /// Old payloads (no such keys) must still deserialize — the fields are
+    /// additive.
+    #[test]
+    fn test_pre_feature2_payload_still_deserializes() {
+        let legacy = serde_json::json!({ "name": "old", "org_id": "o" });
+        let alert: Alert = serde_json::from_value(legacy).unwrap();
+        assert_eq!(alert.name, "old");
+        assert_eq!(alert.priority, None);
+        assert!(alert.tags.is_empty());
+    }
+
+    /// A runbook link is stored as typed, so a deep link with a query string and
+    /// a fragment survives — those are how wikis address a section, and
+    /// normalizing them away would point somebody at the top of a 40-page doc.
+    #[test]
+    fn test_a_real_runbook_link_is_accepted_unchanged() {
+        for good in [
+            "https://wiki.example.com/runbooks/checkout",
+            "http://internal/runbook",
+            "https://wiki.example.com/rb?id=7#rollback",
+            "https://192.168.1.10:8080/rb",
+            "  https://wiki/rb  ",
+        ] {
+            assert_eq!(
+                normalize_runbook_url(good).unwrap(),
+                good.trim(),
+                "{good:?}"
+            );
+        }
+    }
+
+    /// What is refused is the paste that looks like it worked. `wiki/runbooks`
+    /// out of a browser tab is the common one, and it fails at exactly the
+    /// moment nobody has the patience to debug a URL.
+    #[test]
+    fn test_a_link_that_goes_nowhere_is_refused_at_save() {
+        for bad in [
+            "",
+            "   ",
+            "wiki/runbooks/checkout",
+            "www.example.com/rb",
+            "ftp://example.com/rb",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "https://",
+            "https:///runbooks",
+            "https://wiki example.com/rb",
+        ] {
+            assert!(
+                normalize_runbook_url(bad).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        assert!(
+            normalize_runbook_url(&format!("https://x/{}", "a".repeat(3000))).is_err(),
+            "a paste accident must not be copied onto every response record"
+        );
+    }
+
+    /// Additive, like `priority` and `tags` before it: an alert saved before
+    /// the field existed must still load.
+    #[test]
+    fn test_an_alert_without_a_runbook_still_deserializes() {
+        let legacy = serde_json::json!({ "name": "old", "org_id": "o" });
+        let alert: Alert = serde_json::from_value(legacy).unwrap();
+        assert_eq!(alert.runbook_url, None);
+        let json = serde_json::to_value(&alert).unwrap();
+        assert!(json.get("runbook_url").is_none());
     }
 }

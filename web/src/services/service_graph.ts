@@ -19,6 +19,9 @@ export interface ServiceGraphParams {
   streamName?: string;
   startTime?: number;
   endTime?: number;
+  agentId?: string | null;
+  agentName?: string | null;
+  agentEnv?: string | null;
 }
 
 export interface EdgeTrendParams {
@@ -48,6 +51,17 @@ const serviceGraphService = {
     if (options?.endTime) {
       params.end_time = options.endTime;
     }
+    // Agent scoping is ENV-only: topology is version-agnostic, so agent_version
+    // is deliberately never sent to the backend.
+    if (options?.agentId) {
+      params.agent_id = options.agentId;
+    }
+    if (options?.agentName) {
+      params.agent_name = options.agentName;
+    }
+    if (options?.agentEnv) {
+      params.agent_env = options.agentEnv;
+    }
 
     return http().get(`/api/${orgId}/traces/service_graph/topology/current`, {
       params,
@@ -74,3 +88,15 @@ const serviceGraphService = {
 };
 
 export default serviceGraphService;
+
+export interface TopologyRange {
+  startTime: number;
+  endTime: number;
+}
+
+/**
+ * 5-minute key buckets. The Overview shows a rolling 15-minute window, so a key
+ * built from the raw timestamps could never hit — the range moves on every
+ * mount. The request still carries the exact range; only the key is rounded.
+ */
+export const OVERVIEW_BUCKET_MS = 5 * 60_000;

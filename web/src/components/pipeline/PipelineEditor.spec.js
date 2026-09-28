@@ -16,16 +16,17 @@
 import PipelineEditor from "./PipelineEditor.vue";
 
 import { flushPromises, mount } from "@vue/test-utils";
+import { reactive } from "vue";
 import useDnD from "@/plugins/pipelines/useDnD";
 import pipelineService from "@/services/pipelines";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { Dialog, Notify } from "quasar";
 import store from "@/test/unit/helpers/store";
-import { installQuasar } from "@/test/unit/helpers";
 import router from "@/test/unit/helpers/router";
 import i18n from "@/locales";
 
-installQuasar({ plugins: [Dialog, Notify] });
+vi.mock("@/lib/feedback/Toast/useToast", () => ({
+  toast: vi.fn(),
+}));
 
 const mockAddNode = vi.fn();
 
@@ -53,19 +54,25 @@ vi.mock("@/composables/usePipelines", () => ({
   }),
 }));
 
-vi.mock("@/services/jstransform", () => ({
-  default: {
-    list: vi.fn().mockResolvedValue({ data: { list: [] } }),
-  },
-}));
+vi.mock("@/services/jstransform", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      list: vi.fn().mockResolvedValue({ data: { list: [] } }),
+    },
+  });
+});
 
-vi.mock("@/services/pipelines", () => ({
-  default: {
-    getPipelines: vi.fn().mockResolvedValue({ data: { list: [] } }),
-    createPipeline: vi.fn().mockResolvedValue({}),
-    updatePipeline: vi.fn().mockResolvedValue({}),
-  },
-}));
+vi.mock("@/services/pipelines", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      getPipelines: vi.fn().mockResolvedValue({ data: { list: [] } }),
+      createPipeline: vi.fn().mockResolvedValue({}),
+      updatePipeline: vi.fn().mockResolvedValue({}),
+    },
+  });
+});
 
 vi.mock("@/services/reodotdev_analytics", () => ({
   useReo: () => ({ track: vi.fn() }),
@@ -84,25 +91,82 @@ vi.mock("@/composables/contextProviders", () => ({
   createPipelinesContextProvider: vi.fn(() => ({})),
 }));
 
+// Lightweight stub for ODrawer so tests can assert on the props the component
+// forwards (open / size / persistent / showClose) and drive button behaviour
+// via emits — without rendering reka-ui portals.
+const ODrawerStub = {
+  name: "ODrawer",
+  props: {
+    open: { type: Boolean, default: false },
+    size: { type: String, default: undefined },
+    title: { type: String, default: undefined },
+    subTitle: { type: String, default: undefined },
+    persistent: { type: Boolean, default: false },
+    showClose: { type: Boolean, default: true },
+    width: { type: [String, Number], default: undefined },
+    primaryButtonLabel: { type: String, default: undefined },
+    secondaryButtonLabel: { type: String, default: undefined },
+    neutralButtonLabel: { type: String, default: undefined },
+    primaryButtonVariant: { type: String, default: undefined },
+    secondaryButtonVariant: { type: String, default: undefined },
+    neutralButtonVariant: { type: String, default: undefined },
+    primaryButtonDisabled: { type: Boolean, default: false },
+    secondaryButtonDisabled: { type: Boolean, default: false },
+    neutralButtonDisabled: { type: Boolean, default: false },
+    primaryButtonLoading: { type: Boolean, default: false },
+    secondaryButtonLoading: { type: Boolean, default: false },
+    neutralButtonLoading: { type: Boolean, default: false },
+  },
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test="o-drawer-stub"
+      :data-open="String(open)"
+      :data-size="size"
+      :data-persistent="String(!!persistent)"
+      :data-show-close="String(!!showClose)"
+    >
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+      <button
+        data-test="o-drawer-stub-primary"
+        @click="$emit('click:primary')"
+      >primary</button>
+      <button
+        data-test="o-drawer-stub-secondary"
+        @click="$emit('click:secondary')"
+      >secondary</button>
+      <button
+        data-test="o-drawer-stub-close"
+        @click="$emit('update:open', false)"
+      >close</button>
+    </div>
+  `,
+};
+
 describe("PipelineEditor", () => {
   let wrapper;
   let mockPipelineObj;
 
-  const buildMockPipelineObj = (overrides = {}) => ({
-    currentSelectedPipeline: {
-      nodes: [],
-      edges: [],
-      source: { source_type: "realtime" },
-      name: "test-pipeline",
-    },
-    isEditPipeline: false,
-    dirtyFlag: false,
-    dialog: { show: false, name: "" },
-    nodeTypes: [],
-    functions: { value: {} },
-    currentSelectedNodeData: null,
-    ...overrides,
-  });
+  const buildMockPipelineObj = (overrides = {}) =>
+    reactive({
+      currentSelectedPipeline: {
+        nodes: [],
+        edges: [],
+        source: { source_type: "realtime" },
+        name: "test-pipeline",
+      },
+      isEditPipeline: false,
+      dirtyFlag: false,
+      dialog: { show: false, name: "" },
+      stepPicker: { show: false, source: "" },
+      pendingEdge: null,
+      nodeTypes: [],
+      functions: { value: {} },
+      currentSelectedNodeData: null,
+      ...overrides,
+    });
 
   beforeEach(() => {
     mockPipelineObj = buildMockPipelineObj();
@@ -125,20 +189,52 @@ describe("PipelineEditor", () => {
       comparePipelinesById: vi.fn(),
     }));
 
+    // Create teleport targets so Teleport to="#o2-page-actions" /
+    // "#o2-page-title-trail" (the name input) don't error
+    const teleportTarget = document.createElement("div");
+    teleportTarget.id = "o2-page-actions";
+    document.body.appendChild(teleportTarget);
+
+    const titleTrailTarget = document.createElement("div");
+    titleTrailTarget.id = "o2-page-title-trail";
+    document.body.appendChild(titleTrailTarget);
+
     wrapper = mount(PipelineEditor, {
+      attachTo: document.body,
       global: {
         provide: { store },
         plugins: [i18n, router],
+        stubs: {
+          ODrawer: ODrawerStub,
+          PipelineFlow: true,
+          QueryForm: true,
+          ConditionForm: true,
+          AssociateFunction: true,
+          StreamNode: true,
+          ExternalDestination: true,
+          ConfirmDialog: true,
+          "confirm-dialog": true,
+          OTooltip: true,
+          Teleport: false,
+        },
       },
     });
   });
 
   afterEach(async () => {
     await flushPromises();
+    const teleportTarget = document.getElementById("o2-page-actions");
+    if (teleportTarget) {
+      teleportTarget.remove();
+    }
     if (wrapper) {
-      wrapper.vm.confirmDialogMeta.show = false;
-      wrapper.vm.showJsonEditorDialog = false;
-      wrapper.vm.confirmDialogBasicPipeline = false;
+      try {
+        wrapper.vm.confirmDialogMeta.show = false;
+        wrapper.vm.showJsonEditorDialog = false;
+        wrapper.vm.confirmDialogBasicPipeline = false;
+      } catch (_) {
+        // ignore cleanup errors
+      }
       wrapper.unmount();
       wrapper = null;
     }
@@ -169,8 +265,13 @@ describe("PipelineEditor", () => {
       expect(wrapper.vm.validationErrors).toEqual([]);
     });
 
-    it("initializes pipelineNameError as false", () => {
-      expect(wrapper.vm.pipelineNameError).toBe(false);
+    it("seeds the OForm name from the pipeline already loaded in the store at mount", () => {
+      // Regression: `pipelineObj` is a module-level singleton that survives
+      // navigation, so on re-editing a pipeline its name is already present at
+      // mount (no post-mount change). The store→form watch is `immediate` so
+      // metaForm is seeded here — otherwise a change-only watch never fires and
+      // save wrongly reports "Pipeline name is required".
+      expect(wrapper.vm.metaForm.state.values.name).toBe("test-pipeline");
     });
 
     it("initializes confirmDialogMeta as hidden", () => {
@@ -178,15 +279,10 @@ describe("PipelineEditor", () => {
     });
 
     it("exposes correct data attributes", () => {
-      expect(wrapper.find('[data-test="pipeline-json-edit-btn"]').exists()).toBe(
-        true
-      );
-      expect(
-        wrapper.find('[data-test="add-pipeline-cancel-btn"]').exists()
-      ).toBe(true);
-      expect(wrapper.find('[data-test="add-pipeline-save-btn"]').exists()).toBe(
-        true
-      );
+      // These buttons are inside <Teleport to="#o2-page-actions">, query from document
+      expect(document.querySelector('[data-test="pipeline-json-edit-btn"]')).not.toBeNull();
+      expect(document.querySelector('[data-test="add-pipeline-cancel-btn"]')).not.toBeNull();
+      expect(document.querySelector('[data-test="add-pipeline-save-btn"]')).not.toBeNull();
     });
   });
 
@@ -290,6 +386,19 @@ describe("PipelineEditor", () => {
       // onSubmitPipeline delegates to the pipeline service
       expect(pipelineService.createPipeline).toHaveBeenCalled();
     });
+
+    it("resetBasicDialog only closes the basic dialog and stays on the editor (no navigation)", async () => {
+      const routerPushSpy = vi.spyOn(router, "push").mockImplementation(() => Promise.resolve());
+      wrapper.vm.confirmDialogBasicPipeline = true;
+
+      wrapper.vm.resetBasicDialog();
+      await flushPromises();
+
+      expect(wrapper.vm.confirmDialogBasicPipeline).toBe(false);
+      // Cancelling must NOT redirect to the pipelines listing.
+      expect(routerPushSpy).not.toHaveBeenCalled();
+      routerPushSpy.mockRestore();
+    });
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
@@ -308,9 +417,7 @@ describe("PipelineEditor", () => {
         { id: "1", type: "input" },
         { id: "2", type: "output" },
       ];
-      mockPipelineObj.currentSelectedPipeline.edges = [
-        { source: "1", target: "2" },
-      ];
+      mockPipelineObj.currentSelectedPipeline.edges = [{ source: "1", target: "2" }];
       expect(wrapper.vm.findMissingEdges()).toBe(false);
     });
 
@@ -414,10 +521,7 @@ describe("PipelineEditor", () => {
     it("returns confirmation message when new pipeline has nodes", () => {
       mockPipelineObj.dirtyFlag = false;
       mockPipelineObj.isEditPipeline = false;
-      mockPipelineObj.currentSelectedPipeline.nodes = [
-        { id: "1" },
-        { id: "2" },
-      ];
+      mockPipelineObj.currentSelectedPipeline.nodes = [{ id: "1" }, { id: "2" }];
       const e = { returnValue: null };
       const result = wrapper.vm.beforeUnloadHandler(e);
       expect(result).toBeTruthy();
@@ -425,50 +529,59 @@ describe("PipelineEditor", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
-  describe("Drag and Drop Operations", () => {
-    it("onNodeDragStart stores node data in dataTransfer", () => {
-      const e = { dataTransfer: { setData: vi.fn() } };
-      wrapper.vm.onNodeDragStart(e, "stream");
-      expect(e.dataTransfer.setData).toHaveBeenCalledWith("text", "stream");
-    });
-
-    it("onNodeDragOver prevents default", () => {
-      const e = { preventDefault: vi.fn() };
-      wrapper.vm.onNodeDragOver(e);
-      expect(e.preventDefault).toHaveBeenCalled();
-    });
-
-    it("onNodeDrop prevents default and reads dataTransfer", () => {
-      const e = {
-        preventDefault: vi.fn(),
-        dataTransfer: { getData: vi.fn().mockReturnValue("stream") },
-      };
-      wrapper.vm.onNodeDrop(e);
-      expect(e.preventDefault).toHaveBeenCalled();
-      expect(e.dataTransfer.getData).toHaveBeenCalledWith("text");
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────────
   describe("savePipeline Validations", () => {
-    beforeEach(() => {
-      const dismissMock = vi.fn();
-      wrapper.vm.q.notify = vi.fn().mockReturnValue(dismissMock);
+    beforeEach(async () => {
       wrapper.vm.onSubmitPipeline = vi.fn().mockResolvedValue(true);
+      const { toast } = await import("@/lib/feedback/Toast/useToast");
+      vi.mocked(toast).mockClear();
     });
 
     it("shows error notification when pipeline name is empty", async () => {
       mockPipelineObj.currentSelectedPipeline.name = "";
       await wrapper.vm.savePipeline();
-      expect(wrapper.vm.q.notify).toHaveBeenCalledWith(
-        expect.objectContaining({ message: expect.stringContaining("required") })
+      const { toast } = await import("@/lib/feedback/Toast/useToast");
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining("required") }),
       );
     });
 
-    it("sets pipelineNameError to true when name is empty", async () => {
+    it("blocks the save when the pipeline name is empty", async () => {
       mockPipelineObj.currentSelectedPipeline.name = "";
       await wrapper.vm.savePipeline();
-      expect(wrapper.vm.pipelineNameError).toBe(true);
+      // OForm validation fails, so save never reaches the create call.
+      expect(pipelineService.createPipeline).not.toHaveBeenCalled();
+    });
+
+    it("saves an edited pipeline whose name was only present at mount (no post-mount change)", async () => {
+      // Regression: re-editing a pipeline leaves its name in the module-level
+      // singleton store BEFORE mount, so there is no post-mount change to fire a
+      // change-only watch. The name here ("test-pipeline") comes from the mount
+      // fixture and is never reassigned — save must still clear name validation
+      // and reach the update call instead of toasting "Pipeline name is required".
+      mockPipelineObj.isEditPipeline = true;
+      mockPipelineObj.currentSelectedPipeline.nodes = [
+        {
+          id: "n1",
+          io_type: "input",
+          type: "input",
+          data: { node_type: "stream", stream_name: "in", stream_type: "logs" },
+        },
+        {
+          id: "n2",
+          io_type: "output",
+          type: "output",
+          data: { node_type: "stream", stream_name: "out", stream_type: "logs" },
+        },
+      ];
+      mockPipelineObj.currentSelectedPipeline.edges = [{ source: "n1", target: "n2" }];
+
+      await wrapper.vm.savePipeline();
+
+      const { toast } = await import("@/lib/feedback/Toast/useToast");
+      expect(toast).not.toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining("required") }),
+      );
+      expect(pipelineService.updatePipeline).toHaveBeenCalled();
     });
 
     it("shows error notification when source node is missing", async () => {
@@ -477,9 +590,8 @@ describe("PipelineEditor", () => {
         { io_type: "output", data: { node_type: "stream" } },
       ];
       await wrapper.vm.savePipeline();
-      expect(wrapper.vm.q.notify).toHaveBeenCalledWith(
-        expect.objectContaining({ message: expect.any(String) })
-      );
+      const { toast } = await import("@/lib/feedback/Toast/useToast");
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ message: expect.any(String) }));
     });
 
     it("shows error notification when destination node is missing", async () => {
@@ -488,9 +600,8 @@ describe("PipelineEditor", () => {
         { io_type: "input", data: { node_type: "stream" } },
       ];
       await wrapper.vm.savePipeline();
-      expect(wrapper.vm.q.notify).toHaveBeenCalledWith(
-        expect.objectContaining({ message: expect.any(String) })
-      );
+      const { toast } = await import("@/lib/feedback/Toast/useToast");
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ message: expect.any(String) }));
     });
 
     it("shows error when nodes are not connected via edges", async () => {
@@ -501,9 +612,8 @@ describe("PipelineEditor", () => {
       ];
       mockPipelineObj.currentSelectedPipeline.edges = [];
       await wrapper.vm.savePipeline();
-      expect(wrapper.vm.q.notify).toHaveBeenCalledWith(
-        expect.objectContaining({ message: expect.any(String) })
-      );
+      const { toast } = await import("@/lib/feedback/Toast/useToast");
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({ message: expect.any(String) }));
     });
 
     it("sets source_type to realtime when input node is stream", async () => {
@@ -522,18 +632,14 @@ describe("PipelineEditor", () => {
           data: { node_type: "stream" },
         },
       ];
-      mockPipelineObj.currentSelectedPipeline.edges = [
-        { source: "n1", target: "n2" },
-      ];
+      mockPipelineObj.currentSelectedPipeline.edges = [{ source: "n1", target: "n2" }];
 
       wrapper.vm.findMissingEdges = vi.fn().mockReturnValue(false);
       wrapper.vm.isValidNodes = vi.fn().mockReturnValue(true);
 
       await wrapper.vm.savePipeline();
 
-      expect(
-        mockPipelineObj.currentSelectedPipeline.source.source_type
-      ).toBe("realtime");
+      expect(mockPipelineObj.currentSelectedPipeline.source.source_type).toBe("realtime");
     });
 
     it("sets source_type to scheduled when input node is query", async () => {
@@ -552,18 +658,14 @@ describe("PipelineEditor", () => {
           data: { node_type: "stream" },
         },
       ];
-      mockPipelineObj.currentSelectedPipeline.edges = [
-        { source: "n1", target: "n2" },
-      ];
+      mockPipelineObj.currentSelectedPipeline.edges = [{ source: "n1", target: "n2" }];
 
       wrapper.vm.findMissingEdges = vi.fn().mockReturnValue(false);
       wrapper.vm.isValidNodes = vi.fn().mockReturnValue(true);
 
       await wrapper.vm.savePipeline();
 
-      expect(
-        mockPipelineObj.currentSelectedPipeline.source.source_type
-      ).toBe("scheduled");
+      expect(mockPipelineObj.currentSelectedPipeline.source.source_type).toBe("scheduled");
     });
 
     it("shows basic pipeline confirmation dialog when isValidNodes returns false", async () => {
@@ -572,9 +674,7 @@ describe("PipelineEditor", () => {
         { id: "n1", io_type: "input", type: "input", data: { node_type: "stream" } },
         { id: "n2", io_type: "output", type: "output", data: { node_type: "stream" } },
       ];
-      mockPipelineObj.currentSelectedPipeline.edges = [
-        { source: "n1", target: "n2" },
-      ];
+      mockPipelineObj.currentSelectedPipeline.edges = [{ source: "n1", target: "n2" }];
 
       wrapper.vm.findMissingEdges = vi.fn().mockReturnValue(false);
       wrapper.vm.isValidNodes = vi.fn().mockReturnValue(false);
@@ -601,9 +701,7 @@ describe("PipelineEditor", () => {
           data: { node_type: "stream", stream_name: "out", stream_type: "logs" },
         },
       ];
-      mockPipelineObj.currentSelectedPipeline.edges = [
-        { source: "n1", target: "n2" },
-      ];
+      mockPipelineObj.currentSelectedPipeline.edges = [{ source: "n1", target: "n2" }];
 
       await wrapper.vm.savePipeline();
 
@@ -636,6 +734,56 @@ describe("PipelineEditor", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────────
+  describe("ODrawer Migration", () => {
+    it("renders the JSON-editor ODrawer instance", () => {
+      const drawers = wrapper.findAllComponents(ODrawerStub);
+      expect(drawers.length).toBe(1);
+    });
+
+    it("JSON-editor ODrawer is closed by default and uses width 70, persistent=true", () => {
+      const drawers = wrapper.findAllComponents(ODrawerStub);
+      const jsonDrawer = drawers[0];
+
+      expect(jsonDrawer.props("open")).toBe(false);
+      expect(jsonDrawer.props("width")).toBe(70);
+      expect(jsonDrawer.props("persistent")).toBe(true);
+      // showClose is not explicitly set on the ODrawer, defaults to true
+      expect(jsonDrawer.props("showClose")).toBe(true);
+    });
+
+    it("JSON-editor ODrawer opens when openJsonEditor() is invoked", async () => {
+      wrapper.vm.openJsonEditor();
+      await flushPromises();
+
+      const drawers = wrapper.findAllComponents(ODrawerStub);
+      expect(drawers[0].props("open")).toBe(true);
+    });
+
+    it("JSON-editor ODrawer update:open=false closes the JSON editor", async () => {
+      wrapper.vm.showJsonEditorDialog = true;
+      await flushPromises();
+
+      const drawers = wrapper.findAllComponents(ODrawerStub);
+      await drawers[0].vm.$emit("update:open", false);
+      await flushPromises();
+
+      expect(wrapper.vm.showJsonEditorDialog).toBe(false);
+    });
+
+    it("clicking pipeline-json-edit-btn opens the JSON-editor ODrawer", async () => {
+      // Button is inside <Teleport to="#o2-page-actions">, query from document
+      const btn = document.querySelector('[data-test="pipeline-json-edit-btn"]');
+      expect(btn).not.toBeNull();
+      btn.click();
+      await flushPromises();
+
+      const drawers = wrapper.findAllComponents(ODrawerStub);
+      expect(drawers[0].props("open")).toBe(true);
+      expect(wrapper.vm.showJsonEditorDialog).toBe(true);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────────
   describe("Method Exposure", () => {
     it("exposes all required methods", () => {
       const required = [
@@ -648,9 +796,6 @@ describe("PipelineEditor", () => {
         "openJsonEditor",
         "findMissingEdges",
         "isValidNodes",
-        "onNodeDragStart",
-        "onNodeDrop",
-        "onNodeDragOver",
         "beforeUnloadHandler",
         "confirmSaveBasicPipeline",
       ];

@@ -16,153 +16,153 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <!-- eslint-disable vue/x-invalid-end-tag -->
 <template>
-  <q-page class="q-pa-none" style="min-height: inherit; height: calc(100vh - 88px);">
-    <div v-if="!showAddDialog" >
-      <div class="tw:flex tw:justify-between tw:items-center tw:px-4 tw:py-3 tw:h-[68px] tw:border-b-[1px]"
-      >
-            <div
-              class="q-table__title tw:font-[600]"
-              data-test="cipher-keys-list-title"
-            >
-              {{ t("cipherKey.header") }}
-            </div>
-            <div class="col-auto flex">
-              <q-input
-                v-model="filterQuery"
-                borderless
-                dense
-                class="q-ml-auto no-border o2-search-input"
-                :placeholder="t('cipherKey.search')"
-              >
-                <template #prepend>
-                  <q-icon class="o2-search-input-icon" name="search" />
-                </template>
-              </q-input>
-              <q-btn
-                class="o2-primary-button q-ml-sm tw:h-[36px]"
-                no-caps
-                flat
-                :label="t(`cipherKey.add`)"
-                @click="addCipherKey"
-              />
-            </div>
-          </div>
-      <q-table
-        ref="qTable"
-        :rows="visibleRows"
-        :columns="columns"
-        row-key="name"
-        selection="multiple"
-        v-model:selected="selectedKeys"
-        :pagination="pagination"
-        class="o2-quasar-table o2-row-md o2-quasar-table-header-sticky"
-        :style="hasVisibleRows
-            ? 'width: 100%; height: calc(100vh - 112px); overflow-y: auto;'
-            : 'width: 100%'"
-      >
-        <template #no-data><NoData /></template>
-        <template v-slot:body-selection="scope">
-          <q-checkbox v-model="scope.selected" size="sm" class="o2-table-checkbox" />
-        </template>
-        <template v-slot:body-cell-actions="props">
-          <q-td :props="props">
-            <q-btn
-              :data-test="`cipherkey-list-${props.row.name}-update`"
-              icon="edit"
-              class="q-ml-xs"
-              padding="sm"
-              unelevated
-              size="sm"
-              round
-              flat
+  <div class="flex h-full flex-col p-0">
+    <OPageLayout
+      v-if="!showAddDialog"
+      :title="t('cipherKey.header')"
+      icon="key"
+      :subtitle="t('settings.cipherKeysPage.subtitle')"
+      bleed
+    >
+      <template #actions>
+        <OButton variant="primary" size="sm" @click="addCipherKey" data-test="cipher-keys-add-btn">
+          {{ t(`cipherKey.add`) }}
+        </OButton>
+      </template>
+      <div class="bg-card-glass-bg min-h-0 flex-1 overflow-hidden">
+        <OTable
+          :frame="false"
+          :data="visibleRows"
+          :columns="columns"
+          row-key="name"
+          :loading="loading"
+          :forbidden="forbidden"
+          :selected-ids="selectedKeyIds"
+          selection="multiple"
+          pagination="client"
+          :page-size="20"
+          :page-size-options="[20, 50, 100, 250, 500]"
+          :footer-title="t('cipherKey.header')"
+          sorting="client"
+          filter-mode="client"
+          :default-columns="false"
+          show-index
+          :enable-column-resize="true"
+          :persist-columns="true"
+          table-id="settings-cipher-keys"
+          :show-global-filter="false"
+          @update:selected-ids="handleSelectedIdsUpdate"
+        >
+          <template #toolbar>
+            <OSearchInput
+              v-model="filterQuery"
+              class="flex-1"
+              :placeholder="t('cipherKey.search')"
+            />
+          </template>
+          <template #toolbar-trailing>
+            <ORefreshButton
+              layout="inline"
+              variant="outline"
+              :last-run-at="lastUpdatedAt"
+              :loading="fetching"
+              shortcut-id="cipherKeysRefresh"
+              data-test="cipher-keys-list-refresh-btn"
+              @click="refreshData"
+            />
+          </template>
+          <template #empty>
+            <OEmptyState
+              size="hero"
+              preset="no-cipher-keys"
+              :filtered="!!filterQuery"
+              @action="(id) => (id === 'clear-filters' ? (filterQuery = '') : addCipherKey())"
+            />
+          </template>
+          <template #cell-actions="{ row }">
+            <OButton
+              :data-test="`cipherkey-list-${row.name}-update`"
+              data-row-action="edit"
+              variant="ghost"
+              size="icon-sm"
+              class="ms-1 max-md:hidden"
               :title="t('common.edit')"
-              @click="editCipherKey(props.row)"
-            ></q-btn>
-            <q-btn
-              :data-test="`cipherkey-list-${props.row.name}-delete`"
-              :icon="outlinedDelete"
-              class="q-ml-xs"
-              padding="sm"
-              unelevated
-              size="sm"
-              round
-              flat
+              @click="editCipherKey(row)"
+              icon-left="edit"
+            />
+            <OButton
+              :data-test="`cipherkey-list-${row.name}-delete`"
+              data-row-action="delete"
+              variant="ghost-destructive"
+              size="icon-sm"
+              class="ms-1 max-md:hidden"
               :title="t('common.delete')"
-              @click="confirmDeleteCipherKey(props.row)"
-            ></q-btn>
-          </q-td>
-        </template>
-        <template #bottom="scope">
-          <div class="tw:flex tw:items-center tw:justify-between tw:w-full tw:h-[48px]">
-            <div class="o2-table-footer-title tw:flex tw:items-center tw:w-[150px] tw:mr-md">
-              {{ resultTotal }} {{ t('cipherKey.header') }}
-            </div>
-            <q-btn
-              v-if="selectedKeys.length > 0"
+              @click="confirmDeleteCipherKey(row)"
+              icon-left="delete"
+            />
+            <ODropdown side="bottom" align="end">
+              <template #trigger>
+                <OButton
+                  icon-left="more-vert"
+                  variant="ghost"
+                  size="icon-xs-sq"
+                  class="md:hidden"
+                  data-test="cipher-keys-row-more-actions"
+                  @click.stop
+                />
+              </template>
+              <ODropdownItem
+                icon-left="edit"
+                class="md:hidden"
+                :data-test="`cipherkey-list-${row.name}-update-menu`"
+                @select="editCipherKey(row)"
+              >
+                <span>{{ t("common.edit") }}</span>
+              </ODropdownItem>
+              <ODropdownItem
+                icon-left="delete"
+                variant="destructive"
+                class="md:hidden"
+                :data-test="`cipherkey-list-${row.name}-delete-menu`"
+                @select="confirmDeleteCipherKey(row)"
+              >
+                <span>{{ t("common.delete") }}</span>
+              </ODropdownItem>
+            </ODropdown>
+          </template>
+          <template v-if="selectedKeys.length > 0" #bottom>
+            <span class="text-text-body text-xs font-medium">
+              {{ t("settings.cipherKeysPage.selected", { count: selectedKeys.length }) }}
+            </span>
+            <OButton
               data-test="cipher-keys-list-delete-keys-btn"
-              class="flex items-center q-mr-sm no-border o2-secondary-button tw:h-[36px]"
-              :class="
-                store.state.theme === 'dark'
-                  ? 'o2-secondary-button-dark'
-                  : 'o2-secondary-button-light'
-              "
-              no-caps
-              dense
+              variant="outline-destructive"
+              size="sm"
+              icon-left="delete"
+              :loading="bulkDeleteLoading"
               @click="openBulkDeleteDialog"
             >
-              <q-icon name="delete" size="16px" />
-              <span class="tw:ml-2">Delete</span>
-            </q-btn>
-            <QTablePagination
-              :scope="scope"
-              :resultTotal="resultTotal"
-              :perPageOptions="perPageOptions"
-              position="bottom"
-              @update:changeRecordPerPage="changePagination"
-            />
-          </div>
-        </template>
-        <template v-slot:header="props">
-            <q-tr :props="props">
-              <!-- Adding this block to render the select-all checkbox -->
-              <q-th v-if="columns.length > 0" auto-width>
-                <q-checkbox
-                  v-model="props.selected"
-                  size="sm"
-                  :class="store.state.theme === 'dark' ? 'o2-table-checkbox-dark' : 'o2-table-checkbox-light'"
-                  class="o2-table-checkbox"
-                />
-              </q-th>
-
-              <!-- Render the table headers -->
-              <q-th
-                v-for="col in props.cols"
-                :key="col.name"
-                :props="props"
-                :class="col.classes"
-                :style="col.style"
-              >
-                {{ col.label }}
-              </q-th>
-            </q-tr>
+              {{ t("settings.cipherKeysPage.delete") }}
+            </OButton>
           </template>
-      </q-table>
-    </div>
+        </OTable>
+      </div>
+    </OPageLayout>
     <div v-else>
-      <add-cipher-key @cancel:hideform="hideAddDialog" />
+      <AddCipherKey @cancel:hideform="hideAddDialog" />
     </div>
-  </q-page>
+  </div>
   <ConfirmDialog
-    title="Delete Cipher Key"
-    message="Are you sure you want to delete Cipher Key?"
+    :title="t('settings.cipherKeysPage.deleteCipherKeyTitle')"
+    :message="t('settings.cipherKeysPage.deleteCipherKeyMessage')"
     @update:ok="deleteCipherKey"
     @update:cancel="cancelDeleteCipherKey"
     v-model="confirmDelete.visible"
   />
 
   <ConfirmDialog
-    title="Delete Cipher Keys"
-    :message="`Are you sure you want to delete ${selectedKeys.length} cipher key(s)?`"
+    :title="t('settings.cipherKeysPage.deleteCipherKeysTitle')"
+    :message="t('settings.cipherKeysPage.deleteCipherKeysMessage', { count: selectedKeys.length })"
     @update:ok="bulkDeleteCipherKeys"
     @update:cancel="confirmBulkDelete = false"
     v-model="confirmBulkDelete"
@@ -170,93 +170,112 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts">
+import { useOrgId } from "@/composables/query/useOrgId";
+import { useQuery } from "@tanstack/vue-query";
+import { cipherKeysQuery } from "@/services/cipher_keys.queries";
+import { cipherKeyKeys } from "@/services/cipher_keys.querykeys";
+import { queryClient } from "@/composables/query/queryClient";
 import { defineComponent, ref, onMounted, onUpdated, watch, Ref, computed } from "vue";
 import { useStore } from "vuex";
 import { useRouter } from "vue-router";
-import { useQuasar, date, copyToClipboard, QTableProps } from "quasar";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped } from "@/types/i18n";
 
-import QTablePagination from "@/components/shared/grid/Pagination.vue";
-import NoData from "@/components/shared/grid/NoData.vue";
-import segment from "@/services/segment_analytics";
-import { convertToTitleCase } from "@/utils/zincutils";
-import config from "@/aws-exports";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
 import AddCipherKey from "@/components/cipherkeys/AddCipherKey.vue";
 import CipherKeysService from "@/services/cipher_keys";
-import { outlinedDelete } from "@quasar/extras/material-icons-outlined";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownItem from "@/lib/overlay/Dropdown/ODropdownItem.vue";
+import ORefreshButton from "@/lib/core/RefreshButton/ORefreshButton.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
+import OTable from "@/lib/core/Table/OTable.vue";
+import type { OTableColumnDef } from "@/lib/core/Table/OTable.types";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
+import { COL } from "@/lib/core/Table/OTable.types";
+import { useShortcuts } from "@/lib/vue-shortcut-manager";
+import { isInputFocused } from "@/utils/keyboardShortcuts";
 
 export default defineComponent({
   name: "PageCipherKeys",
   components: {
-    QTablePagination,
-    NoData,
+    OPageLayout,
+    OEmptyState,
     AddCipherKey,
     ConfirmDialog,
+    OButton,
+    ODropdown,
+    ODropdownItem,
+    ORefreshButton,
+    OSearchInput,
+    OTable,
   },
   setup() {
     const store = useStore();
     const router = useRouter();
-    const { t } = useI18n();
-    const $q = useQuasar();
+    const { t } = useI18nTyped();
     const tabledata: any = ref([]);
     const showAddDialog = ref(false);
-    const qTable: any = ref(null);
-    const loading = ref(false);
+    const orgIdForList = useOrgId();
+    const cipherKeysList = useQuery(() =>
+      Object.assign(cipherKeysQuery(orgIdForList.value), { enabled: !!orgIdForList.value }),
+    );
+
+    const loading = cipherKeysList.isPending;
+    // A request is in flight while rows stay on screen — the refresh button's
+    // spinner. `loading` is the skeleton, which only a cold read wants.
+    const fetching = cipherKeysList.isFetching;
+    // Epoch ms of the last successful read — drives the button's "1m ago" label.
+    const lastUpdatedAt = cipherKeysList.dataUpdatedAt;
+    // A 403 lands in the query's error rather than a loader's catch, so derive the no-access state from it.
+    const forbidden = computed(() => {
+      const e: any = cipherKeysList.error.value;
+      return e?.status === 403 || e?.response?.status === 403;
+    });
     const filterQuery = ref("");
-    const columns = ref<QTableProps["columns"]>([
+    const columns: OTableColumnDef[] = [
       {
-        name: "#",
-        label: "#",
-        field: "#",
-        align: "left",
-        style: "width: 67px",
-      },
-      {
-        name: "name",
-        field: "name",
-        label: t("cipherKey.name"),
-        align: "left",
+        id: "name",
+        header: t("cipherKey.name"),
+        accessorKey: "name",
         sortable: true,
+        resizable: true,
+        hideable: true,
+        size: COL.name,
+        minSize: 160,
+        meta: { align: "left", flex: true },
       },
       {
-        name: "store_type",
-        field: "store_type",
-        label: t("cipherKey.storeType"),
-        align: "left",
+        id: "store_type",
+        header: t("cipherKey.storeType"),
+        accessorKey: "store_type",
         sortable: true,
-        style: "width: 150px",
+        resizable: true,
+        hideable: true,
+        size: COL.type,
+        meta: { align: "left" },
       },
       {
-        name: "mechanism_type",
-        field: "mechanism_type",
-        label: t("cipherKey.mechanismType"),
-        align: "left",
+        id: "mechanism_type",
+        header: t("cipherKey.mechanismType"),
+        accessorKey: "mechanism_type",
         sortable: true,
-        style: "width: 150px",
+        resizable: true,
+        hideable: true,
+        size: COL.type,
+        meta: { align: "left" },
       },
       {
-        name: "actions",
-        field: "actions",
-        label: t("cipherKey.actions"),
-        align: "center",
-        sortable: false,
-        classes:'actions-column'
+        id: "actions",
+        header: t("cipherKey.actions"),
+        isAction: true,
+        pinned: "right",
+        size: 100,
+        meta: { align: "center", actionCount: 2 },
       },
-    ]);
-    const perPageOptions = [
-      { label: "20", value: 20 },
-      { label: "50", value: 50 },
-      { label: "100", value: 100 },
-      { label: "250", value: 250 },
-      { label: "500", value: 500 },
     ];
     const resultTotal = ref<number>(0);
-    const maxRecordToReturn = ref<number>(100);
-    const selectedPerPage = ref<number>(20);
-    const pagination: any = ref({
-      rowsPerPage: 20,
-    });
 
     const confirmDelete: Ref<{
       visible: boolean;
@@ -264,6 +283,7 @@ export default defineComponent({
     }> = ref({ visible: false, data: null });
     const selectedKeys: Ref<any[]> = ref([]);
     const confirmBulkDelete = ref(false);
+    const bulkDeleteLoading = ref(false);
 
     watch(
       () => router.currentRoute.value.query?.action,
@@ -294,13 +314,14 @@ export default defineComponent({
       }
     });
 
-    const changePagination = (val: { label: string; value: any }) => {
-      selectedPerPage.value = val.value;
-      pagination.value.rowsPerPage = val.value;
-      qTable.value.setPagination(pagination.value);
+    const selectedKeyIds = computed(() => selectedKeys.value.map((k: any) => k.name));
+
+    const handleSelectedIdsUpdate = (ids: string[]) => {
+      const map = new Map(tabledata.value.map((r: any) => [r.name, r]));
+      selectedKeys.value = ids.map((id: any) => map.get(id)).filter(Boolean);
     };
 
-    const addCipherKey = (evt: any) => {
+    const addCipherKey = () => {
       router.push({
         query: {
           action: "add",
@@ -319,51 +340,79 @@ export default defineComponent({
       });
     };
 
-    const getData = () => {
-      loading.value = true;
-      const dismiss = $q.notify({
-        spinner: true,
-        message: "Please wait while loading data...",
-      });
+    // `force` is for the refresh shortcut and post-mutation reloads: those must
+    // reach the server. A plain call is a cache hit when the list is still fresh.
+    // Bound to refresh / "list changed" events: always hits the server.
+    const refreshData = () => getData(true);
 
-      CipherKeysService.list(store.state.selectedOrganization.identifier)
-        .then((response) => {
-          const data = [];
-          const responseData = response.data.keys;
-          for (let i = 0; i < responseData.length; i++) {
-            data.push({
-              "#": i + 1,
-              name: responseData[i].name,
-              store_type: responseData[i].key.store.type,
-              mechanism_type: responseData[i].key.mechanism.type,
-            });
-          }
-
-          tabledata.value = data;
-          resultTotal.value = responseData.length;
-          loading.value = false;
-          dismiss();
-        })
-        .catch((error) => {
-          loading.value = false;
-          dismiss();
-          if (error.status != 403) {
-            $q.notify({
-              type: "negative",
-              message:
-                error.response?.data?.message ||
-                "Failed to fetch cipher keys. Please try again.",
-              timeout: 5000,
-            });
-          }
+    const applyCipherKeys = (responseData: any[]) => {
+      const data = [];
+      for (let i = 0; i < responseData.length; i++) {
+        data.push({
+          name: responseData[i].name,
+          store_type: responseData[i].key.store.type,
+          mechanism_type: responseData[i].key.mechanism.type,
         });
+      }
+
+      tabledata.value = data;
+      resultTotal.value = responseData.length;
+    };
+
+    // The table is the query now: anything that invalidates the cipher-keys
+    // scope repaints these rows without this component asking.
+    watch(
+      cipherKeysList.data,
+      (rows: any) => {
+        if (rows) applyCipherKeys(rows);
+      },
+      { immediate: true },
+    );
+
+    // The cold-read toast, kept: it is shown only while there is nothing on
+    // screen, and dismissed as soon as the first rows land or the read fails.
+    let dismissLoadingToast: (() => void) | null = null;
+    watch(
+      loading,
+      (isCold) => {
+        if (isCold && !dismissLoadingToast) {
+          dismissLoadingToast = toast({
+            variant: "loading",
+            message: t("settings.cipherKeysPage.loadingData"),
+            timeout: 0,
+          });
+        } else if (!isCold && dismissLoadingToast) {
+          dismissLoadingToast();
+          dismissLoadingToast = null;
+        }
+      },
+      { immediate: true },
+    );
+
+    watch(cipherKeysList.error, (error: any) => {
+      if (!error) return;
+      dismissLoadingToast?.();
+      dismissLoadingToast = null;
+      if (error.status != 403) {
+        toast({
+          variant: "error",
+          message: error.response?.data?.message || t("settings.cipherKeysPage.fetchFailed"),
+          timeout: 5000,
+        });
+      }
+    });
+
+    // Only an explicit call reads: refresh, post-write reload, search. Mount and
+    // invalidation-driven repaints come from the query itself.
+    const getData = async (force = false) => {
+      if (force) await cipherKeysList.refetch();
     };
 
     getData();
 
     const hideAddDialog = async () => {
       showAddDialog.value = !showAddDialog.value;
-      await getData();
+      await getData(true);
       router.push({
         name: "cipherKeys",
         query: {
@@ -374,10 +423,10 @@ export default defineComponent({
 
     const deleteCipherKey = () => {
       if (confirmDelete.value?.data?.name) {
-        const dismiss = $q.notify({
-          spinner: true,
-          message: "Please wait while processing delete request...",
-          type: "warning",
+        const dismiss = toast({
+          variant: "loading",
+          message: t("settings.cipherKeysPage.processingDelete"),
+          timeout: 0,
         });
         CipherKeysService.delete(
           store.state.selectedOrganization.identifier,
@@ -385,28 +434,33 @@ export default defineComponent({
         )
           .then(() => {
             dismiss();
-            $q.notify({
-              type: "positive",
-              message: `Cipher Key deleted successfully`,
-              timeout: 2000,
+            toast({
+              variant: "success",
+              message: t("settings.cipherKeysPage.deleteSuccess"),
             });
 
-            getData();
+            // Drop the row from the cache first so it disappears now, not when
+            // the refetch lands.
+            const deletedName = confirmDelete.value.data.name;
+            queryClient.setQueriesData(
+              { queryKey: cipherKeyKeys.all(store.state.selectedOrganization.identifier) },
+              (list: any) =>
+                Array.isArray(list) ? list.filter((k: any) => k.name !== deletedName) : list,
+            );
+            getData(true);
           })
           .catch((err) => {
             dismiss();
             if (err.response.data.code === 409) {
-              $q.notify({
-                type: "negative",
+              toast({
+                variant: "error",
                 message: err.response.data.message,
-                timeout: 2000,
               });
             } else {
               if (err?.status != 403) {
-                $q.notify({
-                  type: "negative",
+                toast({
+                  variant: "error",
                   message: err.response.data.message,
-                  timeout: 2000,
                 });
               }
             }
@@ -422,32 +476,36 @@ export default defineComponent({
       confirmDelete.value.data = null;
     };
     const filterData = (rows: string | any[], terms: string) => {
-        const filtered = [];
-        terms = terms.toLowerCase();
-        for (let i = 0; i < rows.length; i++) {
-          if (rows[i]["name"].toLowerCase().includes(terms)) {
-            filtered.push(rows[i]);
-          }
+      const filtered = [];
+      terms = terms.toLowerCase();
+      for (let i = 0; i < rows.length; i++) {
+        if (rows[i]["name"].toLowerCase().includes(terms)) {
+          filtered.push(rows[i]);
         }
-        return filtered;
-      };
+      }
+      return filtered;
+    };
 
     const visibleRows = computed(() => {
       if (!filterQuery.value) return tabledata.value || [];
       return filterData(tabledata.value || [], filterQuery.value);
     });
-    const hasVisibleRows = computed(() => visibleRows.value.length > 0);
 
     // Watch visibleRows to sync resultTotal with search filter
-    watch(visibleRows, (newVisibleRows) => {
-      resultTotal.value = newVisibleRows.length;
-    }, { immediate: true });
+    watch(
+      visibleRows,
+      (newVisibleRows) => {
+        resultTotal.value = newVisibleRows.length;
+      },
+      { immediate: true },
+    );
 
     const openBulkDeleteDialog = () => {
       confirmBulkDelete.value = true;
     };
 
     const bulkDeleteCipherKeys = () => {
+      bulkDeleteLoading.value = true;
       const keyNames = selectedKeys.value.map((key: any) => key.name);
 
       CipherKeysService.bulkDelete(store.state.selectedOrganization.identifier, { ids: keyNames })
@@ -455,82 +513,88 @@ export default defineComponent({
           const { successful, unsuccessful } = res.data;
 
           if (successful.length > 0 && unsuccessful.length === 0) {
-            $q.notify({
-              type: "positive",
-              message: `Successfully deleted ${successful.length} cipher key(s)`,
-              timeout: 2000,
+            toast({
+              variant: "success",
+              message: t("settings.cipherKeysPage.bulkDeleteSuccess", { count: successful.length }),
             });
           } else if (successful.length > 0 && unsuccessful.length > 0) {
-            $q.notify({
-              type: "warning",
-              message: `Deleted ${successful.length} cipher key(s), but ${unsuccessful.length} failed`,
-              timeout: 3000,
+            toast({
+              variant: "warning",
+              message: t("settings.cipherKeysPage.bulkDeletePartial", {
+                count: successful.length,
+                failed: unsuccessful.length,
+              }),
             });
           } else if (unsuccessful.length > 0) {
-            $q.notify({
-              type: "negative",
-              message: `Failed to delete ${unsuccessful.length} cipher key(s)`,
-              timeout: 2000,
+            toast({
+              variant: "error",
+              message: t("settings.cipherKeysPage.bulkDeleteFailed", {
+                count: unsuccessful.length,
+              }),
             });
           }
 
           selectedKeys.value = [];
           confirmBulkDelete.value = false;
-          getData();
+          getData(true);
         })
         .catch((err: any) => {
           if (err.response?.status != 403 || err?.status != 403) {
-            $q.notify({
-              type: "negative",
-              message: err.response?.data?.message || err?.message || "Error while deleting cipher keys",
-              timeout: 2000,
+            toast({
+              variant: "error",
+              message:
+                err.response?.data?.message ||
+                err?.message ||
+                t("settings.cipherKeysPage.bulkDeleteError"),
             });
           }
+        })
+        .finally(() => {
+          bulkDeleteLoading.value = false;
         });
     };
 
+    useShortcuts([
+      {
+        id: "cipherKeysRefresh",
+        handler: () => {
+          if (!isInputFocused()) getData(true);
+        },
+      },
+    ]);
+
     return {
+      refreshData,
       t,
       store,
       router,
-      qTable,
       loading,
+      fetching,
+      lastUpdatedAt,
+      forbidden,
       tabledata,
       columns,
       showAddDialog,
       addCipherKey,
       getData,
-      pagination,
       resultTotal,
-      perPageOptions,
-      selectedPerPage,
-      changePagination,
-      maxRecordToReturn,
       filterQuery,
       hideAddDialog,
       cancelDeleteCipherKey,
       confirmDeleteCipherKey,
       confirmDelete,
-      outlinedDelete,
       editCipherKey,
       deleteCipherKey,
       visibleRows,
-      hasVisibleRows,
       filterData,
       selectedKeys,
+      selectedKeyIds,
+      handleSelectedIdsUpdate,
       confirmBulkDelete,
+      bulkDeleteLoading,
       openBulkDeleteDialog,
       bulkDeleteCipherKeys,
     };
   },
 });
 </script>
-
-<style lang="scss" scoped>
-.q-table {
-  &__top {
-    border-bottom: 1px solid $border-color;
-    justify-content: flex-end;
-  }
-}
-</style>

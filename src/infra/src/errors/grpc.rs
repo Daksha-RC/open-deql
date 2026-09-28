@@ -17,15 +17,53 @@ use datafusion::{common::SchemaError, error::DataFusionError};
 
 use super::{Error, ErrorCodes};
 
+/// Carries an `ErrorCodes` through DataFusion so the HTTP status survives the round trip.
+#[derive(Debug)]
+struct DataFusionErrorCode(ErrorCodes);
+
+impl std::fmt::Display for DataFusionErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::error::Error for DataFusionErrorCode {}
+
+impl From<ErrorCodes> for DataFusionError {
+    fn from(code: ErrorCodes) -> Self {
+        Self::External(Box::new(DataFusionErrorCode(code)))
+    }
+}
+
 impl From<DataFusionError> for Error {
     fn from(err: DataFusionError) -> Self {
+        let err = match err {
+            DataFusionError::External(external) => match external.downcast::<DataFusionErrorCode>()
+            {
+                Ok(code) => return Error::ErrorCode(code.0),
+                Err(external) => DataFusionError::External(external),
+            },
+            err => err,
+        };
         if let DataFusionError::SchemaError(schema_err, _) = &err
             && let SchemaError::FieldNotFound {
                 field,
-                valid_fields: _,
+                valid_fields,
             } = schema_err.as_ref()
         {
-            return Error::ErrorCode(ErrorCodes::SearchFieldNotFound(field.name.clone()));
+            // Keep the same textual shape DataFusion's Display uses so the
+            // HTTP layer can parse candidates out of either origin and offer
+            // did-you-mean suggestions.
+            let valid = valid_fields
+                .iter()
+                .map(|f| f.flat_name())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Error::ErrorCode(ErrorCodes::SearchFieldNotFound(if valid.is_empty() {
+                format!("No field named {}.", field.name)
+            } else {
+                format!("No field named {}. Valid fields are {}.", field.name, valid)
+            }));
         }
 
         let err = err.to_string();
@@ -104,6 +142,15 @@ mod tests {
         assert!(matches!(
             err,
             Error::ErrorCode(ErrorCodes::SearchSQLExecuteError(_))
+        ));
+    }
+
+    #[test]
+    fn test_from_datafusion_error_code_round_trips() {
+        let df_err: DataFusionError = ErrorCodes::SearchCancelQuery("canceled".to_string()).into();
+        assert!(matches!(
+            Error::from(df_err),
+            Error::ErrorCode(ErrorCodes::SearchCancelQuery(message)) if message == "canceled"
         ));
     }
 

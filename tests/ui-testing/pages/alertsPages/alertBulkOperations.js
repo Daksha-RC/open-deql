@@ -132,52 +132,85 @@ export class AlertBulkOperations {
     /**
      * Move all alerts in current folder to another folder
      * @param {string} targetFolderName - Target folder name
+     * @param {object} [options]
+     * @param {string} [options.expectAlertName] - Name of an alert expected in the SOURCE folder.
+     *   When provided, we wait for THAT row to render before selecting — this proves the source
+     *   folder's own data has loaded (see race note below) and that we are not looking at a stale
+     *   table left over from the previous folder.
      */
-    async moveAllAlertsToFolder(targetFolderName) {
-        // Select all alerts using the header checkbox
+    async moveAllAlertsToFolder(targetFolderName, options = {}) {
+        const { expectAlertName } = options;
         const headerCheckbox = this.page.locator(this.locators.headerCheckbox).first();
+        const moveBtn = this.page.locator(this.locators.moveAcrossFoldersButton);
         await headerCheckbox.waitFor({ state: 'visible', timeout: 10000 });
-        await headerCheckbox.click();
-        testLogger.info('Clicked select all checkbox');
 
-        // Verify pagination text is visible with fallback — the text may be delayed
-        // when checking the current folder before the move operation completes.
-        // Use a soft check with retry: wait up to 5 s for the pagination summary,
-        // but don't block forever if the UI renders it slightly later.
-        try {
-            await expect(this.page.getByText(/Showing \d+ - \d+ of/)).toBeVisible({ timeout: 5000 });
-        } catch (e) {
-            testLogger.warn('Pagination text not immediately visible, continuing — header checkbox was checked');
+        // ROOT CAUSE (alerts-e2e-flow:160 "Move drawer failed to open"):
+        // AlertList.vue's getAlertsFn() runs `selectedAlerts.value = []` at the START of every
+        // folder fetch. Switching to a freshly-created (uncached) folder kicks off that async
+        // fetch, but navigateToFolder returns as soon as the tab is active + a table is on screen
+        // — so clicking select-all can fire BEFORE the fetch resolves, and when it resolves it
+        // WIPES the selection. The move-across-folders button is `v-if="selectedAlerts.length > 0"`
+        // so it vanishes ("Move button disappeared before click attempt"). A CACHED folder serves
+        // synchronously with no wipe — which is exactly why this historically failed attempt 1 and
+        // passed attempt 2 (retry warmed the cache), and became permanent under parallel load
+        // (slow listByFolderId => the wipe always lands after select-all). networkidle does not
+        // catch it because streaming/websocket keeps connections open.
+        // Fix: wait until the source folder's OWN data has settled (loading gone + the expected row
+        // rendered) so the wipe has already happened, THEN select and confirm the selection sticks.
+
+        // 1) Let the folder's load finish (getAlertsFn resolved) — best-effort, non-blocking.
+        await this.page.locator('[data-test="alert-list-loading-alert"]')
+            .waitFor({ state: 'hidden', timeout: 20000 }).catch(() => {});
+
+        // 2) Wait for the source folder's own rows to render. Prefer the specific expected alert
+        //    (proves right folder + settled data); fall back to any row when no name is given.
+        if (expectAlertName) {
+            await this.page.locator('[data-test^="o2-table-row-"]')
+                .filter({ hasText: expectAlertName }).first()
+                .waitFor({ state: 'visible', timeout: 20000 });
+        } else {
+            await this.page.locator('[data-test^="o2-table-row-"]').first()
+                .waitFor({ state: 'visible', timeout: 20000 });
         }
 
-        // Wait for Vue reactivity to propagate the selection
-        await this.page.waitForTimeout(500);
+        const toastDismissBtn = this.page.locator('button[aria-label="Dismiss notification"]');
+        const moveDrawer = this.page.locator('[data-test="dashboard-move-to-another-folder-dialog"]');
+        const scopedFolderDropdown = moveDrawer.locator(this.locators.folderDropdown);
 
-        // Click move across folders button with retry — header checkbox may not
-        // always propagate `selectedAlerts` on first attempt due to Vue reactivity timing.
-        const moveBtn = this.page.locator(this.locators.moveAcrossFoldersButton);
-        for (let attempt = 1; attempt <= 3; attempt++) {
-            if (await moveBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-                break;
+        // 3) ATOMIC open: (re)select-all → click move → confirm the drawer opened — as ONE retried
+        //    block. A late getAlertsFn resolve can still wipe selectedAlerts AFTER select-all
+        //    (hiding the move button, which is v-if="selectedAlerts.length > 0"), so a fixed
+        //    stability window is not enough. Instead we retry the WHOLE open until the drawer is
+        //    up: the drawer is driven by its own `showMoveAlertDialog` ref and captures the
+        //    selection at click time, so once it opens a later wipe cannot close it. Each
+        //    iteration re-selects if the button vanished, so the operation only needs ONE click
+        //    to land while the selection is valid — which it eventually does once the folder is
+        //    cached and no further fetch fires. Also dismisses toasts that intercept the click.
+        await expect(async () => {
+            // Already open (from a prior iteration whose success check hadn't settled)? Done.
+            if (await moveDrawer.isVisible().catch(() => false)
+                && await scopedFolderDropdown.isVisible().catch(() => false)) {
+                return;
             }
-            testLogger.warn('Move button not visible after header checkbox, re-clicking select-all', { attempt });
-            const headerCheckbox = this.page.locator(this.locators.headerCheckbox).first();
-            if (!(await headerCheckbox.isChecked())) {
+            // Toasts (folder-added, clone-validation errors) render over the button and eat clicks.
+            let dc = await toastDismissBtn.count().catch(() => 0);
+            while (dc > 0) {
+                await toastDismissBtn.first().click({ force: true }).catch(() => {});
+                await this.page.waitForTimeout(150);
+                dc = await toastDismissBtn.count().catch(() => 0);
+            }
+            // Ensure the selection is present (re-tick if a fetch wiped it).
+            if (!(await headerCheckbox.isChecked().catch(() => false))) {
                 await headerCheckbox.click({ force: true });
             }
-            await this.page.waitForTimeout(1000);
-        }
-        await moveBtn.waitFor({ state: 'visible', timeout: 10000 });
-        try {
-            await moveBtn.click({ timeout: 5000 });
-        } catch (e) {
-            testLogger.warn('Move button click failed, retrying with force', { error: e.message });
-            await this.page.waitForTimeout(1000);
+            await expect(moveBtn).toBeVisible({ timeout: 3000 });
             await moveBtn.click({ force: true, timeout: 5000 });
-        }
+            await expect(moveDrawer).toBeVisible({ timeout: 5000 });
+            await expect(scopedFolderDropdown).toBeVisible({ timeout: 5000 });
+        }).toPass({ timeout: 60000 });
+        testLogger.info('Move drawer opened with a valid selection');
 
-        // Handle folder selection with scrolling
-        await this.page.locator(this.locators.folderDropdown).click();
+        await scopedFolderDropdown.click();
         await this.page.waitForTimeout(2000);
 
         await this.commonActions.scrollAndFindOption(targetFolderName, 'folder');
@@ -187,7 +220,7 @@ export class AlertBulkOperations {
         // between the click and the toast check — it would burn the toast's lifetime.
         await this.page.locator(this.locators.moveButton).click();
 
-        await expect(this.page.getByText(this.locators.alertsMovedMessage)).toBeVisible({ timeout: 15000 });
+        await expect(this.page.locator('[data-test-variant="success"] [data-test="o-toast-message"]').filter({ hasText: this.locators.alertsMovedMessage })).toBeVisible({ timeout: 15000 });
         testLogger.info('Move operation confirmed via success message');
 
         // Wait for UI to update
@@ -195,7 +228,7 @@ export class AlertBulkOperations {
 
         // Verify the source folder is now empty by checking for "No data available"
         // This is the expected state after moving ALL alerts from a folder
-        await expect(this.page.getByText(this.locators.noDataAvailableText)).toBeVisible({ timeout: 15000 });
+        await expect(this.page.locator('[data-test="o2-empty-state"]')).toBeVisible({ timeout: 15000 });
 
         testLogger.info('Successfully moved alerts to folder', { targetFolderName });
     }
@@ -272,13 +305,13 @@ export class AlertBulkOperations {
         }
 
         try {
-            const noData = await this.page.getByText('No data available').isVisible({ timeout: 1000 });
+            const noData = await this.page.locator('[data-test="o2-empty-state"]').isVisible({ timeout: 1000 });
             if (noData) {
                 testLogger.debug('No alerts found in folder');
                 return 0;
             }
         } catch (e) {
-            // Neither pagination nor "No data available" found
+            // Neither pagination nor empty state found
         }
 
         return 0;
@@ -314,17 +347,19 @@ export class AlertBulkOperations {
         await kebabButton.waitFor({ state: 'visible', timeout: 5000 });
         await kebabButton.click();
 
+        const deleteOption = this.page.locator(`[data-test="alert-list-${alertName}-delete-alert"]`);
+
         try {
-            await this.page.getByText('Delete', { exact: true }).waitFor({ state: 'visible', timeout: 3000 });
+            await deleteOption.waitFor({ state: 'visible', timeout: 3000 });
         } catch (e) {
             testLogger.warn('Delete option not visible after first kebab click, retrying', { alertName });
             await kebabButton.click();
-            await this.page.getByText('Delete', { exact: true }).waitFor({ state: 'visible', timeout: 5000 });
+            await deleteOption.waitFor({ state: 'visible', timeout: 5000 });
         }
 
-        await this.page.getByText('Delete', { exact: true }).click();
+        await deleteOption.click();
         await this.page.locator(this.locators.confirmButton).click();
-        await expect(this.page.getByText(this.locators.alertDeletedMessage)).toBeVisible();
+        await expect(this.page.locator('[data-test-variant="success"] [data-test="o-toast-message"]').filter({ hasText: this.locators.alertDeletedMessage })).toBeVisible();
         await this.page.waitForTimeout(1000);
     }
 }

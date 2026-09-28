@@ -14,10 +14,8 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
-import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
-
+import { mount } from "@vue/test-utils";
+import { reactive } from "vue";
 // Mock the zincutils utilities completely
 vi.mock("@/utils/zincutils", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
@@ -64,27 +62,16 @@ vi.mock("@/components/CodeQueryEditor.vue", () => ({
   default: {
     name: "CodeQueryEditor",
     template: '<div data-test="code-query-editor">CodeQueryEditor Mock</div>',
-    props: [
-      "query",
-      "editorId",
-      "keywords",
-      "suggestions",
-      "autoComplete",
-      "readOnly",
-      "language",
-    ],
+    props: ["query", "editorId", "keywords", "suggestions", "autoComplete", "readOnly", "language"],
     emits: ["update:query", "updateQuery", "runQuery", "focus", "blur"],
   },
 }));
 
 import DashboardQueryEditor from "@/components/dashboards/addPanel/DashboardQueryEditor.vue";
+import useSqlSuggestions from "@/composables/useSuggestions";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import router from "@/test/unit/helpers/router";
-
-installQuasar({
-  plugins: [Dialog, Notify],
-});
 
 // Create a reactive mock dashboard panel data
 const createMockDashboardPanelData = () => {
@@ -129,7 +116,11 @@ const createMockDashboardPanelData = () => {
   };
 
   return {
-    dashboardPanelData: mockData,
+    // reactive() because the real composable's state is: the component watches
+    // the active query's stream, and a plain object would never fire the
+    // watcher — the test would pass or fail for reasons unrelated to the
+    // component.
+    dashboardPanelData: reactive(mockData),
     promqlMode: false, // Make this a direct boolean instead of ref
     addQuery: vi.fn(() => {
       mockData.data.queries.push({
@@ -170,6 +161,20 @@ vi.mock("@/composables/usePromqlSuggestions", () => ({
 
 vi.mock("@/composables/useSuggestions", () => ({
   default: vi.fn(() => ({
+    // Mirrors the real composable's shape. autoCompleteData carries the stream
+    // context the field-value resolver looks values up under; omitting it here
+    // made every mount throw once the component started setting it.
+    autoCompleteData: {
+      value: {
+        org: "",
+        streamType: "",
+        streamName: "",
+        query: "",
+        cursorIndex: 0,
+        popup: { open: vi.fn(), close: vi.fn() },
+      },
+    },
+    resolveFieldValues: vi.fn(async () => []),
     autoCompleteKeywords: { value: [] },
     autoCompleteSuggestions: { value: [] },
     effectiveKeywords: { value: [] },
@@ -237,11 +242,6 @@ const createFreshMockData = (overrides = {}) => {
 describe("DashboardQueryEditor", () => {
   let wrapper: any;
 
-  const defaultProps = {
-    dashboardPanelData: createFreshMockData(),
-    promqlMode: false,
-  };
-
   beforeEach(() => {
     vi.clearAllMocks();
 
@@ -268,8 +268,7 @@ describe("DashboardQueryEditor", () => {
             template: '<div data-test="query-type-selector"></div>',
           },
           QueryEditor: {
-            template:
-              '<div data-test="code-query-editor">QueryEditor Mock</div>',
+            template: '<div data-test="code-query-editor">QueryEditor Mock</div>',
             props: [
               "query",
               "editorId",
@@ -280,20 +279,6 @@ describe("DashboardQueryEditor", () => {
               "language",
             ],
             emits: ["update:query", "updateQuery", "runQuery"],
-          },
-          "q-tabs": true, // Stub as true to prevent rendering
-          "q-tab": {
-            template: "<div><slot /></div>",
-            props: ["name", "label"],
-          },
-          "q-splitter": {
-            template:
-              '<div><slot name="before"></slot><slot name="after"></slot></div>',
-            props: ["modelValue", "limits", "disable"],
-          },
-          "q-select": {
-            template: '<div data-test="vrl-function-select"></div>',
-            props: ["modelValue", "options"],
           },
         },
         mocks: {
@@ -309,17 +294,13 @@ describe("DashboardQueryEditor", () => {
     it("should render query editor container", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.find('[data-test="dashboard-panel-searchbar"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-panel-searchbar"]').exists()).toBe(true);
     });
 
     it("should render basic query data container", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.find('[data-test="dashboard-query-data"]').exists()).toBe(
-        true,
-      );
+      expect(wrapper.find('[data-test="dashboard-query-data"]').exists()).toBe(true);
     });
   });
 
@@ -332,9 +313,7 @@ describe("DashboardQueryEditor", () => {
 
       // Since promqlMode is false and type is 'line', tabs should not exist
       // Let's just test that the component works properly
-      expect(
-        wrapper.find('[data-test="dashboard-panel-searchbar"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-panel-searchbar"]').exists()).toBe(true);
     });
 
     it("should handle different panel types gracefully", () => {
@@ -356,9 +335,7 @@ describe("DashboardQueryEditor", () => {
     it("should track VRL function toggle state", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle).toBe(
-        false,
-      );
+      expect(wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle).toBe(false);
     });
   });
 
@@ -375,15 +352,9 @@ describe("DashboardQueryEditor", () => {
 
   describe("Edge Cases", () => {
     it("should handle empty queries array", () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, "warn")
-        .mockImplementation(() => {});
-      const consoleLogSpy = vi
-        .spyOn(console, "log")
-        .mockImplementation(() => {});
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const emptyQueriesPanelData = {
         ...mockDashboardPanelData,
@@ -400,15 +371,9 @@ describe("DashboardQueryEditor", () => {
     });
 
     it("should handle missing panel data gracefully", () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, "warn")
-        .mockImplementation(() => {});
-      const consoleLogSpy = vi
-        .spyOn(console, "log")
-        .mockImplementation(() => {});
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       // Don't pass null, just minimal data
       const minimalData = {
@@ -465,11 +430,57 @@ describe("DashboardQueryEditor", () => {
       expect(wrapper.vm.dashboardPanelData.layout.currentQueryIndex).toBe(1);
     });
 
+    // The field-value resolver looks values up under "org|streamType|
+    // streamName|field". This panel never set any of the three, so its
+    // resolver could only ever return [] — a working editor with value
+    // completion silently absent. Per QUERY, not per panel: each tab has its
+    // own stream and a stale context would offer the previous tab's values.
+    const sqlAutoCompleteData = () =>
+      (useSqlSuggestions as any).mock.results.at(-1).value.autoCompleteData.value;
+
+    it("publishes the active query's stream as the field-value lookup context", async () => {
+      wrapper = createWrapper();
+      wrapper.vm.dashboardPanelData.data.queries[0].fields = {
+        stream: "app_logs",
+        stream_type: "logs",
+      };
+      await wrapper.vm.$nextTick();
+
+      expect(sqlAutoCompleteData()).toMatchObject({
+        org: "test-org",
+        streamType: "logs",
+        streamName: "app_logs",
+      });
+    });
+
+    it("follows the stream when the user switches query tabs", async () => {
+      wrapper = createWrapper();
+      wrapper.vm.dashboardPanelData.data.queries[0].fields = {
+        stream: "app_logs",
+        stream_type: "logs",
+      };
+      wrapper.vm.dashboardPanelData.data.queries.push({
+        query: "",
+        queryType: "sql",
+        customQuery: true,
+        fields: { stream: "app_metrics", stream_type: "metrics" },
+      });
+      await wrapper.vm.$nextTick();
+
+      wrapper.vm.dashboardPanelData.layout.currentQueryIndex = 1;
+      await wrapper.vm.$nextTick();
+
+      expect(sqlAutoCompleteData()).toMatchObject({
+        streamType: "metrics",
+        streamName: "app_metrics",
+      });
+    });
+
     it("should handle query editor configuration", () => {
       wrapper = createWrapper();
 
       // Test query editor container exists
-      const queryContainer = wrapper.find(".query-data");
+      const queryContainer = wrapper.find('[data-test="dashboard-query-data"]');
       expect(queryContainer.exists() || wrapper.exists()).toBe(true);
     });
 
@@ -482,9 +493,7 @@ describe("DashboardQueryEditor", () => {
         "SELECT * FROM logs WHERE level='ERROR'";
 
       expect(wrapper.exists()).toBe(true);
-      expect(wrapper.vm.dashboardPanelData.data.queries[0].queryType).toBe(
-        "sql",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.queries[0].queryType).toBe("sql");
     });
 
     it("should handle PromQL mode queries", () => {
@@ -492,13 +501,10 @@ describe("DashboardQueryEditor", () => {
 
       // Set PromQL query - the component gets promqlMode from the composable, not props
       wrapper.vm.dashboardPanelData.data.queries[0].queryType = "promql";
-      wrapper.vm.dashboardPanelData.data.queries[0].query =
-        "rate(http_requests_total[5m])";
+      wrapper.vm.dashboardPanelData.data.queries[0].query = "rate(http_requests_total[5m])";
 
       expect(wrapper.exists()).toBe(true);
-      expect(wrapper.vm.dashboardPanelData.data.queries[0].queryType).toBe(
-        "promql",
-      );
+      expect(wrapper.vm.dashboardPanelData.data.queries[0].queryType).toBe("promql");
     });
   });
 
@@ -506,16 +512,13 @@ describe("DashboardQueryEditor", () => {
     it("should toggle VRL function state", async () => {
       wrapper = createWrapper();
 
-      const initialState =
-        wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle;
+      const initialState = wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle;
 
       // Simulate VRL function toggle
       wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle = !initialState;
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle).toBe(
-        !initialState,
-      );
+      expect(wrapper.vm.dashboardPanelData.layout.vrlFunctionToggle).toBe(!initialState);
     });
 
     it("should handle VRL function dropdown interactions", async () => {
@@ -532,12 +535,8 @@ describe("DashboardQueryEditor", () => {
     });
 
     it("should handle function template loading", async () => {
-      const consoleLogSpy = vi
-        .spyOn(console, "log")
-        .mockImplementation(() => {});
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       wrapper = createWrapper();
 
@@ -558,10 +557,10 @@ describe("DashboardQueryEditor", () => {
     it("should render code query editor", () => {
       wrapper = createWrapper();
 
-      // Check for code editor elements
+      // Check for code editor elements via data-test or component lookup
       const hasCodeEditor =
-        wrapper.find(".monaco-editor").exists() ||
-        wrapper.findComponent("CodeQueryEditor").exists() ||
+        wrapper.find('[data-test="dashboard-query-editor"]').exists() ||
+        wrapper.findComponent({ name: "CodeQueryEditor" }).exists() ||
         wrapper.exists(); // Fallback
 
       expect(hasCodeEditor).toBe(true);
@@ -570,19 +569,16 @@ describe("DashboardQueryEditor", () => {
     it("should handle editor configuration", () => {
       wrapper = createWrapper();
 
-      // Test editor configuration
-      const splitter = wrapper.find("q-splitter");
+      // Test editor configuration via the splitter component lookup
+      const splitter = wrapper.findComponent({ name: "OSplitter" });
       expect(splitter.exists() || wrapper.exists()).toBe(true);
     });
 
     it("should handle query text changes", async () => {
       wrapper = createWrapper();
 
-      const initialQuery = wrapper.vm.dashboardPanelData.data.queries[0].query;
-
       // Simulate query change
-      wrapper.vm.dashboardPanelData.data.queries[0].query =
-        "SELECT * FROM updated_table";
+      wrapper.vm.dashboardPanelData.data.queries[0].query = "SELECT * FROM updated_table";
       await wrapper.vm.$nextTick();
 
       expect(wrapper.vm.dashboardPanelData.data.queries[0].query).toBe(
@@ -618,15 +614,9 @@ describe("DashboardQueryEditor", () => {
     });
 
     it("should handle chart panel types", () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, "warn")
-        .mockImplementation(() => {});
-      const consoleLogSpy = vi
-        .spyOn(console, "log")
-        .mockImplementation(() => {});
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       const chartTypes = ["line", "bar", "area", "scatter", "pie"];
 
@@ -660,8 +650,6 @@ describe("DashboardQueryEditor", () => {
     it("should handle component updates efficiently", async () => {
       wrapper = createWrapper();
 
-      const initialRenderCount = wrapper.vm.$el ? 1 : 0;
-
       // Update panel data
       wrapper.vm.dashboardPanelData.data.queries[0].query = "Updated query";
       await wrapper.vm.$nextTick();
@@ -678,9 +666,7 @@ describe("DashboardQueryEditor", () => {
       await wrapper.vm.$nextTick();
 
       expect(wrapper.exists()).toBe(true);
-      expect(wrapper.vm.dashboardPanelData.data.queries[0].query).toBe(
-        largeQuery,
-      );
+      expect(wrapper.vm.dashboardPanelData.data.queries[0].query).toBe(largeQuery);
     });
 
     it("should handle rapid state changes", async () => {
@@ -706,15 +692,9 @@ describe("DashboardQueryEditor", () => {
         },
       };
 
-      const consoleWarnSpy = vi
-        .spyOn(console, "warn")
-        .mockImplementation(() => {});
-      const consoleLogSpy = vi
-        .spyOn(console, "log")
-        .mockImplementation(() => {});
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleWarnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       wrapper = createWrapper({ dashboardPanelData: malformedData });
 
@@ -726,12 +706,8 @@ describe("DashboardQueryEditor", () => {
     });
 
     it("should handle component unmounting gracefully", () => {
-      const consoleLogSpy = vi
-        .spyOn(console, "log")
-        .mockImplementation(() => {});
-      const consoleErrorSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
+      const consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
       wrapper = createWrapper();
 

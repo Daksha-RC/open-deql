@@ -15,178 +15,290 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-dialog v-model="show" position="right" full-height maximized>
-    <q-card style="width: 600px" class="flex column">
-      <q-card-section class="q-px-md q-py-sm">
-        <div class="row items-center no-wrap">
-          <div class="col">
-            <div class="text-body1 text-bold">Add Dashboard from Gallery</div>
-          </div>
-          <div class="col-auto">
-            <q-btn
-              v-close-popup
-              round
-              flat
-              icon="cancel"
-              data-test="add-dashboard-github-close"
+  <ODrawer
+    data-test="add-dashboard-from-github-drawer"
+    v-model:open="show"
+    side="right"
+    size="xl"
+    :title="t('dashboard.addDashboardFromGitHub.title')"
+    :secondary-button-label="t('dashboard.addDashboardFromGitHub.cancel')"
+    :primary-button-label="primaryButtonLabel"
+    :primary-button-disabled="selectedDashboards.length === 0"
+    :primary-button-loading="preparing"
+    bleed
+    @click:secondary="show = false"
+    @click:primary="handleNext"
+  >
+    <!-- Loading -->
+    <div
+      v-if="loading"
+      class="px-page-edge flex min-h-80 flex-col items-center justify-center gap-3"
+    >
+      <OSpinner size="lg" />
+      <OText variant="meta">{{ t("dashboard.addDashboardFromGitHub.loading") }}</OText>
+    </div>
+
+    <!-- Error -->
+    <OEmptyState
+      v-else-if="error"
+      preset="load-error"
+      size="hero"
+      :description="raw(error)"
+      :action-label="t('dashboard.addDashboardFromGitHub.retry')"
+      @action="loadDashboards"
+    />
+
+    <!-- Gallery. The drawer body is `bleed` (no padding) so the sticky toolbar
+         can pin flush at the very top of the drawer's own scroll — with the
+         default body inset it pinned below the padding and cards peeked into
+         that strip. We re-add the horizontal inset (px-page-edge) ourselves. -->
+    <div v-else class="flex flex-col">
+      <!-- Toolbar — sticks flush to the top; its opaque bg covers cards that
+           scroll underneath. Keeps the drawer's own scroll shadow. -->
+      <div class="bg-dialog-bg px-page-edge sticky top-0 z-20 flex flex-col gap-2 pt-3 pb-2">
+        <OSearchInput
+          v-model="searchQuery"
+          :placeholder="t('dashboard.addDashboardFromGitHub.searchPlaceholder')"
+          clearable
+          data-test="add-dashboard-github-search"
+          class="w-full"
+        />
+        <!-- Fixed-height meta row: 'available' pinned right, 'selected' badge
+             appears to its left so neither the search nor the count ever shifts. -->
+        <div class="flex min-h-6 items-center justify-end gap-2 whitespace-nowrap">
+          <OTag v-if="selectedDashboards.length" variant="primary-soft" size="xs">
+            {{
+              t("dashboard.addDashboardFromGitHub.selectedCount", {
+                count: selectedDashboards.length,
+              })
+            }}
+          </OTag>
+          <OText variant="meta">{{
+            t("dashboard.addDashboardFromGitHub.dashboardsAvailable", {
+              count: filteredDashboards.length,
+            })
+          }}</OText>
+        </div>
+      </div>
+
+      <!-- Empty search -->
+      <OEmptyState
+        v-if="!filteredDashboards.length"
+        preset="no-search-results"
+        size="hero"
+        filtered
+        class="px-page-edge"
+        @action="searchQuery = ''"
+      />
+
+      <!-- Grouped sections -->
+      <div v-else class="px-page-edge flex flex-col gap-6 pb-3">
+        <div
+          v-for="[category, items] in groupedDashboards"
+          :key="category"
+          class="flex flex-col gap-2"
+        >
+          <!-- Group header — sticks just below the toolbar while its category
+               scrolls (top ≈ toolbar height 5.375rem, tucked slightly under). -->
+          <div
+            class="bg-dialog-bg border-border-default sticky top-21 z-10 flex items-center gap-2 border-b pt-0.5 pb-1.5"
+          >
+            <OTag
+              :variant="getCategoryInfo(items[0]).variant"
+              :icon="getCategoryInfo(items[0]).icon"
+              size="sm"
             />
-          </div>
-        </div>
-      </q-card-section>
-      <q-separator />
-
-      <q-card-section class="q-pt-md dashboard-content-section">
-        <!-- Loading State -->
-        <div v-if="loading" class="tw:flex tw:flex-1 tw:items-center tw:justify-center">
-          <q-spinner color="primary" size="3em" />
-        </div>
-
-        <!-- Error State -->
-        <div v-else-if="error" class="tw:flex tw:flex-1 tw:flex-col tw:items-center tw:justify-center tw:text-center">
-          <q-icon name="error_outline" size="3em" color="negative" class="tw:mb-2" />
-          <div class="text-negative">{{ error }}</div>
-          <q-btn flat dense label="Retry" @click="loadDashboards" class="o2-primary-button tw:h-[36px] tw:mt-4"
-            :class="store.state.theme === 'dark' ? 'o2-primary-button-dark' : 'o2-primary-button-light'" />
-        </div>
-
-        <!-- Dashboard List -->
-        <div v-else class="tw:flex tw:flex-col tw:flex-1 tw:overflow-hidden">
-          <q-input v-model="searchQuery" placeholder="Search dashboards..." dense clearable class="tw:mb-4"
-            data-test="add-dashboard-github-search">
-            <template #prepend>
-              <q-icon name="search" />
-            </template>
-          </q-input>
-
-          <div class="tw:text-xs tw:text-gray-500 tw:mb-2 tw:px-1">
-            {{ filteredDashboards.length }} dashboard(s) available
+            <OText variant="label" class="font-semibold">{{ categoryLabel(category) }}</OText>
+            <OTag variant="default-soft" size="xs">{{ items.length }}</OTag>
           </div>
 
-          <q-list :bordered="filteredDashboards.length > 0" dense class="rounded-borders dashboard-list">
-            <q-item v-for="dashboard in filteredDashboards" :key="dashboard.name" clickable v-ripple dense
-              @click="toggleDashboard(dashboard)" class="tw:py-1 tw:transition-colors tw:duration-200" :class="[
+          <!-- 2-column card grid for this group -->
+          <div class="grid grid-cols-2 content-start gap-1.5">
+            <div
+              v-for="dashboard in items"
+              :key="dashboard.name"
+              role="button"
+              tabindex="0"
+              :aria-pressed="isSelected(dashboard)"
+              class="rounded-default focus-visible:ring-accent flex min-w-0 cursor-pointer items-center gap-3 border px-3 py-2.5 transition-colors select-none focus-visible:ring-2 focus-visible:outline-none"
+              :class="
                 isSelected(dashboard)
-                  ? 'selected-item tw:bg-primary/5 tw:border-l-4 tw:border-primary'
-                  : 'tw:border-l-4 tw:border-transparent hover:tw:bg-gray-50'
-              ]" data-test="add-dashboard-github-item">
-              <q-item-section side class="tw:pr-2">
-                <q-checkbox :model-value="isSelected(dashboard)" @update:model-value="toggleDashboard(dashboard)"
-                  color="primary" dense />
-              </q-item-section>
-              <q-item-section>
-                <q-item-label class="text-weight-medium tw:text-sm">
-                  {{ dashboard.displayName }}
-                </q-item-label>
-                <q-item-label caption v-if="dashboard.description" class="tw:text-xs">
-                  {{ dashboard.description }}
-                </q-item-label>
-              </q-item-section>
-            </q-item>
-          </q-list>
+                  ? 'border-accent bg-surface-accent-hover'
+                  : 'border-border-default bg-surface-base hover:border-accent'
+              "
+              data-test="add-dashboard-github-item"
+              @click="toggleDashboard(dashboard)"
+              @keydown.enter.prevent="toggleDashboard(dashboard)"
+              @keydown.space.prevent="toggleDashboard(dashboard)"
+            >
+              <span class="text-text-heading min-w-0 flex-1 truncate text-sm font-medium">{{
+                dashboard.displayName
+              }}</span>
+              <OCheckbox
+                :model-value="isSelected(dashboard)"
+                size="sm"
+                class="pointer-events-none shrink-0"
+              />
+            </div>
+          </div>
         </div>
-      </q-card-section>
-
-      <q-separator />
-
-      <q-card-section class="q-py-sm dashboard-footer-section">
-        <div class="flex justify-end q-gutter-x-sm">
-          <q-btn flat dense label="Cancel" v-close-popup data-test="add-dashboard-github-cancel"
-            class="o2-secondary-button tw:h-[36px]"
-            :class="store.state.theme === 'dark' ? 'o2-secondary-button-dark' : 'o2-secondary-button-light'" />
-          <q-btn flat dense :label="`Next (${selectedDashboards.length})`" :disable="selectedDashboards.length === 0"
-            @click="handleNext" data-test="add-dashboard-github-next" class="o2-primary-button tw:h-[36px]"
-            :class="store.state.theme === 'dark' ? 'o2-primary-button-dark' : 'o2-primary-button-light'" />
-        </div>
-      </q-card-section>
-    </q-card>
+      </div>
+    </div>
 
     <!-- Folder Selection Dialog -->
-    <q-dialog v-model="showFolderSelection" persistent>
-      <q-card style="min-width: 500px; max-width: 600px" class="tw:rounded-xl">
-        <q-card-section class="q-py-md">
-          <div class="text-h6 tw:font-bold">Select Destination Folder</div>
-        </q-card-section>
+    <ODialog
+      data-test="add-dashboard-from-github-folder-selection-dialog"
+      v-model:open="showFolderSelection"
+      persistent
+      size="sm"
+      :title="t('dashboard.addDashboardFromGitHub.selectFolderTitle')"
+      :secondary-button-label="t('dashboard.addDashboardFromGitHub.back')"
+      :primary-button-label="t('dashboard.addDashboardFromGitHub.addDashboard')"
+      :primary-button-disabled="!selectedFolderObj"
+      :primary-button-loading="importing"
+      @click:secondary="showFolderSelection = false"
+      @click:primary="confirmAdd"
+    >
+      <div class="flex items-end gap-2">
+        <OSelect
+          v-model="selectedFolderObj"
+          :options="folderOptions"
+          :label="t('dashboard.addDashboardFromGitHub.folder')"
+          class="grow"
+          data-test="add-dashboard-github-folder-select"
+        />
+        <div class="mb-0.5 w-10">
+          <OButton
+            variant="outline"
+            size="icon-xs"
+            icon-left="add"
+            @click="showAddFolderDialog = true"
+            data-test="add-dashboard-github-add-folder"
+            :title="t('dashboard.addDashboardFromGitHub.addNewFolder')"
+          />
+        </div>
+      </div>
+    </ODialog>
 
-        <q-card-section class="q-pt-none">
-          <div class="tw:flex tw:items-center tw:gap-2">
-            <q-select v-model="selectedFolderObj" :options="folderOptions" label="Folder" outlined dense
-              class="tw:grow o2-custom-select-dashboard" data-test="add-dashboard-github-folder-select">
-              <template v-slot:selected>
-                <span v-if="selectedFolderObj">{{ selectedFolderObj.label }}</span>
-              </template>
-            </q-select>
-            <q-btn flat dense @click="showAddFolderDialog = true" data-test="add-dashboard-github-add-folder"
-              title="Add New Folder" class="tw:bg-gray-100 hover:tw:bg-gray-200 tw:rounded-lg"
-              :class="store.state.theme === 'dark' ? 'o2-secondary-button-dark' : 'o2-secondary-button-light'">
-              <q-icon name="add" size="sm" />
-            </q-btn>
-          </div>
-        </q-card-section>
-
-        <q-card-actions align="right" class="q-px-md q-pb-md">
-          <q-btn flat dense label="Back" @click="showFolderSelection = false" class="o2-secondary-button tw:h-[36px]"
-            :class="store.state.theme === 'dark' ? 'o2-secondary-button-dark' : 'o2-secondary-button-light'" />
-          <q-btn flat dense label="Add Dashboard" :disable="!selectedFolderObj" @click="confirmAdd" :loading="importing"
-            data-test="add-dashboard-github-confirm" class="o2-primary-button tw:h-[36px]"
-            :class="store.state.theme === 'dark' ? 'o2-primary-button-dark' : 'o2-primary-button-light'" />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
+    <!-- Replace Confirmation Dialog -->
+    <ODialog
+      data-test="add-dashboard-github-replace-confirm"
+      :open="!!replaceConfirm"
+      persistent
+      size="sm"
+      :title="t('dashboard.addDashboardFromGitHub.replaceTitle')"
+      :primary-button-label="t('dashboard.addDashboardFromGitHub.replaceConfirm')"
+      :secondary-button-label="t('dashboard.addDashboardFromGitHub.replaceSkip')"
+      primary-button-variant="destructive"
+      @update:open="(open: boolean) => !open && resolveReplaceConfirm(false)"
+      @click:primary="resolveReplaceConfirm(true)"
+      @click:secondary="resolveReplaceConfirm(false)"
+    >
+      <OText>{{
+        t("dashboard.addDashboardFromGitHub.replaceMessage", {
+          title: replaceConfirm?.title ?? "",
+        })
+      }}</OText>
+    </ODialog>
 
     <!-- Add Folder Dialog -->
-    <q-dialog v-model="showAddFolderDialog" position="right" full-height maximized
-      data-test="add-dashboard-github-add-folder-dialog">
-      <div style="width: 600px" class="full-height">
-        <AddFolder @update:modelValue="updateFolderList" :edit-mode="false" />
-      </div>
-    </q-dialog>
-  </q-dialog>
+    <ODialog
+      v-model:open="showAddFolderDialog"
+      size="sm"
+      :title="t('dashboard.addDashboardFromGitHub.addNewFolder')"
+      :primary-button-label="t('dashboard.addDashboardFromGitHub.save')"
+      :secondary-button-label="t('dashboard.addDashboardFromGitHub.cancel')"
+      form-id="add-folder-dashboards-form"
+      @click:secondary="showAddFolderDialog = false"
+      data-test="add-dashboard-github-add-folder-dialog"
+    >
+      <AddFolder
+        ref="addFolderRef"
+        @update:modelValue="updateFolderList"
+        @close="showAddFolderDialog = false"
+        :edit-mode="false"
+      />
+    </ODialog>
+  </ODrawer>
 </template>
 
 <script lang="ts">
-import { defineComponent, ref, computed, watch } from 'vue';
-import { useStore } from 'vuex';
-import { useQuasar } from 'quasar';
-import dashboardsService from '@/services/dashboards';
-import AddFolder from '@/components/dashboards/AddFolder.vue';
+import { defineComponent, ref, computed, watch } from "vue";
+import { useStore } from "vuex";
+import { raw, useI18nTyped, type I18nText } from "@/types/i18n";
+import dashboardsService from "@/services/dashboards";
+import {
+  useDashboardGallery,
+  getCategoryInfo,
+  parseS3Files,
+  CATEGORY_ORDER,
+  S3_BASE,
+  S3_PREFIX,
+  type GalleryDashboard,
+} from "@/composables/useDashboardGallery";
+import AddFolder from "@/components/dashboards/AddFolder.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OText from "@/lib/core/Typography/OText.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import ODialog from "@/lib/overlay/Dialog/ODialog.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
+import OSelect from "@/lib/forms/Select/OSelect.vue";
+import OCheckbox from "@/lib/forms/Checkbox/OCheckbox.vue";
+import OSpinner from "@/lib/feedback/Spinner/OSpinner.vue";
+import { toast } from "@/lib/feedback/Toast/useToast";
 
-interface GitHubDashboard {
-  name: string;
-  displayName: string;
-  description?: string;
-  folderPath: string;
-  jsonFiles: string[];
-}
+type GitHubDashboard = GalleryDashboard;
 
 export default defineComponent({
-  name: 'AddDashboardFromGitHub',
-  components: { AddFolder },
+  name: "AddDashboardFromGitHub",
+  components: {
+    AddFolder,
+    OButton,
+    OText,
+    OTag,
+    OEmptyState,
+    ODialog,
+    ODrawer,
+    OSearchInput,
+    OSelect,
+    OCheckbox,
+    OSpinner,
+  },
   props: {
     modelValue: {
       type: Boolean,
       required: true,
     },
+    /** Pre-seeds the gallery search box on open (workload pages, design 4.9). */
+    initialSearch: {
+      type: String,
+      default: "",
+    },
   },
-  emits: ['update:modelValue', 'added'],
+  emits: ["update:modelValue", "added"],
   setup(props, { emit }) {
     const store = useStore();
-    const q = useQuasar();
+    const { t } = useI18nTyped();
 
     const show = computed({
       get: () => props.modelValue,
-      set: (val) => emit('update:modelValue', val),
+      set: (val) => emit("update:modelValue", val),
     });
 
-    const loading = ref(false);
-    const error = ref('');
-    const dashboards = ref<GitHubDashboard[]>([]);
-    const searchQuery = ref('');
+    const { dashboards, loading, error, loadDashboards } = useDashboardGallery();
+    const searchQuery = ref(props.initialSearch ?? "");
     const selectedDashboards = ref<GitHubDashboard[]>([]);
     const showFolderSelection = ref(false);
-    const selectedFolderObj = ref<{ label: string; value: string } | null>(null);
-    const folderOptions = ref<{ label: string; value: string }[]>([]);
+    const selectedFolderObj = ref<string | null>(null);
+    const folderOptions = ref<{ label: I18nText; value: string }[]>([]);
     const importing = ref(false);
+    const preparing = ref(false);
     const showAddFolderDialog = ref(false);
+    // The Add Folder dialog submits natively via form-id="add-folder-dashboards-form";
+    // this ref only anchors the child instance.
+    const addFolderRef = ref<InstanceType<typeof AddFolder> | null>(null);
 
     const filteredDashboards = computed(() => {
       if (!searchQuery.value) return dashboards.value;
@@ -194,65 +306,51 @@ export default defineComponent({
       return dashboards.value.filter(
         (d) =>
           d.displayName.toLowerCase().includes(query) ||
-          d.description?.toLowerCase().includes(query)
+          d.description?.toLowerCase().includes(query),
       );
     });
 
+    // Primary button reflects the current selection count.
+    const primaryButtonLabel = computed(() =>
+      selectedDashboards.value.length
+        ? t("dashboard.addDashboardFromGitHub.addCount", {
+            count: selectedDashboards.value.length,
+          })
+        : t("dashboard.addDashboardFromGitHub.selectPrompt"),
+    );
+
+    // Translated display label for a category key.
+    const categoryLabel = (category: string) =>
+      t(`dashboard.addDashboardFromGitHub.category.${category}`);
+
+    // Group filtered dashboards by category for the gallery view
+    const groupedDashboards = computed(() => {
+      const groups: Record<string, GitHubDashboard[]> = {};
+      for (const d of filteredDashboards.value) {
+        const cat = getCategoryInfo(d).category;
+        (groups[cat] = groups[cat] || []).push(d);
+      }
+      // Sort groups by preferred order, then alphabetically
+      return Object.entries(groups).sort(([a], [b]) => {
+        const ai = CATEGORY_ORDER.indexOf(a);
+        const bi = CATEGORY_ORDER.indexOf(b);
+        if (ai !== -1 && bi !== -1) return ai - bi;
+        if (ai !== -1) return -1;
+        if (bi !== -1) return 1;
+        return a.localeCompare(b);
+      });
+    });
+
     const isSelected = (dashboard: GitHubDashboard) => {
-      return selectedDashboards.value.some(d => d.name === dashboard.name);
+      return selectedDashboards.value.some((d) => d.name === dashboard.name);
     };
 
     const toggleDashboard = (dashboard: GitHubDashboard) => {
-      const index = selectedDashboards.value.findIndex(d => d.name === dashboard.name);
+      const index = selectedDashboards.value.findIndex((d) => d.name === dashboard.name);
       if (index > -1) {
         selectedDashboards.value.splice(index, 1);
       } else {
         selectedDashboards.value.push(dashboard);
-      }
-    };
-
-    const loadDashboards = async () => {
-      loading.value = true;
-      error.value = '';
-      try {
-        // Check if we have cached data that's still valid
-        const cache = store.state.githubDashboardGallery;
-        const now = Date.now();
-        const cacheAge = cache.lastFetched ? now - cache.lastFetched : Infinity;
-
-        if (cache.dashboards.length > 0 && cacheAge < cache.cacheExpiry) {
-          // Use cached data
-          dashboards.value = cache.dashboards;
-          loading.value = false;
-          return;
-        }
-
-        // Cache miss or expired - fetch from GitHub
-        const response = await fetch(
-          'https://api.github.com/repos/openobserve/dashboards/contents'
-        );
-        if (!response.ok) throw new Error('Failed to fetch dashboards from gallery');
-
-        const folders = await response.json();
-
-        // Filter for directories only
-        const dirFolders = folders.filter((item: any) => item.type === 'dir' && !item.name.startsWith('.'));
-
-        // Create dashboard entries for all folders - we'll fetch JSON files lazily
-        const dashboardList = dirFolders.map((folder: any) => ({
-          name: folder.name,
-          displayName: folder.name.replace(/_/g, ' '),
-          folderPath: folder.name,
-          jsonFiles: [], // Will be populated when selected
-        })).sort((a: any, b: any) => a.displayName.localeCompare(b.displayName));
-
-        // Update cache in Vuex store
-        store.commit('setGithubDashboardGallery', dashboardList);
-        dashboards.value = dashboardList;
-      } catch (err) {
-        error.value = err instanceof Error ? err.message : 'Failed to load dashboard gallery';
-      } finally {
-        loading.value = false;
       }
     };
 
@@ -263,11 +361,15 @@ export default defineComponent({
         let folders: any[] = response.data?.list || [];
 
         // Ensure default folder is always present and pinned at top (same as getFoldersList in commons.ts)
-        let defaultFolder = folders.find((f: any) => f.folderId === 'default');
-        folders = folders.filter((f: any) => f.folderId !== 'default');
+        let defaultFolder = folders.find((f: any) => f.folderId === "default");
+        folders = folders.filter((f: any) => f.folderId !== "default");
 
         if (!defaultFolder) {
-          defaultFolder = { name: 'default', folderId: 'default', description: 'default' };
+          defaultFolder = {
+            name: "default",
+            folderId: "default",
+            description: "default",
+          };
         }
 
         const sorted = [
@@ -276,41 +378,51 @@ export default defineComponent({
         ];
 
         folderOptions.value = sorted.map((f: any) => ({
-          label: f.name,
+          label: raw(f.name),
           value: f.folderId,
         }));
 
-        // Don't auto-select - let user choose
-        selectedFolderObj.value = null;
+        // Auto-select the default folder; preserve existing selection if still valid
+        if (
+          !selectedFolderObj.value ||
+          !folderOptions.value.some((o) => o.value === selectedFolderObj.value)
+        ) {
+          selectedFolderObj.value =
+            sorted.find((f: any) => f.folderId === "default")?.folderId ??
+            sorted[0]?.folderId ??
+            null;
+        }
       } catch (err) {
-        console.error('Error loading folders:', err);
+        console.error("Error loading folders:", err);
       }
     };
 
     const handleNext = async () => {
       if (selectedDashboards.value.length === 0) return;
 
-      loading.value = true;
+      // Keep the gallery visible and show the spinner on the primary button
+      // while we fetch each selection's JSON files, then open the folder dialog.
+      preparing.value = true;
       try {
         // Fetch JSON files for selected dashboards if not already loaded
         for (const dashboard of selectedDashboards.value) {
           if (dashboard.jsonFiles.length === 0) {
             try {
               const folderContents = await fetch(
-                `https://api.github.com/repos/openobserve/dashboards/contents/${dashboard.folderPath}`
+                `${S3_BASE}/?list-type=2&prefix=${S3_PREFIX}${dashboard.folderPath}/&delimiter=/`,
               );
               if (folderContents.ok) {
-                const files = await folderContents.json();
-                dashboard.jsonFiles = files
-                  .filter((file: any) => file.type === 'file' && file.name.endsWith('.json'))
-                  .map((file: any) => file.name);
+                const xmlText = await folderContents.text();
+                dashboard.jsonFiles = parseS3Files(xmlText, dashboard.folderPath);
 
                 // Update the cache with the fetched JSON files
                 const cache = store.state.githubDashboardGallery;
-                const cachedDashboard = cache.dashboards.find((d: any) => d.name === dashboard.name);
+                const cachedDashboard = cache.dashboards.find(
+                  (d: any) => d.name === dashboard.name,
+                );
                 if (cachedDashboard) {
                   cachedDashboard.jsonFiles = dashboard.jsonFiles;
-                  store.commit('setGithubDashboardGallery', cache.dashboards);
+                  store.commit("setGithubDashboardGallery", cache.dashboards);
                 }
               }
             } catch (err) {
@@ -322,7 +434,7 @@ export default defineComponent({
         await loadFolders();
         showFolderSelection.value = true;
       } finally {
-        loading.value = false;
+        preparing.value = false;
       }
     };
 
@@ -332,27 +444,40 @@ export default defineComponent({
         // Refresh folder list
         await loadFolders();
         // Auto-select the newly created folder
-        selectedFolderObj.value = {
-          label: newFolder.data.name,
-          value: newFolder.data.folderId,
-        };
+        selectedFolderObj.value = newFolder.data.folderId;
       }
+    };
+
+    // Closing the drawer must stop the batch — not just unpark the current confirm.
+    let importCancelled = false;
+    // Replace-on-import needs an explicit user confirm (design 4.3); the import loop parks here.
+    const replaceConfirm = ref<{ title: string; resolve: (ok: boolean) => void } | null>(null);
+    const requestReplaceConfirm = (title: string) =>
+      new Promise<boolean>((resolve) => {
+        replaceConfirm.value = { title, resolve };
+      });
+    const resolveReplaceConfirm = (ok: boolean) => {
+      replaceConfirm.value?.resolve(ok);
+      replaceConfirm.value = null;
     };
 
     const confirmAdd = async () => {
       if (selectedDashboards.value.length === 0 || !selectedFolderObj.value) return;
 
       importing.value = true;
+      importCancelled = false;
       try {
         const orgId = store.state.selectedOrganization.identifier;
-        const folderId = selectedFolderObj.value.value;
+        const folderId = selectedFolderObj.value;
         let successCount = 0;
         let failCount = 0;
         const errors: string[] = [];
 
         // Import each selected dashboard and all its JSON files
         for (const dashboard of selectedDashboards.value) {
+          if (importCancelled) break;
           for (const jsonFile of dashboard.jsonFiles) {
+            if (importCancelled) break;
             try {
               // Check cache first
               const cacheKey = `${dashboard.folderPath}/${jsonFile}`;
@@ -363,42 +488,56 @@ export default defineComponent({
                 // Use cached JSON
                 dashboardJson = jsonCache[cacheKey];
               } else {
-                // Download dashboard JSON from GitHub
-                const rawUrl = `https://raw.githubusercontent.com/openobserve/dashboards/main/${dashboard.folderPath}/${jsonFile}`;
+                // Download dashboard JSON from S3
+                const rawUrl = `${S3_BASE}/${S3_PREFIX}${dashboard.folderPath}/${jsonFile}`;
                 const response = await fetch(rawUrl);
                 if (!response.ok) {
-                  throw new Error(`Failed to fetch ${jsonFile}: ${response.statusText}`);
+                  throw new Error(
+                    t("dashboard.addDashboardFromGitHub.fetchFileError", {
+                      file: jsonFile,
+                      status: response.statusText,
+                    }),
+                  );
                 }
                 dashboardJson = await response.json();
 
                 // Cache the JSON for future use
-                store.commit('setDashboardJsonCache', { key: cacheKey, json: dashboardJson });
+                store.commit("setDashboardJsonCache", {
+                  key: cacheKey,
+                  json: dashboardJson,
+                });
               }
 
-              const dashboardTitle = dashboardJson.title || jsonFile.replace('.json', '');
+              const dashboardTitle = dashboardJson.title || jsonFile.replace(".json", "");
 
               // Check if dashboard already exists in the selected folder
               const dashboardsResponse = await dashboardsService.list(
                 0,
                 1000,
-                'name',
+                "name",
                 false,
-                '',
+                "",
                 orgId,
                 folderId,
-                ''
+                "",
               );
 
               const existingDashboard = dashboardsResponse.data?.dashboards?.find(
-                (d: any) => d.title === dashboardTitle
+                (d: any) => d.title === dashboardTitle,
               );
 
               if (existingDashboard) {
-                // Delete existing dashboard before importing
-                const existingDashboardId = existingDashboard?.dashboardId || existingDashboard?.dashboard_id || existingDashboard?.id;
+                // Declining skips this file only; the rest of the batch proceeds.
+                const replace = await requestReplaceConfirm(dashboardTitle);
+                if (importCancelled) break;
+                if (!replace) continue;
+                const existingDashboardId =
+                  existingDashboard?.dashboardId ||
+                  existingDashboard?.dashboard_id ||
+                  existingDashboard?.id;
                 if (existingDashboardId) {
                   await dashboardsService.delete(orgId, existingDashboardId, folderId);
-                  await new Promise(resolve => setTimeout(resolve, 500));
+                  await new Promise((resolve) => setTimeout(resolve, 500));
                 }
               }
 
@@ -407,40 +546,68 @@ export default defineComponent({
               successCount++;
             } catch (err) {
               failCount++;
-              errors.push(`${jsonFile}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+              errors.push(
+                t("dashboard.addDashboardFromGitHub.fileError", {
+                  file: jsonFile,
+                  error:
+                    err instanceof Error
+                      ? err.message
+                      : t("dashboard.addDashboardFromGitHub.unknownError"),
+                }),
+              );
               console.error(`Failed to import ${jsonFile}:`, err);
             }
           }
         }
 
-        // Show summary notification
+        // A cancelled batch shows no summary — the drawer is already gone.
+        if (importCancelled) return;
+
+        // Show summary notification; a batch that was entirely declined is not a failure
+        if (successCount === 0 && failCount === 0) {
+          show.value = false;
+          showFolderSelection.value = false;
+          return;
+        }
         if (successCount > 0 && failCount === 0) {
-          q.notify({
-            type: 'positive',
-            message: `Successfully imported ${successCount} dashboard(s)!`,
-            timeout: 3000,
+          toast({
+            variant: "success",
+            message: t("dashboard.addDashboardFromGitHub.importSuccess", {
+              count: successCount,
+            }),
           });
         } else if (successCount > 0 && failCount > 0) {
-          q.notify({
-            type: 'warning',
-            message: `Imported ${successCount} dashboard(s), but ${failCount} failed. Check console for details.`,
+          toast({
+            variant: "warning",
+            message: t("dashboard.addDashboardFromGitHub.importPartial", {
+              count: successCount,
+              failCount,
+            }),
             timeout: 5000,
           });
         } else {
-          q.notify({
-            type: 'negative',
-            message: `Failed to import dashboards: ${errors[0] || 'Unknown error'}`,
+          toast({
+            variant: "error",
+            message: t("dashboard.addDashboardFromGitHub.importFailed", {
+              error: errors[0] || t("dashboard.addDashboardFromGitHub.unknownError"),
+            }),
             timeout: 5000,
           });
         }
 
         show.value = false;
         showFolderSelection.value = false;
-        emit('added');
+        // The parent binds this straight to `getDashboards(force)`, so a bare emit reloads from the cache the import just made stale.
+        emit("added", true);
       } catch (err) {
-        q.notify({
-          type: 'negative',
-          message: `Failed to add dashboards: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        toast({
+          variant: "error",
+          message: t("dashboard.addDashboardFromGitHub.addFailed", {
+            error:
+              err instanceof Error
+                ? err.message
+                : t("dashboard.addDashboardFromGitHub.unknownError"),
+          }),
           timeout: 5000,
         });
       } finally {
@@ -451,16 +618,23 @@ export default defineComponent({
     // Load dashboards when dialog opens
     watch(show, (newVal) => {
       if (newVal) {
+        searchQuery.value = props.initialSearch ?? "";
         loadDashboards();
       } else {
+        // Close aborts the batch: resolving the parked confirm alone would let later files re-park a dialog over a closed drawer.
+        importCancelled = true;
+        // A confirm left parked by a programmatic close would leak `importing` forever.
+        resolveReplaceConfirm(false);
         // Reset state when closing
         selectedDashboards.value = [];
-        searchQuery.value = '';
+        searchQuery.value = "";
         showFolderSelection.value = false;
       }
     });
 
     return {
+      raw,
+      t,
       show,
       loading,
       store,
@@ -473,58 +647,22 @@ export default defineComponent({
       selectedFolderObj,
       folderOptions,
       importing,
+      preparing,
       showAddFolderDialog,
+      addFolderRef,
       isSelected,
       toggleDashboard,
       loadDashboards,
       handleNext,
       confirmAdd,
+      replaceConfirm,
+      resolveReplaceConfirm,
       updateFolderList,
+      getCategoryInfo,
+      groupedDashboards,
+      primaryButtonLabel,
+      categoryLabel,
     };
   },
 });
 </script>
-
-<style scoped lang="scss">
-.dashboard-content-section {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.dashboard-footer-section {
-  flex-shrink: 0;
-}
-
-.dashboard-list {
-  flex: 0 1 auto;
-  overflow-y: auto;
-
-  .selected-item {
-    background-color: var(--o2-tab-bg) !important;
-  }
-
-  .body--light & {
-    .q-item:hover:not(.selected-item) {
-      background-color: var(--o2-hover-gray);
-    }
-  }
-
-  .body--dark & {
-    .q-item:hover:not(.selected-item) {
-      background-color: var(--o2-hover-gray);
-    }
-  }
-}
-
-.folder-select {
-  :deep(.q-field__control) {
-    min-height: 56px !important;
-  }
-
-  :deep(.q-field__native) {
-    min-height: 20px !important;
-  }
-}
-</style>

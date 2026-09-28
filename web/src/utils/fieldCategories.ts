@@ -24,6 +24,7 @@
  *   4. Data-type bucket  (string / number / boolean)
  */
 
+import { gt } from "@/types/i18n";
 import type { FieldAlias } from "@/services/service_streams";
 import type { FieldGroupingConfig } from "@/composables/useServiceCorrelation";
 
@@ -44,12 +45,24 @@ export const CATEGORY = {
 export type Category = (typeof CATEGORY)[keyof typeof CATEGORY];
 
 // Labels for the fixed bucket keys — these never come from the remote config.
+// Translated entries are getters: this object is module scope, so a resolved
+// string would freeze at the boot locale.
 const CATEGORY_LABELS: Record<string, string> = {
-  [CATEGORY.PINNED]: "Key Fields",
-  [CATEGORY.TYPE_STRING]: "String",
-  [CATEGORY.TYPE_NUMBER]: "Number",
-  [CATEGORY.TYPE_BOOLEAN]: "Boolean",
-  [CATEGORY.OTHER]: "Other",
+  get [CATEGORY.PINNED]() {
+    return gt("common.keyFields");
+  },
+  get [CATEGORY.TYPE_STRING]() {
+    return gt("common.typeString");
+  },
+  get [CATEGORY.TYPE_NUMBER]() {
+    return gt("common.typeNumber");
+  },
+  get [CATEGORY.TYPE_BOOLEAN]() {
+    return gt("common.typeBoolean");
+  },
+  get [CATEGORY.OTHER]() {
+    return gt("common.other");
+  },
 };
 
 // Normalise a raw prefix to its canonical group key via the fetched grouping config.
@@ -153,9 +166,15 @@ export function discoverPrefixes(
 function dataTypeBucket(dataType: string): string {
   const t = (dataType || "").toLowerCase();
   if (
-    t === "int64" || t === "float64" || t === "int32" || t === "float32" ||
-    t === "double" || t === "long" || t === "integer"
-  ) return CATEGORY.TYPE_NUMBER;
+    t === "int64" ||
+    t === "float64" ||
+    t === "int32" ||
+    t === "float32" ||
+    t === "double" ||
+    t === "long" ||
+    t === "integer"
+  )
+    return CATEGORY.TYPE_NUMBER;
   if (t === "bool" || t === "boolean") return CATEGORY.TYPE_BOOLEAN;
   return CATEGORY.TYPE_STRING;
 }
@@ -198,7 +217,8 @@ export function resolveFieldGroup(
   }
 
   // 2c. Field name is itself a known group key (e.g. "body" matching the "body" prefix group)
-  if (dynamicPrefixes?.has(canonicalise(lower, index?.grouping))) return canonicalise(lower, index?.grouping);
+  if (dynamicPrefixes?.has(canonicalise(lower, index?.grouping)))
+    return canonicalise(lower, index?.grouping);
 
   // 3. Data-type bucket
   return dataTypeBucket(dataType);
@@ -355,7 +375,7 @@ export function shouldApplyFieldGrouping(opts: {
  *
  * Rules:
  * - Label (header) rows are always kept.
- * - When `filterTerm` is non-empty, bypass collapse entirely so the q-table
+ * - When `filterTerm` is non-empty, bypass collapse entirely so the table
  *   filter-method can match fields inside collapsed groups.
  * - When a field's group is not tracked in `expandGroupRows`, it is visible
  *   (flat / ungrouped list behaviour).

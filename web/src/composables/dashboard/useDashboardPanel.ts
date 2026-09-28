@@ -13,16 +13,21 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { reactive, computed, watch, onBeforeMount, onUnmounted } from "vue";
+import { reactive, computed, watch, onBeforeMount } from "vue";
+import type { TranslateFn } from "@/types/i18n";
 import { useStore } from "vuex";
 import useNotifications from "../useNotifications";
 import { b64EncodeUnicode, isStreamingEnabled } from "@/utils/zincutils";
 import { extractFields, getStreamNameFromQuery } from "@/utils/query/sqlUtils";
+import { maxParenDepth, SQL_PARSE_MAX_DEPTH } from "@/utils/query/sqlComplexity";
 import { validatePanel } from "@/utils/dashboard/panelValidation";
+import { CUSTOM_QUERY_CHART_TYPES } from "@/utils/dashboard/constants";
 import useStreams from "../useStreams";
 import useValuesWebSocket from "./useValuesWebSocket";
 import queryService from "@/services/search";
-import metricsService from "@/services/metrics";
+import { streamSchemaQuery } from "@/services/stream.queries";
+import { queryClient } from "@/composables/query/queryClient";
+import { getFieldValuesForSuggestion, requestFieldValues } from "@/composables/fieldValueStore";
 import logsUtils from "../useLogs/logsUtils";
 import {
   buildSQLChartQuery,
@@ -33,6 +38,11 @@ import {
 import { usePanelFields } from "@/composables/dashboard/usePanelFields";
 import { usePanelAggregation } from "@/composables/dashboard/usePanelAggregation";
 import {
+  DEFAULT_SQL_X_FIELD,
+  DEFAULT_SQL_Y_FIELD_COUNT,
+  buildDefaultBuilderFields,
+} from "@/utils/dashboard/defaultFields";
+import {
   getDefaultDashboardPanelData,
   getDefaultCustomChartText,
 } from "@/composables/dashboard/useDashboardPanelDefaults";
@@ -40,10 +50,14 @@ let parser: any;
 
 const dashboardPanelDataObj: any = {};
 
-const useDashboardPanelData = (pageKey: string = "dashboard") => {
+// Read-only handle on a page's shared panel state for callers that must not
+// register this composable's watchers (SearchBar reading the build page).
+export const getPanelDataForPageKey = (pageKey: string) => dashboardPanelDataObj[pageKey] ?? null;
+
+const useDashboardPanelData = (pageKey: string = "dashboard", t: TranslateFn) => {
   const store = useStore();
   const { showErrorNotification } = useNotifications();
-  const { getStreams, getStream } = useStreams();
+  const { getStream } = useStreams(t);
   const valuesWebSocket = useValuesWebSocket();
 
   // Initialize the state for this page key if it doesn't already exist
@@ -117,19 +131,18 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     const newQuery: any = {
       query: "",
       vrlFunctionQuery: "",
-      customQuery:
-        dashboardPanelData?.data?.queries?.[
-          dashboardPanelData?.layout?.currentQueryIndex
-        ]?.customQuery ?? false,
+      vrlFunctionFieldList: [],
+      // Custom-query chart types always use a hand-written query, so a query
+      // added for such a panel starts in custom mode — otherwise its query
+      // editor would be read-only (read-only is bound to !customQuery).
+      customQuery: CUSTOM_QUERY_CHART_TYPES.includes(dashboardPanelData.data.type),
       fields: {
         stream:
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.stream,
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .stream,
         stream_type:
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.stream_type,
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .stream_type,
         x: [],
         y: [],
         z: [],
@@ -152,15 +165,53 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       },
       config: {
         promql_legend: "",
+        query_label: "",
         layer_type: "scatter",
         weight_fixed: 1,
       },
     };
+    // Seed the new query's default builder fields synchronously (mirrors the
+    // first query) so the tab is fully configured the moment it becomes active —
+    // an async seed would race with the user/test selecting a stream next.
+    // PromQL gets the `${stream}{}` sample query; SQL gets chart-type-aware x/y.
+    if (dashboardPanelData.data.queryType === "promql") {
+      if (newQuery.fields.stream) {
+        newQuery.query = `${newQuery.fields.stream}{}`;
+      }
+    } else {
+      const { x, y } = buildDefaultBuilderFields(
+        dashboardPanelData.data.type,
+        newQuery.fields.stream_type,
+        dashboardPanelData.meta?.streamFields?.groupedFields ?? [],
+        newQuery.fields.stream,
+      );
+      newQuery.fields.x = x;
+      newQuery.fields.y = y;
+    }
+
     dashboardPanelData.data.queries.push(newQuery);
+    // Initialize per-query field cache in meta
+    getQueryFields(dashboardPanelData.data.queries.length - 1);
   };
 
   const removeQuery = (index: number) => {
     dashboardPanelData.data.queries.splice(index, 1);
+
+    // Rebuild queryFields map with shifted indices
+    const newQueryFields: Record<number, any> = {};
+    Object.keys(dashboardPanelData.meta.queryFields).forEach((key) => {
+      const i = Number(key);
+      if (i < index) newQueryFields[i] = dashboardPanelData.meta.queryFields[i];
+      else if (i > index) newQueryFields[i - 1] = dashboardPanelData.meta.queryFields[i];
+    });
+    dashboardPanelData.meta.queryFields = newQueryFields;
+
+    // Fix hiddenQueries indices after removal. Old saved dashboards may not
+    // have this property — initialize to an empty array if missing.
+    const hidden = dashboardPanelData.layout.hiddenQueries || [];
+    dashboardPanelData.layout.hiddenQueries = hidden
+      .filter((i: number) => i !== index)
+      .map((i: number) => (i > index ? i - 1 : i));
   };
 
   const resetDashboardPanelData = () => {
@@ -170,10 +221,12 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
   const resetDashboardPanelDataAndAddTimeField = () => {
     resetDashboardPanelData();
 
-    // add _timestamp field in x axis as default
-    addXAxisItem({
-      name: store.state.zoConfig.timestamp_column ?? "_timestamp",
-    });
+    // Seed default x (histogram(_timestamp)) and y (count(_timestamp)) from the
+    // shared default-fields builder so a bar chart renders on open — the same
+    // fields applyDefaultPanelFields seeds on stream/builder changes.
+    const currentQueryIndex = dashboardPanelData.layout.currentQueryIndex;
+    dashboardPanelData.data.queries[currentQueryIndex].fields.x = [DEFAULT_SQL_X_FIELD()];
+    dashboardPanelData.data.queries[currentQueryIndex].fields.y = [DEFAULT_SQL_Y_FIELD_COUNT()];
   };
 
   // Watch queryType and toggle off VRL functions when switching to PromQL
@@ -190,8 +243,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     if (
       store.state.zoConfig.user_defined_schemas_enabled &&
       dashboardPanelData.meta.stream.userDefinedSchema.length > 0 &&
-      dashboardPanelData.meta.stream.useUserDefinedSchemas ==
-        "user_defined_schema"
+      dashboardPanelData.meta.stream.useUserDefinedSchemas == "user_defined_schema"
     ) {
       return dashboardPanelData.meta.stream.userDefinedSchema ?? [];
     }
@@ -206,9 +258,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       // Create a new request and store it in the cache
       return await getStream(
         streamName,
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.stream_type ?? "logs",
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+          .stream_type ?? "logs",
         true,
       );
     } catch (e: any) {
@@ -254,13 +305,13 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         );
 
         // Filter out any invalid entries (streams with no name)
-        dashboardPanelData.meta.streamFields.groupedFields =
-          groupedFields.filter((field: any) => field?.name);
+        dashboardPanelData.meta.streamFields.groupedFields = groupedFields.filter(
+          (field: any) => field?.name,
+        );
       } else {
-        const currentStream =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.stream;
+        const activeFields =
+          dashboardPanelData.data.queries?.[dashboardPanelData.layout.currentQueryIndex]?.fields;
+        const currentStream = activeFields?.stream;
         if (!currentStream) return;
 
         // Collect streams (main + joins)
@@ -283,8 +334,9 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         );
 
         // Filter out any invalid entries (streams with no name)
-        dashboardPanelData.meta.streamFields.groupedFields =
-          groupedFields.filter((field: any) => field?.name);
+        dashboardPanelData.meta.streamFields.groupedFields = groupedFields.filter(
+          (field: any) => field?.name,
+        );
       }
     } finally {
       isUpdatingGroupedFields = false;
@@ -302,14 +354,11 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     return [
       {
         stream:
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.stream,
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .stream,
       },
       ...((
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.joins ?? []
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]?.joins ?? []
       )?.map((join: any) => ({
         stream: join.stream,
         streamAlias: join.streamAlias,
@@ -319,23 +368,46 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
   const getStreamNameFromStreamAlias = (streamAlias: string) => {
     if (!streamAlias)
-      return dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields.stream;
+      return dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+        .stream;
     const allStreams = getAllSelectedStreams();
-    return allStreams.find((field: any) => field.streamAlias == streamAlias)
-      ?.stream;
+    return allStreams.find((field: any) => field.streamAlias == streamAlias)?.stream;
   };
 
-  const addFilteredItem = async (row: {
-    name: string;
-    streamAlias?: string;
-    stream: string;
-  }) => {
+  /**
+   * The panel's window in the microseconds the values API expects, or null when
+   * it is not usable yet.
+   *
+   * `meta.dateTime` starts out as `{start_time: "", end_time: ""}` and only
+   * becomes Dates once the host page's date picker has run. Reading it
+   * unguarded throws — `""?.toISOString()` does not short-circuit, because `""`
+   * is not nullish — and so does `toISOString()` on an unparseable date. Both
+   * used to land in the callers' catch and surface "Something went wrong!" for
+   * a lookup the user never asked to fail.
+   *
+   * Every page that drives this composable stores `new Date(startTime)` with
+   * `startTime` already in microseconds, so `getTime()` returns microseconds.
+   * That is the same number the `new Date(d.toISOString()).getTime()` round
+   * trip this replaces produced.
+   */
+  const getFilterValuesTimeRange = () => {
+    const range: any = dashboardPanelData?.meta?.dateTime;
+    const start = range?.["start_time"];
+    const end = range?.["end_time"];
+    if (typeof start?.getTime !== "function" || typeof end?.getTime !== "function") {
+      return null;
+    }
+    const start_time = start.getTime();
+    const end_time = end.getTime();
+    if (!Number.isFinite(start_time) || !Number.isFinite(end_time)) {
+      return null;
+    }
+    return { start_time, end_time };
+  };
+
+  const addFilteredItem = async (row: { name: string; streamAlias?: string; stream: string }) => {
     const currentQuery =
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ];
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex];
 
     // Ensure the filter array is initialized
     if (!currentQuery.fields.filter) {
@@ -362,81 +434,75 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       dashboardPanelData.meta.filterValue = [];
     }
 
+    // The condition is what the user asked for and is already in place; the
+    // value list is a convenience. If any of the three things the request needs
+    // is missing there is nothing to ask for — `_values_stream` answers 400,
+    // not an empty result, to a payload with a null field, a missing stream or
+    // an unset range.
+    const timeRange = getFilterValuesTimeRange();
+    if (!row?.name || !row?.stream || !timeRange) {
+      return;
+    }
+
     try {
       const queryReq = {
         org_identifier: store.state.selectedOrganization.identifier,
         stream_name: row.stream,
-        start_time: new Date(
-          dashboardPanelData.meta.dateTime["start_time"].toISOString(),
-        ).getTime(),
-        end_time: new Date(
-          dashboardPanelData.meta.dateTime["end_time"].toISOString(),
-        ).getTime(),
+        ...timeRange,
         fields: [row.name],
         size: 100,
         type: currentQuery.fields.stream_type,
         no_count: true,
       };
 
-      const res = await valuesWebSocket.fetchFieldValues(
-        queryReq,
-        dashboardPanelData,
-        row,
-      );
+      await valuesWebSocket.fetchFieldValues(queryReq, dashboardPanelData, row);
     } catch (error: any) {
       const errorDetailValue =
         error.response?.data.error_detail ||
         error.response?.data.message ||
-        "Something went wrong!";
+        t("dashboard.somethingWentWrong");
       const trimmedErrorMessage =
-        errorDetailValue.length > 300
-          ? errorDetailValue.slice(0, 300) + " ..."
-          : errorDetailValue;
+        errorDetailValue.length > 300 ? errorDetailValue.slice(0, 300) + " ..." : errorDetailValue;
 
       showErrorNotification(trimmedErrorMessage);
     }
   };
 
-  const loadFilterItem = async (row: {
-    field: string;
-    streamAlias?: string;
-  }) => {
+  const loadFilterItem = async (row: { field: string; streamAlias?: string }) => {
+    // Called on every change of a filter's column, including the one the ✕
+    // beside "Select Field" makes: it sets the column to `{}`, which used to
+    // produce `fields: [undefined]` and, once JSON.stringify turned that into
+    // `[null]`, a 400 from the server. A cleared column has nothing to look up.
+    // Same for a stream alias that matches nothing — `.find(…)?.stream` is
+    // undefined, and the key disappears from the payload entirely.
+    const streamName = row?.streamAlias
+      ? getStreamNameFromStreamAlias(row.streamAlias)
+      : dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.stream;
+    const timeRange = getFilterValuesTimeRange();
+    if (!row?.field || !streamName || !timeRange) {
+      return;
+    }
+
     try {
       const queryReq = {
         org_identifier: store.state.selectedOrganization.identifier,
-        stream_name: row.streamAlias
-          ? getStreamNameFromStreamAlias(row.streamAlias)
-          : dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.stream,
-        start_time: new Date(
-          dashboardPanelData?.meta?.dateTime?.["start_time"]?.toISOString(),
-        ).getTime(),
-        end_time: new Date(
-          dashboardPanelData?.meta?.dateTime?.["end_time"]?.toISOString(),
-        ).getTime(),
+        stream_name: streamName,
+        ...timeRange,
         fields: [row.field],
         size: 100,
-        type: dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.stream_type,
+        type: dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+          .stream_type,
         no_count: true,
       };
 
-      const response = await valuesWebSocket.fetchFieldValues(
-        queryReq,
-        dashboardPanelData,
-        row,
-      );
+      await valuesWebSocket.fetchFieldValues(queryReq, dashboardPanelData, row);
     } catch (error: any) {
       const errorDetailValue =
         error.response?.data.error_detail ||
         error.response?.data.message ||
-        "Something went wrong!";
+        t("dashboard.somethingWentWrong");
       const trimmedErrorMessage =
-        errorDetailValue.length > 300
-          ? errorDetailValue.slice(0, 300) + " ..."
-          : errorDetailValue;
+        errorDetailValue.length > 300 ? errorDetailValue.slice(0, 300) + " ..." : errorDetailValue;
       showErrorNotification(trimmedErrorMessage);
     }
   };
@@ -446,35 +512,29 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     // Check if the custom query is enabled and PromQL mode is disabled
     if (
       !promqlMode.value &&
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].customQuery == true
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].customQuery ==
+        true
     ) {
       // clear joins when switching to custom query mode
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].joins = [];
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].joins = [];
 
       // first, remove all derived fields from x,y,z,latitude,longitude,weight,source,target,value
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields.x = dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields?.x?.filter((it: any) => !it.isDerived);
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.x =
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].fields?.x?.filter((it: any) => !it.isDerived);
 
       // remove from y axis
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields.y = dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields?.y?.filter((it: any) => !it.isDerived);
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.y =
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].fields?.y?.filter((it: any) => !it.isDerived);
 
       // remove from z axis
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields.z = dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].fields?.z?.filter((it: any) => !it.isDerived);
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.z =
+        dashboardPanelData.data.queries[
+          dashboardPanelData.layout.currentQueryIndex
+        ].fields?.z?.filter((it: any) => !it.isDerived);
 
       // remove from breakdown
       dashboardPanelData.data.queries[
@@ -485,12 +545,10 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
       // remove from latitude
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.latitude?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.latitude?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.latitude?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.latitude?.isDerived
       ) {
         dashboardPanelData.data.queries[
           dashboardPanelData.layout.currentQueryIndex
@@ -499,12 +557,10 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
       // remove from longitude
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.longitude?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.longitude?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.longitude?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.longitude?.isDerived
       ) {
         dashboardPanelData.data.queries[
           dashboardPanelData.layout.currentQueryIndex
@@ -513,82 +569,65 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
       // remove from weight
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.weight?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.weight?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.weight?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.weight?.isDerived
       ) {
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.weight = null;
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.weight =
+          null;
       }
 
       // remove from source
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.source?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.source?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.source?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.source?.isDerived
       ) {
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.source = null;
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.source =
+          null;
       }
 
       // remove from target
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.target?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.target?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.target?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.target?.isDerived
       ) {
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.target = null;
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.target =
+          null;
       }
 
       // remove from value
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.value?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.value?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.value?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.value?.isDerived
       ) {
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.value = null;
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.value =
+          null;
       }
 
       // remove from name
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.name?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.name?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields?.name
+          ?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields?.name
+          ?.isDerived
       ) {
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].fields.name = null;
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.name =
+          null;
       }
 
       // remove from value_for_maps
       if (
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.value_for_maps?.alias &&
-        dashboardPanelData?.data?.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ]?.fields?.value_for_maps?.isDerived
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.value_for_maps?.alias &&
+        dashboardPanelData?.data?.queries[dashboardPanelData.layout.currentQueryIndex]?.fields
+          ?.value_for_maps?.isDerived
       ) {
         dashboardPanelData.data.queries[
           dashboardPanelData.layout.currentQueryIndex
@@ -596,150 +635,121 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       }
 
       // Loop through each custom query field in the dashboard panel data's stream meta
-      dashboardPanelData.meta.stream.customQueryFields.forEach(
-        (it: any, index: number) => {
-          // Get the name of the current custom query field
-          const { name } = it;
+      dashboardPanelData.meta.stream.customQueryFields.forEach((it: any, index: number) => {
+        // Get the name of the current custom query field
+        const { name } = it;
 
-          // Determine the current field type based on the name
-          let field;
-          if (name === "latitude") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.latitude;
-          } else if (name === "longitude") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.longitude;
-          } else if (name === "weight") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.weight;
-          } else if (name === "name") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.name;
-          } else if (name === "value_for_maps") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.value_for_maps;
-          } else if (name === "source") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.source;
-          } else if (name === "target") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.target;
-          } else if (name === "value") {
-            field =
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.value;
+        // Determine the current field type based on the name
+        let field;
+        if (name === "latitude") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .latitude;
+        } else if (name === "longitude") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .longitude;
+        } else if (name === "weight") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .weight;
+        } else if (name === "name") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .name;
+        } else if (name === "value_for_maps") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .value_for_maps;
+        } else if (name === "source") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .source;
+        } else if (name === "target") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .target;
+        } else if (name === "value") {
+          field =
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .value;
+        } else {
+          // For other field types (x, y, z), determine the type and index as before
+          let currentFieldType;
+
+          if (
+            index <
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.x
+              .length
+          ) {
+            currentFieldType = "x";
+          } else if (
+            index <
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.x
+              .length +
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.y
+                .length
+          ) {
+            currentFieldType = "y";
+          } else if (
+            index <
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.x
+              .length +
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.y
+                .length +
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+                .breakdown.length
+          ) {
+            currentFieldType = "breakdown";
           } else {
-            // For other field types (x, y, z), determine the type and index as before
-            let currentFieldType;
-
-            if (
-              index <
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.x.length
-            ) {
-              currentFieldType = "x";
-            } else if (
-              index <
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.x.length +
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.y.length
-            ) {
-              currentFieldType = "y";
-            } else if (
-              index <
-              dashboardPanelData.data.queries[
-                dashboardPanelData.layout.currentQueryIndex
-              ].fields.x.length +
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.y.length +
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.breakdown.length
-            ) {
-              currentFieldType = "breakdown";
-            } else {
-              currentFieldType = "z";
-            }
-
-            if (currentFieldType === "x") {
-              field =
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.x[index];
-            } else if (currentFieldType === "y") {
-              field =
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.y[
-                  index -
-                    dashboardPanelData.data.queries[
-                      dashboardPanelData.layout.currentQueryIndex
-                    ].fields.x.length
-                ];
-            } else if (currentFieldType === "breakdown") {
-              field =
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.breakdown[
-                  index -
-                    dashboardPanelData.data.queries[
-                      dashboardPanelData.layout.currentQueryIndex
-                    ].fields.x.length -
-                    dashboardPanelData.data.queries[
-                      dashboardPanelData.layout.currentQueryIndex
-                    ].fields.y.length
-                ];
-            } else {
-              field =
-                dashboardPanelData.data.queries[
-                  dashboardPanelData.layout.currentQueryIndex
-                ].fields.z[
-                  index -
-                    dashboardPanelData.data.queries[
-                      dashboardPanelData.layout.currentQueryIndex
-                    ].fields.x.length -
-                    dashboardPanelData.data.queries[
-                      dashboardPanelData.layout.currentQueryIndex
-                    ].fields.y.length
-                ];
-            }
-            // If the current field is a y or z field, set the aggregation function to "count"
-            if (
-              (currentFieldType === "y" || currentFieldType === "z") &&
-              !field.isDerived
-            ) {
-              field.functionName = "count";
-              // take first arg
-              field.args = field.args.length ? [field?.args?.[0]] : [];
-            }
+            currentFieldType = "z";
           }
 
-          // Update the properties of the current field
-          field.alias = name; // Set the alias to the name of the custom query field
-          field.column = name; // Set the column to the name of the custom query field
-          field.color = null; // Reset the color to null
-        },
-      );
+          if (currentFieldType === "x") {
+            field =
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.x[
+                index
+              ];
+          } else if (currentFieldType === "y") {
+            field =
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.y[
+                index -
+                  dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]
+                    .fields.x.length
+              ];
+          } else if (currentFieldType === "breakdown") {
+            field =
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+                .breakdown[
+                index -
+                  dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]
+                    .fields.x.length -
+                  dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]
+                    .fields.y.length
+              ];
+          } else {
+            field =
+              dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.z[
+                index -
+                  dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]
+                    .fields.x.length -
+                  dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]
+                    .fields.y.length
+              ];
+          }
+          // If the current field is a y or z field, set the aggregation function to "count"
+          if ((currentFieldType === "y" || currentFieldType === "z") && !field.isDerived) {
+            field.functionName = "count";
+            // take first arg
+            field.args = field.args.length ? [field?.args?.[0]] : [];
+          }
+        }
+
+        // Update the properties of the current field
+        field.alias = name; // Set the alias to the name of the custom query field
+        field.column = name; // Set the column to the name of the custom query field
+        field.color = null; // Reset the color to null
+      });
     }
   };
 
@@ -748,9 +758,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     // Create a copy of the old custom query fields array
     const oldArray = oldCustomQueryFields;
     // Create a deep copy of the new custom query fields array
-    const newArray = JSON.parse(
-      JSON.stringify(dashboardPanelData.meta.stream.customQueryFields),
-    );
+    const newArray = JSON.parse(JSON.stringify(dashboardPanelData.meta.stream.customQueryFields));
 
     // Check if the length of the old and new arrays are the same
     if (oldArray.length == newArray.length) {
@@ -775,9 +783,9 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         if (fieldIndex >= 0) {
           const newName = newArray[changedIndex[0]]?.name;
           const field =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.x[fieldIndex];
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.x[
+              fieldIndex
+            ];
 
           // Update the field alias and column to the new name
           field.alias = newName;
@@ -790,9 +798,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         if (fieldIndex >= 0) {
           const newName = newArray[changedIndex[0]]?.name;
           const field =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.breakdown[fieldIndex];
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+              .breakdown[fieldIndex];
 
           // Update the field alias and column to the new name
           field.alias = newName;
@@ -805,9 +812,9 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         if (fieldIndex >= 0) {
           const newName = newArray[changedIndex[0]]?.name;
           const field =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.y[fieldIndex];
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.y[
+              fieldIndex
+            ];
 
           // Update the field alias and column to the new name
           field.alias = newName;
@@ -820,9 +827,9 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         if (fieldIndex >= 0) {
           const newName = newArray[changedIndex[0]]?.name;
           const field =
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ].fields.z[fieldIndex];
+            dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.z[
+              fieldIndex
+            ];
 
           // Update the field alias and column to the new name
           field.alias = newName;
@@ -831,9 +838,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the latitude fields
         let field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.latitude;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .latitude;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -845,9 +851,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the longitude fields array
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.longitude;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .longitude;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -859,9 +864,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the weight fields array
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.weight;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .weight;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -873,9 +877,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the name fields
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.name;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.name;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -887,9 +889,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the value fields
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.value_for_maps;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .value_for_maps;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -901,9 +902,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the source fields array
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.source;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .source;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -915,9 +915,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the target fields array
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.target;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields
+            .target;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -929,9 +928,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
         //Check if the field is in the value fields array
         field =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].fields.value;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].fields.value;
 
         if (field && field.alias == oldName) {
           const newName = newArray[changedIndex[0]]?.name;
@@ -948,14 +945,16 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     await importSqlParser();
   });
 
-  onUnmounted(async () => {
-    parser = null;
-  });
-
-  const importSqlParser = async () => {
+  const ensureParser = async () => {
+    if (parser) return parser;
     const useSqlParser: any = await import("@/composables/useParser");
     const { sqlParser }: any = useSqlParser.default();
     parser = await sqlParser();
+    return parser;
+  };
+
+  const importSqlParser = async () => {
+    await ensureParser();
 
     // do not allow to modify custom query fields for logs page
     updateQueryValue(pageKey == "logs" ? true : false);
@@ -963,12 +962,12 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
 
   // based on chart type it will create auto sql query
   const makeAutoSQLQuery = async () => {
+    // Bail if the current query index is transiently out of range (e.g. mid org-switch/reset).
+    const activeQuery =
+      dashboardPanelData.data.queries?.[dashboardPanelData.layout.currentQueryIndex];
+    if (!activeQuery) return;
     // only continue if current mode is auto query generation
-    if (
-      !dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].customQuery
-    ) {
+    if (!activeQuery?.customQuery) {
       if (!dashboardPanelData?.meta?.streamFields?.groupedFields?.length) {
         return;
       }
@@ -987,27 +986,21 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         query = mapChart(dashboardPanelData);
       } else {
         query = buildSQLChartQuery({
-          queryData:
-            dashboardPanelData.data.queries[
-              dashboardPanelData.layout.currentQueryIndex
-            ],
+          queryData: dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex],
           chartType: dashboardPanelData.data.type,
           dashboardPanelData,
         });
       }
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].query = query;
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].query = query;
       return query;
     }
+    return;
   };
   const { checkTimestampAlias } = logsUtils();
   // Replace the existing validatePanel function with a wrapper that calls the generic function
-  const validatePanelWrapper = (
-    errors: string[],
-    isFieldsValidationRequired: boolean = true,
-  ) => {
+  const validatePanelWrapper = (errors: string[], isFieldsValidationRequired: boolean = true) => {
     validatePanel(
+      t,
       dashboardPanelData,
       errors,
       isFieldsValidationRequired,
@@ -1021,8 +1014,6 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       checkTimestampAlias,
     );
   };
-
-  const VARIABLE_PLACEHOLDER = "substituteValue";
 
   const validateQuery = (query: any, variables: any) => {
     // Helper to test one replacement (string or number)
@@ -1047,11 +1038,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       const [varName, ...restVars] = remainingVars;
 
       // Try as string
-      const stringQuery = testReplacement(
-        currentQuery,
-        varName,
-        "VARIABLE_PLACEHOLDER",
-      );
+      const stringQuery = testReplacement(currentQuery, varName, "VARIABLE_PLACEHOLDER");
       const resultAsString: any = validateRecursive(stringQuery, restVars);
       if (resultAsString) return resultAsString; // Found valid query
 
@@ -1085,21 +1072,20 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
   }
 
   // This function parses the custom query and generates the errors and custom fields
-  const updateQueryValue = async (
-    shouldSkipCustomQueryFields: boolean = false,
-  ) => {
+  const updateQueryValue = async (shouldSkipCustomQueryFields: boolean = false) => {
     // store the query in the dashboard panel data
     // dashboardPanelData.meta.editorValue = value;
     // dashboardPanelData.data.query = value;
 
+    // Current query can be transiently absent (org-switch / panel reset).
+    const activeQuery =
+      dashboardPanelData.data.queries?.[dashboardPanelData.layout.currentQueryIndex];
+    if (!activeQuery) return;
+
     if (
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].customQuery &&
+      activeQuery.customQuery &&
       dashboardPanelData.data.queryType != "promql" &&
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].query
+      activeQuery.query
     ) {
       // empty the errors
       dashboardPanelData.meta.errors.queryErrors = [];
@@ -1107,9 +1093,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       // Get the parsed query
       try {
         let currentQuery =
-          dashboardPanelData.data.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ].query;
+          dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].query;
 
         // replace variables with dummy values to verify query is correct or not
         // Handle both ${var:format} and {{var:format}} syntaxes (with optional spaces)
@@ -1129,6 +1113,15 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
           /(?:\$\{\s*[a-zA-Z0-9_-]+\s*:\s*pipe\s*\})|(?:\{\{\s*[a-zA-Z0-9_-]+\s*:\s*pipe\s*\}\})/g,
           "1|2",
         );
+
+        // astify() is exponential in paren nesting depth — skip parsing a
+        // pathologically nested query rather than freeze the tab for seconds.
+        // The query still runs fine server-side; only these client-side
+        // custom-fields/errors go unpopulated.
+        if (maxParenDepth(currentQuery) > SQL_PARSE_MAX_DEPTH) {
+          dashboardPanelData.meta.parsedQuery = null;
+          return;
+        }
 
         const variables = extractVariables(currentQuery); // Extract all unique variables
         const validatedQuery = validateQuery(currentQuery, variables);
@@ -1156,7 +1149,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         const oldCustomQueryFields = JSON.parse(
           JSON.stringify(dashboardPanelData.meta.stream.customQueryFields),
         );
-        dashboardPanelData.meta.stream.customQueryFields = [];
+        const newCustomQueryFields: any[] = [];
 
         const fields = extractFields(
           dashboardPanelData.meta.parsedQuery,
@@ -1166,12 +1159,8 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         if (Array.isArray(fields)) {
           fields.forEach((field: any) => {
             const fieldAlias = field.alias ?? field.column;
-            if (
-              !dashboardPanelData.meta.stream.customQueryFields.find(
-                (it: any) => it.name == fieldAlias,
-              )
-            ) {
-              dashboardPanelData.meta.stream.customQueryFields.push({
+            if (!newCustomQueryFields.find((it: any) => it.name == fieldAlias)) {
+              newCustomQueryFields.push({
                 name: fieldAlias,
                 type: "",
               });
@@ -1179,16 +1168,16 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
           });
         }
 
+        syncCustomQueryFields(newCustomQueryFields);
+
         // update the existing x and y axis fields
         updateXYFieldsOnCustomQueryChange(oldCustomQueryFields);
       } else if (!shouldSkipCustomQueryFields) {
-        dashboardPanelData.meta.errors.queryErrors.push("Invalid Columns");
+        dashboardPanelData.meta.errors.queryErrors.push(t("dashboard.invalidColumns"));
       }
 
       const currentQuery =
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ];
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex];
 
       const tableName = await getStreamNameFromQuery(currentQuery?.query ?? "");
 
@@ -1206,74 +1195,106 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         }
       }
     }
+    return;
   };
+
+  // Get or initialize per-query field cache in meta (never in data)
+  const getQueryFields = (queryIndex: number) => {
+    if (!dashboardPanelData.meta.queryFields[queryIndex]) {
+      dashboardPanelData.meta.queryFields[queryIndex] = {
+        customQueryFields: [],
+        vrlFunctionFieldList: [],
+      };
+    }
+    return dashboardPanelData.meta.queryFields[queryIndex];
+  };
+
+  // Write customQueryFields to both per-query cache and shared meta view
+  const syncCustomQueryFields = (fields: any[]) => {
+    const currentIdx = dashboardPanelData.layout.currentQueryIndex;
+    getQueryFields(currentIdx).customQueryFields = fields;
+    dashboardPanelData.meta.stream.customQueryFields = fields;
+  };
+
+  // On tab switch, restore the incoming query's cached fields to shared meta.
+  // If the incoming query is custom + has SQL but no cached fields yet (e.g. first
+  // load of a saved panel), trigger SQL parsing to populate the cache.
+  watch(
+    () => dashboardPanelData.layout.currentQueryIndex,
+    async (newIdx) => {
+      const qf = getQueryFields(newIdx);
+      dashboardPanelData.meta.stream.customQueryFields = qf.customQueryFields;
+      dashboardPanelData.meta.stream.vrlFunctionFieldList = qf.vrlFunctionFieldList;
+
+      // Parse SQL for custom queries that haven't been parsed yet
+      const incomingQuery = dashboardPanelData.data.queries[newIdx];
+      if (
+        incomingQuery?.customQuery &&
+        incomingQuery?.query &&
+        dashboardPanelData.data.queryType == "sql" &&
+        qf.customQueryFields.length === 0
+      ) {
+        await ensureParser();
+        if (parser) await updateQueryValue(pageKey == "logs" ? true : false);
+      }
+    },
+  );
 
   watch(
     () => [
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].query,
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].customQuery, // Only watch for custom query mode changes
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]?.query,
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]?.customQuery, // Only watch for custom query mode changes
       selectedStreamFieldsBasedOnUserDefinedSchema.value,
+      dashboardPanelData.layout.currentQueryIndex,
     ],
     async (newVal, oldVal) => {
-      // if pageKey is logs, then return
-      // because custom query fields will be extracted from the query using the result schema api
-      // NOW: we need to only skip custom query fields for logs page
-      // not stream selection, so commented below code and in updateQueryValue function will skip custom query fields extraction
-      // if (pageKey == "logs") {
-      //   return;
-      // }
+      // Skip if this firing is from a tab switch — the tab switch watcher handles it
+      const currentIdx = newVal[3] as number;
+      const prevIdx = oldVal[3] as number;
+      if (currentIdx !== prevIdx) return;
 
       // Check if customQuery mode has changed
       const customQueryChanged = newVal[1] !== oldVal[1];
 
       // Only continue if the current mode is "show custom query"
       if (
-        dashboardPanelData.data.queries[
-          dashboardPanelData.layout.currentQueryIndex
-        ].customQuery &&
+        dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex]?.customQuery &&
         dashboardPanelData.data.queryType == "sql"
       ) {
         // Call the updateQueryValue function
         // will skip custom query fields extraction for logs page
+        await ensureParser();
         if (parser) await updateQueryValue(pageKey == "logs" ? true : false);
       } else if (customQueryChanged) {
-        // Only clear lists when switching modes
-        // auto query mode selected
-        // remove the custom fields from the list
-        dashboardPanelData.meta.stream.customQueryFields = [];
-        dashboardPanelData.meta.stream.vrlFunctionFieldList = []; // Clear VRL function field list
+        // Only clear lists when switching modes within the same query
+        syncCustomQueryFields([]);
+        dashboardPanelData.meta.stream.vrlFunctionFieldList = [];
+        getQueryFields(dashboardPanelData.layout.currentQueryIndex).vrlFunctionFieldList = [];
       }
-      // if (dashboardPanelData.data.queryType == "promql") {
-      //     updatePromQLQuery()
-      // }
     },
     { deep: true },
   );
 
   const currentXLabel = computed(() => {
     if (dashboardPanelData.data.type == "table") {
-      return isPivotMode.value ? "Row Fields" : "First Column";
+      return isPivotMode.value ? t("panel.rowFields") : t("panel.firstColumn");
     }
-    return dashboardPanelData.data.type == "h-bar" ? "Y-Axis" : "X-Axis";
+    return dashboardPanelData.data.type == "h-bar" ? t("panel.yAxisShort") : t("panel.xAxisShort");
   });
 
   const currentYLabel = computed(() => {
     if (dashboardPanelData.data.type == "table") {
-      return isPivotMode.value ? "Value Fields" : "Other Columns";
+      return isPivotMode.value ? t("panel.valueFields") : t("panel.otherColumn");
     }
-    return dashboardPanelData.data.type == "h-bar" ? "X-Axis" : "Y-Axis";
+    return dashboardPanelData.data.type == "h-bar" ? t("panel.xAxisShort") : t("panel.yAxisShort");
   });
 
   // Function to get result schema
   const getResultSchema = async (
     query: string,
     abortSignal?: AbortSignal,
-    startISOTimestamp?: number,
-    endISOTimestamp?: number,
+    _startISOTimestamp?: number,
+    _endISOTimestamp?: number,
   ): Promise<{
     group_by: string[];
     projections: string[];
@@ -1285,9 +1306,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
         org_identifier: store.state.selectedOrganization.identifier,
         query: {
           query: {
-            sql: store.state.zoConfig.sql_base64_enabled
-              ? b64EncodeUnicode(query)
-              : query,
+            sql: store.state.zoConfig.sql_base64_enabled ? b64EncodeUnicode(query) : query,
             query_fn: null,
             start_time: (Date.now() - 3600000) * 1000,
             end_time: Date.now() * 1000,
@@ -1296,9 +1315,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
             streaming_output: false,
             streaming_id: null,
           },
-          ...(store.state.zoConfig.sql_base64_enabled
-            ? { encoding: "base64" }
-            : {}),
+          ...(store.state.zoConfig.sql_base64_enabled ? { encoding: "base64" } : {}),
         },
         page_type: "dashboards",
         is_streaming: isStreamingEnabled(store.state),
@@ -1325,10 +1342,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       return "table";
     }
 
-    if (
-      extractedFields.timeseries_field &&
-      extractedFields.group_by.length <= 2
-    ) {
+    if (extractedFields.timeseries_field && extractedFields.group_by.length <= 2) {
       return "line";
     } else {
       return "table";
@@ -1361,8 +1375,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     // remove group by and timeseries field from projections, while using it on y axis
     const yAxisFields = extractedFields.projections.filter(
       (field) =>
-        !extractedFields.group_by.includes(field) &&
-        field !== extractedFields.timeseries_field,
+        !extractedFields.group_by.includes(field) && field !== extractedFields.timeseries_field,
     );
 
     const fields = {
@@ -1411,16 +1424,12 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       },
       autoSelectChartType: boolean = true,
     ) => {
-      // remove all fields from custom query fields
-      dashboardPanelData.meta.stream.customQueryFields = [];
-
-      // add all fields to custom query fields
-      extractedFields.projections.forEach((field: any) => {
-        dashboardPanelData.meta.stream.customQueryFields.push({
-          name: field,
-          type: "",
-        });
-      });
+      // build and sync custom query fields from projections
+      const newFields = extractedFields.projections.map((field: any) => ({
+        name: field,
+        type: "",
+      }));
+      syncCustomQueryFields(newFields);
 
       // Determine chart type
       const chartType = autoSelectChartType
@@ -1450,18 +1459,14 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
       timestamps.start_time != "Invalid Date" &&
       timestamps.end_time != "Invalid Date"
     ) {
-      startISOTimestamp = new Date(
-        timestamps.start_time.toISOString(),
-      ).getTime();
+      startISOTimestamp = new Date(timestamps.start_time.toISOString()).getTime();
       endISOTimestamp = new Date(timestamps.end_time.toISOString()).getTime();
     } else {
       return;
     }
 
     const currentQuery =
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].query;
+      dashboardPanelData.data.queries[dashboardPanelData.layout.currentQueryIndex].query;
 
     const extractedFields = await getResultSchema(
       currentQuery,
@@ -1472,66 +1477,72 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     processExtractedFields(extractedFields, autoSelectChartType);
   };
 
-  // Fetch available labels and their values for PromQL builder
+  // Columns a metrics stream carries that are not labels. `value` is the
+  // sample, `_timestamp` the clock, `__hash__` internal, and `__name__` the
+  // metric itself.
+  const NON_LABEL_COLUMNS = new Set(["value", "_timestamp", "__hash__", "__name__"]);
+
+  /**
+   * The labels a metric has, for the builder's label picker.
+   *
+   * From the stream SCHEMA, not from every series. A metrics stream is named
+   * for its metric, so its columns ARE its labels — and the schema is metadata:
+   * measured at 1699 bytes and 4ms against 11778 bytes and 49ms for the series
+   * call, which also grows with series count where this does not.
+   */
   const fetchPromQLLabels = async (metric: string) => {
     if (!metric || !dashboardPanelData.meta.promql) return;
 
-    // Update shared meta
     dashboardPanelData.meta.promql.loadingLabels = true;
-
     try {
-      const endTime = Math.floor(Date.now() * 1000); // microseconds
-      const startTime = endTime - 24 * 60 * 60 * 1000000; // 24 hours ago in microseconds
-
-      const response = await metricsService.get_promql_series({
-        org_identifier: store.state.selectedOrganization.identifier,
-        labels: `{__name__="${metric}"}`,
-        start_time: startTime,
-        end_time: endTime,
-      });
-
-      if (
-        response.data &&
-        response.data.data &&
-        response.data.data.length > 0
-      ) {
-        // Extract all unique label keys and their values from the series
-        const labelSet = new Set<string>();
-        const valuesMap = new Map<string, Set<string>>();
-
-        response.data.data.forEach((series: any) => {
-          Object.keys(series).forEach((key) => {
-            if (key !== "__name__") {
-              labelSet.add(key);
-
-              // Collect all values for this label key
-              if (!valuesMap.has(key)) {
-                valuesMap.set(key, new Set<string>());
-              }
-              valuesMap.get(key)!.add(series[key]);
-            }
-          });
-        });
-
-        // Save to shared meta
-        dashboardPanelData.meta.promql.availableLabels =
-          Array.from(labelSet).sort();
-
-        // Convert Sets to sorted arrays and store in the map
-        const newLabelValuesMap = new Map<string, string[]>();
-        valuesMap.forEach((valueSet, labelKey) => {
-          newLabelValuesMap.set(labelKey, Array.from(valueSet).sort());
-        });
-        dashboardPanelData.meta.promql.labelValuesMap = newLabelValuesMap;
-      } else {
-        dashboardPanelData.meta.promql.availableLabels = [];
-        dashboardPanelData.meta.promql.labelValuesMap = new Map();
-      }
+      const response: any = await queryClient.fetchQuery(
+        streamSchemaQuery(store.state.selectedOrganization.identifier, metric, "metrics"),
+      );
+      const columns = response?.schema ?? response?.uds_schema ?? [];
+      dashboardPanelData.meta.promql.availableLabels = columns
+        .map((column: any) => column?.name)
+        .filter((name: string) => name && !NON_LABEL_COLUMNS.has(name))
+        .sort();
     } catch (error) {
       dashboardPanelData.meta.promql.availableLabels = [];
-      dashboardPanelData.meta.promql.labelValuesMap = new Map();
     } finally {
       dashboardPanelData.meta.promql.loadingLabels = false;
+    }
+  };
+
+  /**
+   * The values of ONE label, fetched when a user actually filters on it.
+   *
+   * Deliberately not a bulk request. Asking `_values` for all eighteen labels
+   * of a metric at once measured 330ms — seven times the series call it
+   * replaces — because it runs one distinct-value aggregation per field. Asking
+   * for the one label in front of the user is ~20ms, and most labels are never
+   * asked for at all.
+   *
+   * Reads the same cache the query editor's completion fills, under the same
+   * key, so a label completed there is already warm here and the reverse.
+   */
+  const fetchPromQLLabelValues = async (metric: string, label: string) => {
+    if (!metric || !label || !dashboardPanelData.meta.promql) return;
+    if (dashboardPanelData.meta.promql.labelValuesMap?.has(label)) return;
+
+    const ctx = {
+      org: store.state.selectedOrganization.identifier,
+      streamType: "metrics",
+      streamName: metric,
+    };
+
+    try {
+      let values = await getFieldValuesForSuggestion(ctx, label);
+      if (!values.length) values = await requestFieldValues(ctx, label);
+
+      // Replaced rather than mutated: the map is read through a computed, and
+      // Map mutations do not trigger one.
+      const next = new Map(dashboardPanelData.meta.promql.labelValuesMap ?? []);
+      next.set(label, values);
+      dashboardPanelData.meta.promql.labelValuesMap = next;
+    } catch (error) {
+      // A failed lookup leaves the labels that already resolved alone.
     }
   };
 
@@ -1597,6 +1608,7 @@ const useDashboardPanelData = (pageKey: string = "dashboard") => {
     getDefaultDashboardPanelData,
     getStreamNameFromStreamAlias,
     fetchPromQLLabels,
+    fetchPromQLLabelValues,
   };
 };
 export default useDashboardPanelData;

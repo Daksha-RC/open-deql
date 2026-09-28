@@ -20,6 +20,8 @@ pub struct FileMeta {
     pub compressed_size: i64,
     #[prost(int64, tag = "6")]
     pub index_size: i64,
+    #[prost(int64, tag = "7")]
+    pub mindex_size: i64,
 }
 /// Job information for a request
 #[derive(serde::Serialize)]
@@ -68,6 +70,9 @@ pub struct ScanStats {
     /// unit: bytes
     #[prost(int64, tag = "12")]
     pub peak_memory_usage: i64,
+    /// unit: ms
+    #[prost(int64, tag = "13")]
+    pub wait_in_queue: i64,
 }
 #[derive(serde::Serialize)]
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -97,6 +102,26 @@ pub struct FileKey {
 pub struct SimpleFileList {
     #[prost(string, repeated, tag = "1")]
     pub files: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
+}
+#[derive(serde::Serialize)]
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct SearchEventContext {
+    #[prost(string, optional, tag = "1")]
+    pub alert_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "2")]
+    pub derived_stream_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "3")]
+    pub report_key: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "4")]
+    pub dashboard_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "5")]
+    pub dashboard_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "6")]
+    pub dashboard_folder_id: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "7")]
+    pub dashboard_folder_name: ::core::option::Option<::prost::alloc::string::String>,
+    #[prost(string, optional, tag = "8")]
+    pub alert_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct FileContentResponse {
@@ -503,6 +528,8 @@ pub struct MetricsQueryRequest {
     pub clusters: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(bool, tag = "13")]
     pub is_super_cluster: bool,
+    #[prost(message, optional, tag = "14")]
+    pub search_event_context: ::core::option::Option<SearchEventContext>,
 }
 #[derive(serde::Serialize)]
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
@@ -1060,10 +1087,10 @@ pub struct SearchQuery {
     pub query_fn: ::prost::alloc::string::String,
     #[prost(bool, tag = "14")]
     pub skip_wal: bool,
-    #[prost(string, tag = "15")]
-    pub action_id: ::prost::alloc::string::String,
     #[prost(int64, tag = "16")]
     pub histogram_interval: i64,
+    #[prost(string, optional, tag = "17")]
+    pub timezone: ::core::option::Option<::prost::alloc::string::String>,
     /// Simplified sampling: just specify ratio (0.0-1.0), backend uses optimal defaults
     /// Backend converts this to SamplingConfig for internal node communication
     #[prost(double, optional, tag = "18")]
@@ -1085,25 +1112,6 @@ pub struct SamplingConfig {
     /// Number of time buckets for stratified sampling (e.g., 24 for hourly over a day)
     #[prost(int32, optional, tag = "4")]
     pub num_time_strata: ::core::option::Option<i32>,
-}
-#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
-pub struct SearchEventContext {
-    #[prost(string, optional, tag = "1")]
-    pub alert_key: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "2")]
-    pub derived_stream_key: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "3")]
-    pub report_key: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "4")]
-    pub dashboard_id: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "5")]
-    pub dashboard_name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "6")]
-    pub dashboard_folder_id: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "7")]
-    pub dashboard_folder_name: ::core::option::Option<::prost::alloc::string::String>,
-    #[prost(string, optional, tag = "8")]
-    pub alert_name: ::core::option::Option<::prost::alloc::string::String>,
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct QueryStatus {
@@ -1232,6 +1240,22 @@ pub struct GetLicenseUsageResponse {
     pub last_usage_response: ::prost::alloc::string::String,
     #[prost(message, repeated, tag = "8")]
     pub ingestion_history: ::prost::alloc::vec::Vec<UsageResult>,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetWorkflowInputsRequest {
+    #[prost(string, tag = "1")]
+    pub org_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "2")]
+    pub workflow_id: ::prost::alloc::string::String,
+    #[prost(string, tag = "3")]
+    pub run_id: ::prost::alloc::string::String,
+    #[prost(bool, tag = "4")]
+    pub is_error_data: bool,
+}
+#[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
+pub struct GetWorkflowInputsResponse {
+    #[prost(string, tag = "1")]
+    pub data: ::prost::alloc::string::String,
 }
 /// Generated client implementations.
 pub mod search_client {
@@ -1644,6 +1668,31 @@ pub mod search_client {
                 .insert(GrpcMethod::new("cluster.Search", "GetLicenseUsageInfo"));
             self.inner.unary(req, path, codec).await
         }
+        /// generic get file call
+        pub async fn get_workflow_inputs(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetWorkflowInputsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetWorkflowInputsResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic_prost::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/cluster.Search/GetWorkflowInputs",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("cluster.Search", "GetWorkflowInputs"));
+            self.inner.unary(req, path, codec).await
+        }
     }
 }
 /// Generated server implementations.
@@ -1750,6 +1799,14 @@ pub mod search_server {
             request: tonic::Request<super::GetLicenseUsageRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetLicenseUsageResponse>,
+            tonic::Status,
+        >;
+        /// generic get file call
+        async fn get_workflow_inputs(
+            &self,
+            request: tonic::Request<super::GetWorkflowInputsRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetWorkflowInputsResponse>,
             tonic::Status,
         >;
     }
@@ -2432,6 +2489,51 @@ pub mod search_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetLicenseUsageInfoSvc(inner);
+                        let codec = tonic_prost::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/cluster.Search/GetWorkflowInputs" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetWorkflowInputsSvc<T: Search>(pub Arc<T>);
+                    impl<
+                        T: Search,
+                    > tonic::server::UnaryService<super::GetWorkflowInputsRequest>
+                    for GetWorkflowInputsSvc<T> {
+                        type Response = super::GetWorkflowInputsResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetWorkflowInputsRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as Search>::get_workflow_inputs(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetWorkflowInputsSvc(inner);
                         let codec = tonic_prost::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
@@ -3367,8 +3469,8 @@ pub mod idx_optimize_mode {
 }
 #[derive(Clone, PartialEq, Eq, Hash, ::prost::Message)]
 pub struct SimpleTopN {
-    #[prost(string, tag = "1")]
-    pub field: ::prost::alloc::string::String,
+    #[prost(string, repeated, tag = "1")]
+    pub fields: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
     #[prost(uint32, tag = "2")]
     pub limit: u32,
     #[prost(bool, tag = "3")]
@@ -3488,9 +3590,8 @@ pub enum Role {
     Querier = 2,
     Compactor = 3,
     Router = 4,
-    AlertManager = 5,
+    Scheduler = 5,
     FlattenCompactor = 6,
-    ScriptServer = 7,
 }
 impl Role {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -3504,9 +3605,8 @@ impl Role {
             Self::Querier => "QUERIER",
             Self::Compactor => "COMPACTOR",
             Self::Router => "ROUTER",
-            Self::AlertManager => "ALERT_MANAGER",
+            Self::Scheduler => "SCHEDULER",
             Self::FlattenCompactor => "FLATTEN_COMPACTOR",
-            Self::ScriptServer => "SCRIPT_SERVER",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -3517,9 +3617,8 @@ impl Role {
             "QUERIER" => Some(Self::Querier),
             "COMPACTOR" => Some(Self::Compactor),
             "ROUTER" => Some(Self::Router),
-            "ALERT_MANAGER" => Some(Self::AlertManager),
+            "SCHEDULER" => Some(Self::Scheduler),
             "FLATTEN_COMPACTOR" => Some(Self::FlattenCompactor),
-            "SCRIPT_SERVER" => Some(Self::ScriptServer),
             _ => None,
         }
     }
@@ -4314,6 +4413,8 @@ pub struct StreamStats {
     pub compressed_size: f64,
     #[prost(double, tag = "8")]
     pub index_size: f64,
+    #[prost(double, tag = "9")]
+    pub mindex_size: f64,
 }
 /// Generated client implementations.
 pub mod streams_client {

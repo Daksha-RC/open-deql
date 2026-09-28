@@ -15,389 +15,468 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="tw:w-full discovered-services" :class="{ 'ds-dark': store.state.theme === 'dark' }">
+  <div class="bg-card-glass-bg discovered-services flex h-full w-full flex-col">
     <!-- Loading State -->
-    <div v-if="loading" class="tw:flex tw:justify-center tw:py-8">
-      <q-spinner-hourglass color="primary" size="1.875rem" />
+    <div v-if="loading" class="flex flex-1 items-center justify-center">
+      <OSpinner size="sm" data-test="discovered-services-loading-indicator" />
     </div>
 
     <!-- Error State -->
-    <div v-else-if="error" class="tw:text-center tw:py-8">
-      <q-icon name="error_outline" size="3rem" color="negative" class="tw:mb-4" />
-      <div class="text-body1 text-negative">{{ error }}</div>
-      <q-btn
+    <div v-else-if="error" class="flex flex-1 flex-col items-center justify-center gap-3">
+      <OIcon
+        name="error-outline"
+        class="text-status-error-text"
+        style="width: 3rem; height: 3rem"
+      />
+      <div class="text-status-error-text text-base">{{ error }}</div>
+      <OButton
         data-test="retry-discovered-services-btn"
-        flat no-caps dense
-        icon="refresh"
-        @click="loadServices"
-      >{{ t('settings.correlation.retry') }}</q-btn>
+        variant="outline"
+        size="sm-action"
+        @click="() => loadServices()"
+        icon-left="refresh"
+      >
+        {{ t("settings.correlation.retry") }}
+      </OButton>
+    </div>
+
+    <div v-else-if="forbidden" class="flex flex-1 items-center justify-center">
+      <OEmptyState size="hero" preset="no-access" data-test="discovered-services-forbidden" />
     </div>
 
     <!-- Empty State -->
-    <div v-else-if="services.length === 0" class="tw:text-center tw:py-8">
-      <q-icon name="search_off" size="3rem" color="grey-5" class="tw:mb-4" />
-      <div class="text-body1">{{ t("settings.correlation.noServicesYet") }}</div>
-      <div class="text-body2 text-grey-6 tw:mt-2">
-        {{ t("settings.correlation.noServicesDescription") }}
-      </div>
-      <q-btn
-        data-test="refresh-discovered-services-btn"
-        flat no-caps dense
-        icon="refresh"
-        @click="loadServices(true)"
-        :loading="refreshing"
-        class="tw:mt-3"
-      >{{ t('common.refresh') }}</q-btn>
+    <div v-else-if="services.length === 0" class="flex flex-1 items-center justify-center">
+      <OEmptyState
+        size="hero"
+        preset="no-discovered-services"
+        :title="t('settings.correlation.noServicesYet')"
+        :description="t('settings.correlation.noServicesDescription')"
+        data-test="discovered-services-empty-state"
+      >
+        <template #actions>
+          <OButton
+            data-test="refresh-discovered-services-btn"
+            variant="outline"
+            size="sm-action"
+            :loading="refreshing"
+            @click="loadServices(true)"
+            icon-left="refresh"
+          >
+            {{ t("common.refresh") }}
+          </OButton>
+        </template>
+      </OEmptyState>
     </div>
 
     <!-- Services List -->
-    <div v-else>
+    <div v-else class="flex min-h-0 flex-1 flex-col pt-3">
       <!-- Info banner -->
-      <div class="info-banner tw:mb-3 tw:rounded-lg tw:flex tw:items-center tw:gap-3">
-        <q-icon name="info" size="1.25rem" class="tw:shrink-0 info-banner-icon" />
-        <div class="tw:text-sm tw:leading-relaxed info-banner-text">
+      <div
+        class="info-banner mx-page-edge rounded-default bg-banner-info-bg border-banner-info-border mb-3 flex shrink-0 items-center gap-3 border px-4 py-3"
+      >
+        <OIcon name="info" size="md" class="info-banner-icon text-status-info-text shrink-0" />
+        <div class="info-banner-text text-text-body text-sm leading-relaxed">
           {{ t("settings.correlation.discoveredServicesDescription") }}
           <a
-            class="config-link-btn tw:cursor-pointer tw:inline-block tw:mx-1 tw:px-2 tw:py-0.5 tw:rounded tw:text-xs tw:font-semibold tw:no-underline tw:align-middle"
+            class="rounded-default border-text-link text-text-link bg-badge-blue-soft-bg hover:bg-badge-blue-ol-border/18 mx-1 inline-block cursor-pointer border px-2 py-0.5 align-middle text-xs font-semibold no-underline transition-[background] duration-150"
             @click.prevent="$emit('navigate-to-configuration')"
-          >{{ t('settings.correlation.goToConfiguration') }}</a>
-          <span>{{ t('settings.correlation.configureServicesHint') }}</span>
+            >{{ t("settings.correlation.goToConfiguration") }}</a
+          >
+          <span>{{ t("settings.correlation.configureServicesHint") }}</span>
         </div>
       </div>
 
       <!-- Header with title -->
-      <div class="card-container tw:mb-[0.625rem]">
-        <div class="services-header-bar tw:flex tw:justify-between tw:items-center tw:w-full">
-          <div class="q-table__title tw:font-[600]" data-test="services-list-title">
+      <div class="bg-card-glass-bg mb-2.5 shrink-0">
+        <div
+          class="services-header-bar px-page-edge flex h-[4.25rem] w-full items-center justify-between py-3"
+        >
+          <div class="text-xl font-[600] tracking-[0.005em]" data-test="services-list-title">
             {{ t("settings.correlation.discoveredServicesTitle") }}
           </div>
           <!-- Filter bar -->
-          <div class="tw:flex tw:items-center tw:gap-2">
-            <span class="tw:text-md tw:text-grey-6">{{ t('settings.correlation.filterBy') }}</span>
-            <q-select
+          <div class="flex items-center gap-2">
+            <span class="text-md text-text-muted whitespace-nowrap">{{
+              t("settings.correlation.filterBy")
+            }}</span>
+            <OSelect
               v-model="filterKey"
-              :options="filteredKeyOptions"
-              dense
-              borderless
+              :options="allKeys"
+              labelKey="label"
+              valueKey="value"
               clearable
-              use-input
-              fill-input
-              hide-selected
-              input-debounce="0"
-              emit-value
-              map-options
+              searchable
               :placeholder="t('settings.correlation.selectFieldPlaceholder')"
               data-test="service-filter-key"
-              class="o2-search-input filter-select"
-              @filter="filterKeyFn"
+              class="o2-search-input filter-select min-w-40"
               @update:model-value="filterValue = null"
             />
             <span>
-              <q-select
+              <OSelect
                 v-model="filterValue"
-                :options="filteredValueOptions"
-                dense
-                borderless
+                :options="allValues"
                 clearable
-                use-input
-                fill-input
-                hide-selected
-                input-debounce="0"
-                emit-value
-                map-options
-                :disable="!filterKey"
+                searchable
+                :disabled="!filterKey"
                 :placeholder="t('settings.correlation.selectValuePlaceholder')"
                 data-test="service-filter-value"
-                class="o2-search-input filter-select"
-                @filter="filterValueFn"
+                class="o2-search-input filter-select min-w-40"
               />
-              <q-tooltip v-if="!filterKey">{{ t('settings.correlation.selectFieldFirst') }}</q-tooltip>
+              <OTooltip
+                v-if="!filterKey"
+                :content="t('settings.correlation.selectFieldFirst')"
+                side="top"
+              />
             </span>
-            <q-input
+            <OSearchInput
               v-model="searchQuery"
-              dense
-              borderless
               :placeholder="t('settings.correlation.searchServiceName')"
               data-test="service-search-input"
               clearable
               class="o2-search-input"
-            >
-              <template #prepend>
-                <q-icon class="o2-search-input-icon" name="search" />
-              </template>
-            </q-input>
-            <q-btn
+            />
+            <OButton
               data-test="reset-discovered-services-btn"
-              round
-              class="o2-secondary-button"
+              variant="outline"
+              size="sm"
               :loading="resetting"
               @click="confirmResetServices"
             >
-              {{ t('settings.correlation.resetServices') }}
-              <q-tooltip>{{ t("settings.correlation.resetServicesTooltip") }}</q-tooltip>
-            </q-btn>
-            <q-btn
-              flat
-              round
+              {{ t("settings.correlation.resetServices") }}
+              <OTooltip :content="t('settings.correlation.resetServicesTooltip')" side="top" />
+            </OButton>
+            <OButton
+              variant="outline"
+              size="sm-action"
               :loading="refreshing"
               @click="loadServices(true)"
               data-test="refresh-discovered-services-btn"
-              class="o2-secondary-button refresh-btn"
-            >{{ t('common.refresh') }}</q-btn>
+            >
+              {{ t("common.refresh") }}
+            </OButton>
           </div>
         </div>
       </div>
 
-      <!-- Grouped Services Table -->
-      <div class="tw:w-full tw:h-full">
-        <div class="tw:h-[calc(100vh-21.25rem)]">
-          <q-table
-            :pagination="{ rowsPerPage: 0, sortBy: sortBy, descending: sortDescending }"
-            :rows="refreshing ? [] : paginatedGroups"
+      <!-- Flat services table, inset to align with the header and banner -->
+      <div class="px-page-edge min-h-0 flex-1">
+        <div class="h-full">
+          <OTable
+            :data="refreshing ? [] : flatRows"
             :columns="columns"
             :loading="refreshing"
-            row-key="service_name"
-            hide-pagination
-            @request="onTableRequest"
-            :class="[
-              'o2-quasar-table o2-row-md o2-quasar-table-header-sticky services-table',
-              filteredGroups.length > 0 ? 'services-table-full-height' : ''
-            ]"
+            :forbidden="forbidden"
+            row-key="id"
+            pagination="client"
+            :page-size="pageSize"
+            :page-size-options="[20, 50, 100, 250, 500]"
+            sorting="server"
+            :sort-by="sortColumn"
+            :sort-order="sortOrder"
+            filter-mode="client"
+            :default-columns="false"
+            :enable-column-resize="true"
+            :persist-columns="true"
+            table-id="settings-discovered-services-v2"
+            :show-global-filter="false"
+            :pivot-row-columns="[{ name: 'service_name' }]"
+            :keep-page-on-data-change="true"
+            :current-page="currentPage"
+            class="o2-table o2-row-md o2-table-header-sticky services-table w-full"
+            :class="
+              filteredGroupCount > 0 ? 'services-table-full-height h-[calc(100vh-21.25rem)]' : ''
+            "
             data-test="services-list-table"
+            @sort-change="onSortChange"
+            @row-click="handleRowClick"
+            @pagination-change="({ page }: { page: number }) => (currentPage = page)"
           >
-            <!-- Loading state -->
-            <template #loading>
-              <div class="tw:flex tw:items-center tw:justify-center tw:pb-40">
-                <q-spinner-hourglass color="primary" size="3rem" />
-              </div>
+            <template #empty>
+              <OEmptyState
+                size="hero"
+                preset="no-discovered-services"
+                :filtered="!!searchQuery"
+                :hide-action="!searchQuery"
+                @action="(id) => id === 'clear-filters' && (searchQuery = '')"
+              />
             </template>
-            <template v-if="refreshing" #no-data>
-              <span></span>
-            </template>
-            <template v-slot:body="props">
-              <!-- Group header row -->
-              <q-tr
-                :props="props"
-                class="group-header-row"
-                data-test="service-group-row"
-                @click="toggleGroup(props.row.service_name)"
-              >
-                <q-td key="service_name" :props="props">
-                  <div class="tw:flex tw:items-center tw:gap-2">
-                    <q-icon
-                      :name="expandedGroups.has(props.row.service_name) ? 'expand_more' : 'chevron_right'"
-                      size="1.25rem"
-                      class="tw:text-gray-400"
-                    />
-                    <span class="tw:font-semibold">{{ props.row.service_name }}</span>
-                    <span class="instance-count-badge">
-                      {{ props.row.instances.length }}
-                      {{ props.row.instances.length === 1 ? t('settings.correlation.instanceSingular') : t('settings.correlation.instancePlural') }}
-                    </span>
-                  </div>
-                </q-td>
-                <q-td key="telemetry" :props="props">
-                  <div class="instance-telemetry-grid">
-                    <span v-if="props.row.totalLogs > 0" class="telemetry-badge telemetry-logs">{{ t('settings.correlation.logs') }}</span>
-                    <span v-else class="telemetry-slot-empty"></span>
-                    <span v-if="props.row.totalTraces > 0" class="telemetry-badge telemetry-traces">{{ t('settings.correlation.traces') }}</span>
-                    <span v-else class="telemetry-slot-empty"></span>
-                    <span v-if="props.row.totalMetrics > 0" class="telemetry-badge telemetry-metrics">{{ t('settings.correlation.metrics') }}</span>
-                    <span v-else class="telemetry-slot-empty"></span>
-                  </div>
-                </q-td>
-                <q-td key="last_seen" :props="props" class="td-last-seen">
-                  <span class="tw:text-sm last-seen-text"
-                  >{{ formatRelativeTime(props.row.lastSeen) }}</span>
-                </q-td>
-              </q-tr>
-
-              <!-- Expanded instance rows -->
-              <template v-if="expandedGroups.has(props.row.service_name)">
-                <q-tr
-                  v-for="instance in props.row.instances"
-                  :key="instance.id"
-                  class="instance-row"
-                  data-test="service-instance-row"
-                  @click="selectedService = instance"
+            <template #cell-service_name="{ row }">
+              <div class="flex min-w-0 items-center gap-1.5">
+                <button
+                  v-if="row.__type === 'summary' || row.__groupSize > 1"
+                  type="button"
+                  data-test="service-collapse-toggle"
+                  class="rounded-default text-text-secondary hover:bg-table-row-hover-bg hover:text-text-body inline-flex h-4.5 w-4.5 shrink-0 cursor-pointer items-center justify-center border-0 bg-transparent p-0"
+                  :aria-expanded="row.__type === 'summary' ? 'false' : 'true'"
+                  @click.stop="toggleServiceCollapse(row.service_name)"
                 >
-                  <!-- Service name cell: set_id badge + dimension badges -->
-                  <q-td key="service_name" :props="props">
-                    <div class="tw:pl-7 tw:flex tw:items-center tw:gap-2 tw:flex-wrap">
-                      <span class="set-id-badge">{{ instance.set_id }}</span>
-                      <span
-                        v-for="[key, value] in Object.entries(instance.disambiguation).sort(([a], [b]) => a.localeCompare(b))"
-                        :key="`${key}=${value}`"
-                        class="dimension-badge"
-                        :class="getDimensionColorClass(key)"
-                      >
-                        <span class="tw:font-medium">{{ key }}</span>=<span>{{ value }}</span>
-                      </span>
-                      <span v-if="Object.keys(instance.disambiguation).length === 0" class="tw:text-xs tw:italic no-dimensions-text"
-                      >{{ t('settings.correlation.noDimensions') }}</span>
-                    </div>
-                  </q-td>
-
-                  <!-- Telemetry cell: fixed slots so Logs/Traces/Metrics align vertically across instances -->
-                  <q-td key="telemetry" :props="props" class="td-telemetry-instance">
-                    <div class="instance-telemetry-grid">
-                      <span v-if="instance.logs_streams.length > 0" class="telemetry-badge telemetry-sm telemetry-logs">
-                        <q-tooltip class="tw:text-xs">{{ instance.logs_streams.join(', ') }}</q-tooltip>
-                        {{ t('settings.correlation.logsWithCount', { count: instance.logs_streams.length }) }}
-                      </span>
-                      <span v-else class="telemetry-slot-empty"></span>
-
-                      <span v-if="instance.traces_streams.length > 0" class="telemetry-badge telemetry-sm telemetry-traces">
-                        <q-tooltip class="tw:text-xs">{{ instance.traces_streams.join(', ') }}</q-tooltip>
-                        {{ t('settings.correlation.tracesWithCount', { count: instance.traces_streams.length }) }}
-                      </span>
-                      <span v-else class="telemetry-slot-empty"></span>
-
-                      <span v-if="instance.metrics_streams.length > 0" class="telemetry-badge telemetry-sm telemetry-metrics">
-                        <q-tooltip class="tw:text-xs">{{ instance.metrics_streams.join(', ') }}</q-tooltip>
-                        {{ t('settings.correlation.metricsWithCount', { count: instance.metrics_streams.length }) }}
-                      </span>
-                      <span v-else class="telemetry-slot-empty"></span>
-                    </div>
-                  </q-td>
-
-                  <!-- Last seen cell: right-aligned to match group header -->
-                  <q-td key="last_seen" :props="props" class="td-last-seen">
-                    <span class="tw:text-xs last-seen-text"
-                    >{{ formatRelativeTime(instance.last_seen) }}</span>
-                  </q-td>
-                </q-tr>
-              </template>
-            </template>
-
-            <!-- Pagination footer -->
-            <template v-slot:bottom>
-              <div class="bottom-btn tw:flex tw:items-center tw:justify-between tw:w-full tw:h-[2.25rem]">
-                <div class="o2-table-footer-title tw:w-[15.625rem] tw:mr-md">
-                  {{ filteredGroups.length === 1
-                    ? t('settings.correlation.serviceCountSingular', { count: filteredGroups.length })
-                    : t('settings.correlation.serviceCountPlural', { count: filteredGroups.length }) }}
-                  {{ t('settings.correlation.instancesCount', { count: totalInstances }) }}
-                </div>
-                <QTablePagination
-                  :scope="paginationScope"
-                  :position="'bottom'"
-                  :resultTotal="filteredGroups.length"
-                  :perPageOptions="perPageOptions"
-                  @update:changeRecordPerPage="changePagination"
-                />
+                  <OIcon
+                    :name="row.__type === 'summary' ? 'chevron-right' : 'expand-more'"
+                    size="sm"
+                  />
+                </button>
+                <span class="truncate font-semibold">{{ row.service_name }}</span>
               </div>
             </template>
-          </q-table>
+            <template #cell-workload="{ row }">
+              <OTag v-if="row.__type === 'summary'" type="countChip" value="neutral">
+                {{ row.instanceCount }}
+                {{
+                  row.instanceCount === 1
+                    ? t("settings.correlation.instanceSingular")
+                    : t("settings.correlation.instancePlural")
+                }}
+              </OTag>
+              <span
+                v-else
+                class="set-id-badge rounded-default text-2xs bg-badge-purple-soft-bg text-badge-purple-soft-text border-badge-purple-ol-border inline-flex shrink-0 items-center border px-2 py-[0.0625rem] font-semibold whitespace-nowrap"
+                >{{ row.set_id }}</span
+              >
+            </template>
+            <template #cell-identity="{ row }">
+              <span v-if="row.__type === 'summary'" class="text-text-muted text-xs">&mdash;</span>
+              <div v-else class="flex flex-wrap items-center gap-2">
+                <ODimensionChip
+                  v-for="[key, value] in Object.entries(row.disambiguation).sort(([a], [b]) =>
+                    a.localeCompare(b),
+                  )"
+                  :key="`${key}=${value}`"
+                  :dim-key="key"
+                  :value="String(value)"
+                />
+                <span
+                  v-if="Object.keys(row.disambiguation).length === 0"
+                  class="no-dimensions-text text-text-muted text-xs italic"
+                  >{{ t("settings.correlation.noDimensions") }}</span
+                >
+              </div>
+            </template>
+            <template #cell-telemetry="{ row }">
+              <div
+                v-if="row.__type === 'summary'"
+                class="instance-telemetry-row flex items-center gap-1 whitespace-nowrap"
+              >
+                <OTag v-if="row.totalLogs > 0" type="streamType" :value="'logs'">
+                  {{ t("settings.correlation.logsWithCount", { count: row.totalLogs }) }}
+                </OTag>
+                <OTag v-if="row.totalTraces > 0" type="streamType" :value="'traces'">
+                  {{ t("settings.correlation.tracesWithCount", { count: row.totalTraces }) }}
+                </OTag>
+                <OTag v-if="row.totalMetrics > 0" type="streamType" :value="'metrics'">
+                  {{ t("settings.correlation.metricsWithCount", { count: row.totalMetrics }) }}
+                </OTag>
+              </div>
+              <div v-else class="instance-telemetry-row flex items-center gap-1 whitespace-nowrap">
+                <span v-if="row.logs_streams.length > 0" class="inline-flex min-w-0">
+                  <OTag type="streamType" :value="'logs'">
+                    {{
+                      t("settings.correlation.logsWithCount", {
+                        count: row.logs_streams.length,
+                      })
+                    }}
+                  </OTag>
+                  <OTooltip :content="row.logs_streams.join(', ')" content-class="text-xs" />
+                </span>
+                <span v-if="row.traces_streams.length > 0" class="inline-flex min-w-0">
+                  <OTag type="streamType" :value="'traces'">
+                    {{
+                      t("settings.correlation.tracesWithCount", {
+                        count: row.traces_streams.length,
+                      })
+                    }}
+                  </OTag>
+                  <OTooltip :content="row.traces_streams.join(', ')" content-class="text-xs" />
+                </span>
+                <span v-if="row.metrics_streams.length > 0" class="inline-flex min-w-0">
+                  <OTag type="streamType" :value="'metrics'">
+                    {{
+                      t("settings.correlation.metricsWithCount", {
+                        count: row.metrics_streams.length,
+                      })
+                    }}
+                  </OTag>
+                  <OTooltip :content="row.metrics_streams.join(', ')" content-class="text-xs" />
+                </span>
+              </div>
+            </template>
+            <template #cell-last_seen="{ row }">
+              <OTimeCell
+                :value="row.lastSeen"
+                unit="us"
+                :timezone="store.state.timezone"
+                class="text-xs"
+              />
+            </template>
+
+            <!-- Bottom -->
+            <template #bottom>
+              <div class="flex h-9 w-full items-center justify-between">
+                <div class="w-[15.625rem] text-xs font-normal max-md:hidden">
+                  {{
+                    t("settings.correlation.serviceCountSingular", {
+                      count: filteredGroupCount,
+                    })
+                  }}
+                  {{
+                    t("settings.correlation.instancesCount", {
+                      count: totalInstances,
+                    })
+                  }}
+                </div>
+              </div>
+            </template>
+          </OTable>
         </div>
       </div>
     </div>
 
     <!-- Service detail side panel -->
-    <q-dialog
-      :model-value="!!selectedService"
-      position="right"
-      full-height
-      maximized
-      @update:model-value="(val: boolean) => { if (!val) selectedService = null }"
+    <ODrawer
+      bleed
+      :open="!!selectedService"
+      @update:open="
+        (val) => {
+          if (!val) selectedService = null;
+        }
+      "
+      size="lg"
+      :title="raw(selectedService?.service_name)"
+      data-test="service-side-panel"
     >
-      <q-card class="service-side-panel" data-test="service-side-panel">
+      <template #header-right>
+        <span
+          class="set-id-badge rounded-default text-2xs bg-badge-purple-soft-bg text-badge-purple-soft-text border-badge-purple-ol-border inline-flex shrink-0 items-center border px-2 py-[0.0625rem] font-semibold whitespace-nowrap"
+          >{{ selectedService?.set_id }}</span
+        >
+      </template>
 
-        <!-- Header -->
-        <div class="panel-header">
-          <div class="tw:flex tw:items-center tw:gap-2 tw:flex-wrap tw:flex-1 tw:min-w-0">
-            <span class="panel-service-name">{{ selectedService?.service_name }}</span>
-            <span class="set-id-badge">{{ selectedService?.set_id }}</span>
+      <!-- Default set warning banner -->
+      <div
+        v-if="selectedService?.set_id === 'default'"
+        class="panel-warning-banner bg-banner-warning-bg border-b-banner-warning-border text-banner-warning-text flex items-start gap-2.5 border-b px-5 py-3"
+      >
+        <OIcon name="info-outline" size="sm" class="mt-0.5 shrink-0" />
+        <div class="text-xs leading-relaxed">
+          <span class="font-semibold">{{ t("settings.correlation.defaultSetWarningTitle") }}</span>
+          {{ t("settings.correlation.defaultSetWarningBody") }}
+        </div>
+      </div>
+
+      <OSeparator />
+
+      <!-- Scrollable body -->
+      <div class="panel-body flex-1 overflow-y-auto p-0">
+        <!-- Instance Identity -->
+        <div class="panel-block border-b-border-default border-b px-5 py-4">
+          <div
+            class="panel-block-label text-text-label mb-2.5 text-xs font-semibold tracking-normal normal-case"
+          >
+            {{ t("settings.correlation.instanceIdentity") }}
           </div>
-          <q-btn v-close-popup flat round dense icon="close" size="sm" class="tw:shrink-0" />
+          <div
+            v-if="selectedService && Object.keys(selectedService.disambiguation).length > 0"
+            class="flex flex-wrap gap-1.5"
+          >
+            <ODimensionChip
+              v-for="[key, value] in Object.entries(selectedService.disambiguation).sort(
+                ([a], [b]) => a.localeCompare(b),
+              )"
+              :key="`${key}=${value}`"
+              :dim-key="key"
+              :value="value"
+            />
+          </div>
+          <div v-else class="panel-empty-text text-compact text-text-muted italic">
+            {{ t("settings.correlation.noDimensionsCatchAll") }}
+          </div>
         </div>
 
-        <!-- Default set warning banner -->
-        <div v-if="selectedService?.set_id === 'default'" class="panel-warning-banner">
-          <q-icon name="info_outline" size="1rem" class="tw:shrink-0 tw:mt-0.5" />
-          <div class="tw:text-xs tw:leading-relaxed">
-            <span class="tw:font-semibold">{{ t('settings.correlation.defaultSetWarningTitle') }}</span>
-            {{ t('settings.correlation.defaultSetWarningBody') }}
+        <!-- Stream Sources -->
+        <div class="panel-block border-b-border-default border-b px-5 py-4">
+          <div
+            class="panel-block-label text-text-label mb-2.5 text-xs font-semibold tracking-normal normal-case"
+          >
+            {{ t("settings.correlation.streamSources") }}
+          </div>
+          <div class="flex flex-col gap-3">
+            <!-- Logs -->
+            <div v-if="selectedService && selectedService.logs_streams.length > 0">
+              <div class="panel-signal-row flex items-start gap-3">
+                <OTag type="streamType" :value="'logs'" class="panel-signal-type" />
+                <div class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="stream in selectedService.logs_streams"
+                    :key="stream"
+                    class="stream-name-badge rounded-default text-2xs bg-surface-subtle text-text-body border-border-default inline-flex items-center border px-[0.4375rem] py-[0.0625rem] font-mono whitespace-nowrap"
+                    >{{ stream }}</span
+                  >
+                </div>
+              </div>
+            </div>
+
+            <!-- Traces -->
+            <div v-if="selectedService && selectedService.traces_streams.length > 0">
+              <div class="panel-signal-row flex items-start gap-3">
+                <OTag type="streamType" :value="'traces'" class="panel-signal-type" />
+                <div class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="stream in selectedService.traces_streams"
+                    :key="stream"
+                    class="stream-name-badge rounded-default text-2xs bg-surface-subtle text-text-body border-border-default inline-flex items-center border px-[0.4375rem] py-[0.0625rem] font-mono whitespace-nowrap"
+                    >{{ stream }}</span
+                  >
+                </div>
+              </div>
+            </div>
+
+            <!-- Metrics -->
+            <div v-if="selectedService && selectedService.metrics_streams.length > 0">
+              <div class="panel-signal-row flex items-start gap-3">
+                <OTag type="streamType" :value="'metrics'" class="panel-signal-type" />
+                <div class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="stream in selectedService.metrics_streams"
+                    :key="stream"
+                    class="stream-name-badge rounded-default text-2xs bg-surface-subtle text-text-body border-border-default inline-flex items-center border px-[0.4375rem] py-[0.0625rem] font-mono whitespace-nowrap"
+                    >{{ stream }}</span
+                  >
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
-        <q-separator />
-
-        <!-- Scrollable body -->
-        <div class="panel-body">
-
-          <!-- Instance Identity -->
-          <div class="panel-block">
-            <div class="panel-block-label">{{ t('settings.correlation.instanceIdentity') }}</div>
-            <div v-if="selectedService && Object.keys(selectedService.disambiguation).length > 0" class="tw:flex tw:flex-wrap tw:gap-1.5">
+        <!-- Field Name Mapping -->
+        <div
+          v-if="selectedService && Object.keys(selectedService.field_name_mapping ?? {}).length > 0"
+          class="panel-block border-b-border-default border-b px-5 py-4"
+        >
+          <div
+            class="panel-block-label text-text-label mb-2.5 text-xs font-semibold tracking-normal normal-case"
+          >
+            {{ t("settings.correlation.fieldNameMapping") }}
+          </div>
+          <div class="panel-mapping-grid">
+            <template
+              v-for="[raw, mapped] in Object.entries(selectedService.field_name_mapping ?? {}).sort(
+                ([a], [b]) => a.localeCompare(b),
+              )"
+              :key="raw"
+            >
               <span
-                v-for="[key, value] in Object.entries(selectedService.disambiguation).sort(([a], [b]) => a.localeCompare(b))"
-                :key="`${key}=${value}`"
-                class="dimension-badge"
-                :class="getDimensionColorClass(key)"
+                class="mapping-key text-2xs rounded-default bg-surface-subtle text-text-body border-border-default border px-1.5 py-[0.0625rem] font-mono whitespace-nowrap"
+                >{{ raw }}</span
               >
-                <span class="tw:font-medium">{{ key }}</span>=<span>{{ value }}</span>
-              </span>
-            </div>
-            <div v-else class="panel-empty-text">{{ t('settings.correlation.noDimensionsCatchAll') }}</div>
-          </div>
-
-          <!-- Stream Sources -->
-          <div class="panel-block">
-            <div class="panel-block-label">{{ t('settings.correlation.streamSources') }}</div>
-            <div class="tw:flex tw:flex-col tw:gap-3">
-
-              <!-- Logs -->
-              <div v-if="selectedService && selectedService.logs_streams.length > 0">
-                <div class="panel-signal-row">
-                  <span class="telemetry-badge telemetry-logs panel-signal-type">{{ t('settings.correlation.logs') }}</span>
-                  <div class="tw:flex tw:flex-wrap tw:gap-1.5">
-                    <span v-for="stream in selectedService.logs_streams" :key="stream" class="stream-name-badge">{{ stream }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Traces -->
-              <div v-if="selectedService && selectedService.traces_streams.length > 0">
-                <div class="panel-signal-row">
-                  <span class="telemetry-badge telemetry-traces panel-signal-type">{{ t('settings.correlation.traces') }}</span>
-                  <div class="tw:flex tw:flex-wrap tw:gap-1.5">
-                    <span v-for="stream in selectedService.traces_streams" :key="stream" class="stream-name-badge">{{ stream }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Metrics -->
-              <div v-if="selectedService && selectedService.metrics_streams.length > 0">
-                <div class="panel-signal-row">
-                  <span class="telemetry-badge telemetry-metrics panel-signal-type">{{ t('settings.correlation.metrics') }}</span>
-                  <div class="tw:flex tw:flex-wrap tw:gap-1.5">
-                    <span v-for="stream in selectedService.metrics_streams" :key="stream" class="stream-name-badge">{{ stream }}</span>
-                  </div>
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-          <!-- Field Name Mapping -->
-          <div v-if="selectedService && Object.keys(selectedService.field_name_mapping ?? {}).length > 0" class="panel-block">
-            <div class="panel-block-label">{{ t('settings.correlation.fieldNameMapping') }}</div>
-            <div class="panel-mapping-grid">
-              <template
-                v-for="[raw, mapped] in Object.entries(selectedService.field_name_mapping ?? {}).sort(([a], [b]) => a.localeCompare(b))"
-                :key="raw"
+              <OIcon name="arrow-forward" size="xs" class="text-text-muted justify-self-center" />
+              <span
+                class="mapping-val text-2xs rounded-default bg-badge-success-soft-bg text-badge-success-soft-text border-badge-success-ol-border border px-1.5 py-[0.0625rem] font-mono whitespace-nowrap"
+                >{{ mapped }}</span
               >
-                <span class="mapping-key">{{ raw }}</span>
-                <q-icon name="arrow_forward" size="0.75rem" class="tw:text-gray-400 tw:justify-self-center" />
-                <span class="mapping-val">{{ mapped }}</span>
-              </template>
-            </div>
+            </template>
           </div>
-
         </div>
-      </q-card>
-    </q-dialog>
+      </div>
+    </ODrawer>
 
     <ConfirmDialog
       :title="t('settings.correlation.resetServicesConfirmTitle')"
@@ -413,18 +492,32 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from "vue";
 import { useStore } from "vuex";
-import { useQuasar } from "quasar";
-import { useI18n } from "vue-i18n";
+import { raw, useI18nTyped, type I18nText } from "@/types/i18n";
 import serviceStreamsService from "@/services/service_streams";
-import QTablePagination from "@/components/shared/grid/Pagination.vue";
+import { serviceStreamKeys } from "@/services/service_streams.querykeys";
+import { queryClient } from "@/composables/query/queryClient";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
+import OSelect from "@/lib/forms/Select/OSelect.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
+import OSpinner from "@/lib/feedback/Spinner/OSpinner.vue";
+import OTable from "@/lib/core/Table/OTable.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
+import ODimensionChip from "@/lib/core/Badge/ODimensionChip.vue";
+import OTimeCell from "@/lib/core/Table/cells/OTimeCell.vue";
+import OSeparator from "@/lib/core/Separator/OSeparator.vue";
+import type { OTableColumnDef } from "@/lib/core/Table/OTable.types";
+import { toast } from "@/lib/feedback/Toast/useToast";
 
-const emit = defineEmits<{
+defineEmits<{
   (e: "navigate-to-configuration"): void;
 }>();
 
-const q = useQuasar();
-const { t } = useI18n();
+const { t } = useI18nTyped();
 
 interface ServiceRecord {
   id: string;
@@ -443,18 +536,13 @@ interface ServiceRecord {
 interface ServiceGroup {
   service_name: string;
   instances: ServiceRecord[];
-  sharedDimensions: [string, string][];
-  varyingKeys: string[];
-  totalLogs: number;
-  totalTraces: number;
-  totalMetrics: number;
-  correlationScore: number; // 0–3: number of signal types present across all instances
   lastSeen: number;
 }
 
 const store = useStore();
 
 const loading = ref(true);
+const forbidden = ref(false);
 const refreshing = ref(false);
 const resetting = ref(false);
 const error = ref<string | null>(null);
@@ -463,33 +551,32 @@ const searchQuery = ref("");
 const filterKey = ref<string | null>(null);
 const filterValue = ref<string | null>(null);
 const selectedService = ref<ServiceRecord | null>(null);
-const expandedGroups = ref<Set<string>>(new Set());
-// Reset pagination when filters change
+const pageSize = ref(20);
+const currentPage = ref(1);
+
 watch([filterKey, filterValue, searchQuery], () => {
-  pagination.value.page = 1;
+  currentPage.value = 1;
 });
 
 // Label override for internal field keys shown in the filter dropdown
-const KEY_DISPLAY_LABELS: Record<string, string> = {
-  set_id: t('settings.correlation.workload'),
+const KEY_DISPLAY_LABELS: Record<string, I18nText> = {
+  set_id: t("settings.correlation.workload"),
 };
 
-// All unique dimension keys + set_id across all services, as { label, value } objects
-const allKeys = computed((): { label: string; value: string }[] => {
+const allKeys = computed((): { label: I18nText; value: string }[] => {
   const keys = new Set<string>();
-  keys.add('set_id');
+  keys.add("set_id");
   for (const s of services.value) {
     for (const k of Object.keys(s.disambiguation)) keys.add(k);
   }
-  return [...keys].sort().map(k => ({ label: KEY_DISPLAY_LABELS[k] ?? k, value: k }));
+  return [...keys].sort().map((k) => ({ label: KEY_DISPLAY_LABELS[k] ?? raw(k), value: k }));
 });
 
-// Values for the currently selected key
 const allValues = computed((): string[] => {
   if (!filterKey.value) return [];
   const vals = new Set<string>();
   for (const s of services.value) {
-    if (filterKey.value === 'set_id') {
+    if (filterKey.value === "set_id") {
       vals.add(s.set_id);
     } else {
       const v = s.disambiguation[filterKey.value];
@@ -499,89 +586,104 @@ const allValues = computed((): string[] => {
   return [...vals].sort();
 });
 
-// Filtered options for use-input type-to-search
-const filteredKeyOptions = ref<{ label: string; value: string }[]>([]);
-const filteredValueOptions = ref<string[]>([]);
-
-function filterKeyFn(val: string, update: (fn: () => void) => void) {
-  update(() => {
-    const needle = val.toLowerCase();
-    filteredKeyOptions.value = needle
-      ? allKeys.value.filter(k => k.label.toLowerCase().includes(needle))
-      : allKeys.value;
-  });
-}
-
-function filterValueFn(val: string, update: (fn: () => void) => void) {
-  update(() => {
-    const needle = val.toLowerCase();
-    filteredValueOptions.value = needle
-      ? allValues.value.filter(v => v.toLowerCase().includes(needle))
-      : allValues.value;
-  });
-}
-
 function unique(arr: string[]): string[] {
   return [...new Set(arr)];
 }
 
-const pagination = ref({
-  page: 1,
-  rowsPerPage: 20,
-});
+// Group-level sort state (server-mode OTable: sort UI only, order is ours).
+// The pivotRowColumns name-cell merge only joins CONSECUTIVE rows, so sorting
+// must reorder whole service groups — never individual instance rows.
+const sortColumn = ref<string>("last_seen");
+const sortOrder = ref<"asc" | "desc">("desc");
 
-const sortBy = ref<string>('last_seen');
-const sortDescending = ref<boolean>(true);
+function onSortChange({ column, order }: { column: string; order: "asc" | "desc" }) {
+  if (column) {
+    sortColumn.value = column;
+    sortOrder.value = order;
+  } else if (sortColumn.value === "last_seen") {
+    // OTable's 3-state header cycle emits "clear" after desc. Our default IS
+    // last_seen desc, so mapping clear back to the default would make the
+    // Last Seen header a dead loop (desc → clear → desc …). Treat clear as
+    // the missing third state instead: ascending.
+    sortOrder.value = "asc";
+  } else {
+    sortColumn.value = "last_seen";
+    sortOrder.value = "desc";
+  }
+}
 
-const perPageOptions: any = [
-  { label: "20", value: 20 },
-  { label: "50", value: 50 },
-  { label: "100", value: 100 },
-  { label: "250", value: 250 },
-  { label: "500", value: 500 },
+const columns: OTableColumnDef[] = [
+  {
+    id: "service_name",
+    header: t("settings.correlation.serviceName"),
+    accessorKey: "service_name",
+    sortable: true,
+    resizable: true,
+    hideable: true,
+    minSize: 160,
+    meta: { align: "left" },
+  },
+  {
+    id: "workload",
+    header: t("settings.correlation.workload"),
+    accessorKey: "set_id",
+    resizable: true,
+    hideable: true,
+    size: 160,
+    meta: { align: "left" },
+  },
+  {
+    id: "identity",
+    header: t("settings.correlation.instanceIdentity"),
+    accessorKey: "identity",
+    resizable: true,
+    hideable: true,
+    minSize: 220,
+    meta: { align: "left", flex: true },
+  },
+  {
+    id: "telemetry",
+    header: t("settings.correlation.telemetryCoverage"),
+    accessorKey: "telemetry",
+    resizable: true,
+    hideable: true,
+    size: 260,
+    minSize: 260,
+    meta: { align: "left", flex: true },
+  },
+  {
+    id: "last_seen",
+    header: t("settings.correlation.lastSeen"),
+    accessorKey: "lastSeen",
+    sortable: true,
+    resizable: true,
+    hideable: true,
+    size: 120,
+    meta: { align: "left" },
+  },
 ];
 
-const changePagination = (val: { label: string; value: number }) => {
-  pagination.value.rowsPerPage = val.value;
-  pagination.value.page = 1;
-};
+// Per-service collapse: a collapsed service renders one aggregated summary
+// row instead of its instance rows. Session-only state.
+const collapsedServices = ref<Set<string>>(new Set());
 
-const onTableRequest = (props: any) => {
-  const { sortBy: newSortBy, descending } = props.pagination;
-  if (newSortBy && newSortBy !== sortBy.value) {
-    sortBy.value = newSortBy;
-    sortDescending.value = descending;
-    pagination.value.page = 1;
-  } else if (newSortBy && newSortBy === sortBy.value) {
-    sortDescending.value = descending;
+function toggleServiceCollapse(name: string) {
+  const next = new Set(collapsedServices.value);
+  if (next.has(name)) {
+    next.delete(name);
+  } else {
+    next.add(name);
   }
-};
+  collapsedServices.value = next;
+}
 
-const columns = computed(() => [
-  {
-    name: "service_name",
-    label: t("settings.correlation.serviceName"),
-    field: "service_name",
-    align: "left" as const,
-    sortable: true,
-  },
-  {
-    name: "telemetry",
-    label: t("settings.correlation.telemetryCoverage"),
-    field: "logs_streams",
-    align: "left" as const,
-    style: "width: 16.25rem; min-width: 16.25rem",
-  },
-  {
-    name: "last_seen",
-    label: t("settings.correlation.lastSeen"),
-    field: "lastSeen",
-    align: "right" as const,
-    sortable: true,
-    style: "width: 7.5rem; min-width: 7.5rem; padding-right: 1.25rem",
-    headerStyle: "width: 7.5rem; min-width: 7.5rem; padding-right: 1.25rem",
-  },
-]);
+function handleRowClick(row: any) {
+  if (row.__type === "summary") {
+    toggleServiceCollapse(row.service_name);
+    return;
+  }
+  selectedService.value = row;
+}
 
 // Group services by service_name
 const serviceGroups = computed((): ServiceGroup[] => {
@@ -591,211 +693,111 @@ const serviceGroups = computed((): ServiceGroup[] => {
     groupMap[s.service_name].push(s);
   }
 
-  return Object.entries(groupMap).map(([name, instances]) => {
-    const allDimKeys = new Set<string>();
-    for (const inst of instances) {
-      for (const k of Object.keys(inst.disambiguation)) allDimKeys.add(k);
-    }
-
-    const shared: [string, string][] = [];
-    const varying: string[] = [];
-    for (const key of allDimKeys) {
-      const values = new Set(instances.map(i => i.disambiguation[key]).filter(Boolean));
-      if (values.size === 1) {
-        shared.push([key, [...values][0]]);
-      } else {
-        varying.push(key);
+  return Object.entries(groupMap)
+    .map(([name, instances]) => {
+      let latestSeen = 0;
+      for (const inst of instances) {
+        if (inst.last_seen > latestSeen) latestSeen = inst.last_seen;
       }
-    }
 
-    const allLogs = new Set<string>();
-    const allTraces = new Set<string>();
-    const allMetrics = new Set<string>();
-    let latestSeen = 0;
-    for (const inst of instances) {
-      inst.logs_streams.forEach(s => allLogs.add(s));
-      inst.traces_streams.forEach(s => allTraces.add(s));
-      inst.metrics_streams.forEach(s => allMetrics.add(s));
-      if (inst.last_seen > latestSeen) latestSeen = inst.last_seen;
-    }
-
-    const correlationScore = (allLogs.size > 0 ? 1 : 0) + (allTraces.size > 0 ? 1 : 0) + (allMetrics.size > 0 ? 1 : 0);
-
-    // Sort instances: highest correlation first, default set_id always last
-    const sortedInstances = [...instances].sort((a, b) => {
-      const aIsDefault = a.set_id === 'default' ? 1 : 0;
-      const bIsDefault = b.set_id === 'default' ? 1 : 0;
-      if (aIsDefault !== bIsDefault) return aIsDefault - bIsDefault;
-      const scoreA = (a.logs_streams.length > 0 ? 1 : 0) + (a.traces_streams.length > 0 ? 1 : 0) + (a.metrics_streams.length > 0 ? 1 : 0);
-      const scoreB = (b.logs_streams.length > 0 ? 1 : 0) + (b.traces_streams.length > 0 ? 1 : 0) + (b.metrics_streams.length > 0 ? 1 : 0);
-      return scoreB - scoreA;
-    });
-
-    return {
-      service_name: name,
-      instances: sortedInstances,
-      sharedDimensions: shared.sort(([a], [b]) => a.localeCompare(b)),
-      varyingKeys: varying.sort(),
-      totalLogs: allLogs.size,
-      totalTraces: allTraces.size,
-      totalMetrics: allMetrics.size,
-      correlationScore,
-      lastSeen: latestSeen,
-    };
-  }).sort((a, b) => b.lastSeen - a.lastSeen);
+      return {
+        service_name: name,
+        instances,
+        lastSeen: latestSeen,
+      };
+    })
+    .sort((a, b) => b.lastSeen - a.lastSeen);
 });
 
-/** Filter instances within a group based on active key/value filter */
 function filterInstances(instances: ServiceRecord[]): ServiceRecord[] {
   if (!filterKey.value || !filterValue.value) return instances;
-  return instances.filter(inst => {
-    if (filterKey.value === 'set_id') return inst.set_id === filterValue.value;
+  return instances.filter((inst) => {
+    if (filterKey.value === "set_id") return inst.set_id === filterValue.value;
     const v = inst.disambiguation[filterKey.value!];
     return v === filterValue.value;
   });
 }
 
-const filteredGroups = computed((): ServiceGroup[] => {
+// Groups surviving the active search/filter, in display order.
+const visibleGroups = computed((): ServiceGroup[] => {
   let groups = serviceGroups.value;
 
-  // Filter by dimension key+value (including set_id)
   if (filterKey.value && filterValue.value) {
     groups = groups
-      .map(g => ({ ...g, instances: filterInstances(g.instances) }))
-      .filter(g => g.instances.length > 0);
+      .map((g) => ({ ...g, instances: filterInstances(g.instances) }))
+      .filter((g) => g.instances.length > 0);
   }
 
-  // Filter by search query
   if (searchQuery.value) {
     const query = searchQuery.value.toLowerCase();
-    groups = groups.filter(g =>
-      g.service_name.toLowerCase().includes(query) ||
-      g.instances.some(inst =>
-        inst.set_id.toLowerCase().includes(query) ||
-        Object.entries(inst.disambiguation).some(([k, v]) =>
-          k.toLowerCase().includes(query) || v.toLowerCase().includes(query)
-        ) ||
-        inst.logs_streams.some(stream => stream.toLowerCase().includes(query)) ||
-        inst.traces_streams.some(stream => stream.toLowerCase().includes(query)) ||
-        inst.metrics_streams.some(stream => stream.toLowerCase().includes(query))
-      )
-    );
+    const matches = (inst: ServiceRecord) =>
+      inst.service_name.toLowerCase().includes(query) ||
+      inst.set_id.toLowerCase().includes(query) ||
+      Object.entries(inst.disambiguation).some(
+        ([k, v]) => k.toLowerCase().includes(query) || v.toLowerCase().includes(query),
+      ) ||
+      inst.logs_streams.some((stream) => stream.toLowerCase().includes(query)) ||
+      inst.traces_streams.some((stream) => stream.toLowerCase().includes(query)) ||
+      inst.metrics_streams.some((stream) => stream.toLowerCase().includes(query));
+    groups = groups
+      .map((g) => ({ ...g, instances: g.instances.filter(matches) }))
+      .filter((g) => g.instances.length > 0);
   }
 
-  // Apply sorting
-  if (sortBy.value) {
-    groups = [...groups].sort((a, b) => {
-      let aVal: any, bVal: any;
-      if (sortBy.value === 'last_seen') {
-        aVal = a.lastSeen || 0;
-        bVal = b.lastSeen || 0;
-      } else {
-        aVal = (a as any)[sortBy.value];
-        bVal = (b as any)[sortBy.value];
-      }
-      if (typeof aVal === 'string' && typeof bVal === 'string') {
-        const result = aVal.localeCompare(bVal);
-        return sortDescending.value ? -result : result;
-      }
-      const diff = aVal - bVal;
-      return sortDescending.value ? -diff : diff;
-    });
-  }
-
-  return groups;
+  const dir = sortOrder.value === "desc" ? -1 : 1;
+  return [...groups].sort((a, b) =>
+    sortColumn.value === "service_name"
+      ? dir * a.service_name.localeCompare(b.service_name)
+      : dir * ((a.lastSeen || 0) - (b.lastSeen || 0)),
+  );
 });
+
+// Flat rows: every instance is a visible row. Instances of a service stay
+// adjacent so the service_name pivot merge can join them. A collapsed service
+// contributes a single aggregated summary row instead — except while a search
+// or key/value filter is active, which overrides collapse so a match can
+// never hide inside a collapsed group.
+const flatRows = computed((): any[] => {
+  const dir = sortOrder.value === "desc" ? -1 : 1;
+  // Instances within a group are always ordered by recency — latest on top by
+  // default, following the header direction when sorting by Last Seen.
+  const instDir = sortColumn.value === "last_seen" ? dir : -1;
+  const filtersActive = !!searchQuery.value || !!(filterKey.value && filterValue.value);
+
+  return visibleGroups.value.flatMap((g): any[] => {
+    if (!filtersActive && collapsedServices.value.has(g.service_name) && g.instances.length > 1) {
+      const logs = new Set<string>();
+      const traces = new Set<string>();
+      const metrics = new Set<string>();
+      for (const inst of g.instances) {
+        inst.logs_streams.forEach((s) => logs.add(s));
+        inst.traces_streams.forEach((s) => traces.add(s));
+        inst.metrics_streams.forEach((s) => metrics.add(s));
+      }
+      return [
+        {
+          id: `service-summary:${g.service_name}`,
+          __type: "summary",
+          service_name: g.service_name,
+          instanceCount: g.instances.length,
+          totalLogs: logs.size,
+          totalTraces: traces.size,
+          totalMetrics: metrics.size,
+          lastSeen: g.lastSeen,
+        },
+      ];
+    }
+    return [...g.instances]
+      .sort((a, b) => instDir * (a.last_seen - b.last_seen))
+      .map((inst) => ({ ...inst, lastSeen: inst.last_seen, __groupSize: g.instances.length }));
+  });
+});
+
+const filteredGroupCount = computed(() => visibleGroups.value.length);
 
 const totalInstances = computed(() =>
-  filteredGroups.value.reduce((sum, g) => sum + g.instances.length, 0)
+  visibleGroups.value.reduce((sum, g) => sum + g.instances.length, 0),
 );
-
-const paginatedGroups = computed(() => {
-  const start = (pagination.value.page - 1) * pagination.value.rowsPerPage;
-  return filteredGroups.value.slice(start, start + pagination.value.rowsPerPage);
-});
-
-const paginationScope = computed(() => ({
-  pagination: {
-    page: pagination.value.page,
-    rowsPerPage: pagination.value.rowsPerPage,
-    rowsNumber: filteredGroups.value.length,
-  },
-  pagesNumber: Math.ceil(filteredGroups.value.length / pagination.value.rowsPerPage),
-  isFirstPage: pagination.value.page === 1,
-  isLastPage: pagination.value.page >= Math.ceil(filteredGroups.value.length / pagination.value.rowsPerPage),
-  firstPage: () => { pagination.value.page = 1; },
-  prevPage: () => { if (pagination.value.page > 1) pagination.value.page--; },
-  nextPage: () => {
-    const maxPage = Math.ceil(filteredGroups.value.length / pagination.value.rowsPerPage);
-    if (pagination.value.page < maxPage) pagination.value.page++;
-  },
-  lastPage: () => {
-    pagination.value.page = Math.ceil(filteredGroups.value.length / pagination.value.rowsPerPage);
-  },
-}));
-
-const toggleGroup = (serviceName: string) => {
-  const newSet = new Set(expandedGroups.value);
-  if (newSet.has(serviceName)) {
-    newSet.delete(serviceName);
-  } else {
-    newSet.add(serviceName);
-  }
-  expandedGroups.value = newSet;
-};
-
-const getDimensionColorClass = (key: string): string => {
-  const colorMap: Record<string, string> = {
-    'k8s-deployment': 'badge-blue',
-    'k8s-namespace': 'badge-orange',
-    'k8s-cluster': 'badge-indigo',
-    'deployment': 'badge-blue',
-    'namespace': 'badge-orange',
-    'cluster': 'badge-indigo',
-    'env': 'badge-green',
-    'environment': 'badge-green',
-    'host': 'badge-purple',
-    'hostname': 'badge-purple',
-    'service': 'badge-cyan',
-    'service_name': 'badge-cyan',
-    'region': 'badge-pink',
-    'zone': 'badge-pink',
-    'pod': 'badge-teal',
-    'container': 'badge-red',
-    'app': 'badge-yellow',
-    'application': 'badge-yellow',
-  };
-
-  if (colorMap[key]) return colorMap[key];
-
-  const lowerKey = key.toLowerCase();
-  for (const [pattern, className] of Object.entries(colorMap)) {
-    if (lowerKey.includes(pattern)) return className;
-  }
-
-  const classes = ['badge-gray', 'badge-amber', 'badge-violet', 'badge-rose'];
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = ((hash << 5) - hash) + key.charCodeAt(i);
-    hash = hash & hash;
-  }
-  return classes[Math.abs(hash) % classes.length];
-};
-
-const formatRelativeTime = (microseconds: number): string => {
-  if (!microseconds) return "—";
-  const nowMs = Date.now();
-  const thenMs = microseconds / 1000;
-  const diffSeconds = Math.floor((nowMs - thenMs) / 1000);
-
-  if (diffSeconds < 60) return `${diffSeconds}s ago`;
-  const diffMinutes = Math.floor(diffSeconds / 60);
-  if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  const diffHours = Math.floor(diffMinutes / 60);
-  if (diffHours < 24) return `${diffHours}h ago`;
-  const diffDays = Math.floor(diffHours / 24);
-  return `${diffDays}d ago`;
-};
 
 const loadServices = async (isRefresh = false) => {
   if (isRefresh) {
@@ -804,11 +806,12 @@ const loadServices = async (isRefresh = false) => {
     loading.value = true;
   }
   error.value = null;
+  forbidden.value = false;
 
   try {
     const orgId = store.state.selectedOrganization?.identifier;
     if (!orgId) {
-      throw new Error("No organization selected");
+      throw new Error(t("settings.discoveredServices.noOrganizationSelected"));
     }
 
     const response = await serviceStreamsService.getServicesList(orgId);
@@ -821,7 +824,10 @@ const loadServices = async (isRefresh = false) => {
     }));
   } catch (err: any) {
     console.error("Failed to load services:", err);
-    error.value = err?.message || "Failed to load services";
+    forbidden.value = err?.response?.status === 403;
+    if (!forbidden.value) {
+      error.value = err?.message || t("settings.discoveredServices.failedToLoadServices");
+    }
   } finally {
     loading.value = false;
     refreshing.value = false;
@@ -839,521 +845,34 @@ const doResetServices = async () => {
   try {
     const orgId = store.state.selectedOrganization?.identifier;
     if (!orgId) {
-      throw new Error("No organization selected");
+      throw new Error(t("settings.discoveredServices.noOrganizationSelected"));
     }
 
     const response = await serviceStreamsService.resetServices(orgId);
-    const { deleted_count, note } = response.data;
+    // The reset deletes the rows the cached services list and analytics are built from.
+    void queryClient.invalidateQueries({ queryKey: serviceStreamKeys.all(orgId) });
+    const { deleted_count } = response.data;
 
-    q.notify({
-      type: "positive",
-      message: t("settings.correlation.resetServicesSuccess", { count: deleted_count }),
-      caption: note,
+    toast({
+      variant: "success",
+      message: t("settings.correlation.resetServicesSuccess", {
+        count: deleted_count,
+      }),
       timeout: 5000,
     });
 
     await loadServices();
   } catch (err: any) {
-    q.notify({
-      type: "negative",
+    toast({
+      variant: "error",
       message: t("settings.correlation.resetServicesFailed"),
-      caption: err?.message || String(err),
     });
   } finally {
     resetting.value = false;
   }
 };
 
-
 onMounted(() => {
   loadServices();
 });
 </script>
-
-<style scoped lang="scss">
-.discovered-services {
-  background: var(--o2-card-bg);
-}
-
-/* Info banner */
-.info-banner {
-  padding: 0.75rem 1rem;
-  background: rgba(59, 130, 246, 0.04);
-  border: 1px solid rgba(59, 130, 246, 0.15);
-}
-
-.ds-dark .info-banner {
-  background: rgba(59, 130, 246, 0.08);
-  border-color: rgba(59, 130, 246, 0.25);
-}
-
-.info-banner-icon {
-  color: #1d4ed8;
-}
-
-.ds-dark .info-banner-icon {
-  color: #93c5fd;
-}
-
-.info-banner-text {
-  color: #374151;
-}
-
-.ds-dark .info-banner-text {
-  color: #d1d5db;
-}
-
-/* Services header bar */
-.services-header-bar {
-  padding: 0.75rem 1rem;
-  height: 4.25rem;
-}
-
-/* Filter selects */
-.filter-select {
-  min-width: 10rem;
-}
-
-/* Table sizing */
-.services-table {
-  width: 100%;
-}
-
-.services-table-full-height {
-  height: calc(100vh - 21.25rem);
-}
-
-/* Table cell overrides */
-.td-last-seen {
-  text-align: right;
-  padding-right: 1.25rem;
-}
-
-.td-telemetry-instance {
-  padding-left: 0;
-  text-align: right;
-}
-
-.last-seen-text {
-  color: #6b7280;
-}
-
-.ds-dark .last-seen-text {
-  color: #9ca3af;
-}
-
-.no-dimensions-text {
-  color: #9ca3af;
-}
-
-.ds-dark .no-dimensions-text {
-  color: #6b7280;
-}
-
-.config-link-btn {
-  border: 1px solid #3b82f6;
-  color: #2563eb;
-  background: rgba(59, 130, 246, 0.08);
-  transition: background 0.15s;
-  &:hover {
-    background: rgba(59, 130, 246, 0.18);
-  }
-}
-
-.ds-dark .config-link-btn {
-  border-color: #60a5fa;
-  color: #93c5fd;
-  background: rgba(96, 165, 250, 0.12);
-  &:hover {
-    background: rgba(96, 165, 250, 0.22);
-  }
-}
-
-/* Group header row */
-.group-header-row {
-  cursor: pointer;
-  font-weight: 500;
-  &:hover {
-    background: rgba(0, 0, 0, 0.02) !important;
-  }
-}
-
-.ds-dark .group-header-row:hover {
-  background: rgba(255, 255, 255, 0.03) !important;
-}
-
-.instance-count-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.0625rem 0.5rem;
-  border-radius: 0.625rem;
-  font-size: 0.6875rem;
-  font-weight: 500;
-  background: #e5e7eb;
-  color: #6b7280;
-}
-
-.ds-dark .instance-count-badge {
-  background: #4b5563;
-  color: #d1d5db;
-}
-
-/* set_id badge */
-.set-id-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.0625rem 0.5rem;
-  border-radius: 0.625rem;
-  font-size: 0.6875rem;
-  font-weight: 600;
-  background: #ede9fe;
-  color: #5b21b6;
-  border: 1px solid #a78bfa;
-  white-space: nowrap;
-  flex-shrink: 0;
-}
-
-.ds-dark .set-id-badge {
-  background: rgba(109, 40, 217, 0.2);
-  color: #c4b5fd;
-  border-color: #7c3aed;
-}
-
-/* Instance sub-rows */
-.instance-row {
-  cursor: pointer;
-  &:hover {
-    background: rgba(59, 130, 246, 0.04) !important;
-  }
-}
-
-.ds-dark .instance-row:hover {
-  background: rgba(59, 130, 246, 0.08) !important;
-}
-
-/* Dimension badges — full values, no truncation */
-.dimension-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.125rem;
-  padding: 0.1875rem 0.625rem;
-  border-radius: 0.375rem;
-  font-size: 0.75rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.dimension-badge-sm {
-  padding: 0.125rem 0.5rem;
-  font-size: 0.6875rem;
-}
-
-.badge-more {
-  background: #e5e7eb;
-  color: #6b7280;
-  font-weight: 500;
-}
-
-/* Telemetry badges — border-only */
-.telemetry-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.25rem 0.75rem;
-  border-radius: 0.375rem;
-  font-size: 0.8125rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.telemetry-sm {
-  padding: 0.1875rem 0.625rem;
-  font-size: 0.75rem;
-}
-
-.telemetry-logs { border: 1px solid #1d4ed8; }
-.telemetry-traces { border: 1px solid #c2410c; }
-.telemetry-metrics { border: 1px solid #065f46; }
-.telemetry-inactive { border: 1px solid #9ca3af; color: #9ca3af; }
-
-/* Dimension color palette — border only */
-.badge-blue { border: 1px solid #1d4ed8; }
-.badge-green { border: 1px solid #065f46; }
-.badge-yellow { border: 1px solid #92400e; }
-.badge-pink { border: 1px solid #9f1239; }
-.badge-purple { border: 1px solid #7c3aed; }
-.badge-orange { border: 1px solid #c2410c; }
-.badge-cyan { border: 1px solid #0e7490; }
-.badge-indigo { border: 1px solid #4f46e5; }
-.badge-teal { border: 1px solid #0f766e; }
-.badge-red { border: 1px solid #dc2626; }
-.badge-gray { border: 1px solid #4b5563; }
-.badge-amber { border: 1px solid #d97706; }
-.badge-violet { border: 1px solid #7c3aed; }
-.badge-rose { border: 1px solid #e11d48; }
-
-/* Dark mode */
-.ds-dark .badge-more { background: #4b5563; color: #d1d5db; }
-.ds-dark .telemetry-logs { border-color: #93c5fd; }
-.ds-dark .telemetry-traces { border-color: #fdba74; }
-.ds-dark .telemetry-metrics { border-color: #6ee7b7; }
-.ds-dark .telemetry-inactive { border-color: #6b7280; color: #6b7280; }
-.ds-dark .badge-blue { border-color: #93c5fd; }
-.ds-dark .badge-green { border-color: #6ee7b7; }
-.ds-dark .badge-yellow { border-color: #fcd34d; }
-.ds-dark .badge-pink { border-color: #f9a8d4; }
-.ds-dark .badge-purple { border-color: #c4b5fd; }
-.ds-dark .badge-orange { border-color: #fdba74; }
-.ds-dark .badge-cyan { border-color: #67e8f9; }
-.ds-dark .badge-indigo { border-color: #a5b4fc; }
-.ds-dark .badge-teal { border-color: #5eead4; }
-.ds-dark .badge-red { border-color: #fca5a5; }
-.ds-dark .badge-gray { border-color: #d1d5db; }
-.ds-dark .badge-amber { border-color: #fbbf24; }
-.ds-dark .badge-violet { border-color: #c4b5fd; }
-.ds-dark .badge-rose { border-color: #fda4af; }
-
-/* Side panel */
-.service-side-panel {
-  width: 35rem;
-  max-width: 95vw;
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  border-radius: 0 !important;
-}
-
-.panel-header {
-  display: flex;
-  align-items: center;
-  gap: 0.625rem;
-  padding: 1rem 1.25rem;
-  flex-shrink: 0;
-  border-bottom: 1px solid #e5e7eb;
-}
-
-.ds-dark .panel-header {
-  border-bottom-color: #374151;
-}
-
-.panel-service-name {
-  font-size: 1.125rem;
-  font-weight: 700;
-  color: #111827;
-  letter-spacing: -0.01em;
-}
-
-.ds-dark .panel-service-name {
-  color: #f9fafb;
-}
-
-.panel-warning-banner {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.625rem;
-  padding: 0.75rem 1.25rem;
-  background: rgba(234, 179, 8, 0.08);
-  border-bottom: 1px solid rgba(234, 179, 8, 0.25);
-  color: #854d0e;
-}
-
-.ds-dark .panel-warning-banner {
-  background: rgba(234, 179, 8, 0.1);
-  border-bottom-color: rgba(234, 179, 8, 0.3);
-  color: #fde68a;
-}
-
-.panel-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 0;
-}
-
-.panel-block {
-  padding: 1rem 1.25rem;
-  border-bottom: 1px solid #f3f4f6;
-}
-
-.ds-dark .panel-block {
-  border-bottom-color: #1f2937;
-}
-
-.panel-block-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  text-transform: none;
-  letter-spacing: normal;
-  color: #9ca3af;
-  margin-bottom: 0.625rem;
-}
-
-.panel-empty-text {
-  font-size: 0.8125rem;
-  color: #9ca3af;
-  font-style: italic;
-}
-
-.ds-dark .panel-empty-text {
-  color: #6b7280;
-}
-
-.panel-signal-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.75rem;
-}
-
-.panel-signal-type {
-  flex-shrink: 0;
-  min-width: 3.75rem;
-  justify-content: center;
-  margin-top: 0.0625rem;
-}
-
-/* Clickable log stream badges */
-.stream-nav-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.1875rem 0.625rem;
-  border-radius: 0.3125rem;
-  font-size: 0.75rem;
-  font-family: monospace;
-  cursor: pointer;
-  border: none;
-  transition: background 0.15s, color 0.15s;
-}
-
-.stream-nav-logs {
-  background: rgba(29, 78, 216, 0.07);
-  color: #1d4ed8;
-  border: 1px solid rgba(29, 78, 216, 0.2);
-}
-
-.stream-nav-logs:hover {
-  background: rgba(29, 78, 216, 0.15);
-  border-color: #1d4ed8;
-}
-
-.ds-dark .stream-nav-logs {
-  background: rgba(147, 197, 253, 0.1);
-  color: #93c5fd;
-  border-color: rgba(147, 197, 253, 0.25);
-}
-
-.ds-dark .stream-nav-logs:hover {
-  background: rgba(147, 197, 253, 0.2);
-  border-color: #93c5fd;
-}
-
-/* Field mapping grid */
-.panel-mapping-grid {
-  display: grid;
-  grid-template-columns: auto 1.25rem auto;
-  align-items: center;
-  gap: 0.375rem 0.5rem;
-}
-
-.section-label {
-  color: #6b7280;
-}
-
-.ds-dark .section-label {
-  color: #9ca3af;
-}
-
-/* Stream sources matrix */
-.streams-matrix {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.streams-matrix-row {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.625rem;
-}
-
-.streams-matrix-type {
-  flex-shrink: 0;
-  width: 3.5rem;
-  justify-content: center;
-}
-
-.stream-name-badge {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.0625rem 0.4375rem;
-  border-radius: 0.25rem;
-  font-size: 0.6875rem;
-  font-family: monospace;
-  background: #f3f4f6;
-  color: #374151;
-  border: 1px solid #e5e7eb;
-  white-space: nowrap;
-}
-
-.ds-dark .stream-name-badge {
-  background: #1f2937;
-  color: #d1d5db;
-  border-color: #374151;
-}
-
-/* Field mapping */
-.mapping-key {
-  font-family: monospace;
-  font-size: 0.6875rem;
-  padding: 0.0625rem 0.375rem;
-  border-radius: 0.25rem;
-  background: #f3f4f6;
-  color: #374151;
-  border: 1px solid #e5e7eb;
-  white-space: nowrap;
-}
-
-.mapping-val {
-  font-family: monospace;
-  font-size: 0.6875rem;
-  padding: 0.0625rem 0.375rem;
-  border-radius: 0.25rem;
-  background: #ecfdf5;
-  color: #065f46;
-  border: 1px solid #a7f3d0;
-  white-space: nowrap;
-}
-
-.ds-dark .mapping-key {
-  background: #1f2937;
-  color: #d1d5db;
-  border-color: #374151;
-}
-
-.ds-dark .mapping-val {
-  background: rgba(6, 95, 70, 0.2);
-  color: #6ee7b7;
-  border-color: #065f46;
-}
-
-/* Instance telemetry — fixed columns wide enough for "Logs (99)" / "Traces (99)" / "Metrics (99)" */
-.instance-telemetry-grid {
-  display: inline-grid;
-  grid-template-columns: minmax(4rem, auto) minmax(5rem, auto) minmax(5.75rem, auto);
-  gap: 0.25rem;
-  align-items: center;
-  justify-items: start;
-}
-
-.telemetry-slot-empty {
-  display: inline-block;
-}
-
-/* Prevent last-seen text from overlapping scrollbar */
-:deep(td:last-child),
-:deep(th:last-child) {
-  padding-right: 1.5rem !important;
-}
-
-.refresh-btn {
-  min-height: 2.25rem;
-  height: 2.25rem;
-}
-</style>

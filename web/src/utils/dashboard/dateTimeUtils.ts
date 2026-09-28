@@ -1,4 +1,5 @@
-import { date } from "quasar";
+import { gt } from "@/types/i18n";
+import { subtractRelativeTime } from "@/utils/date";
 import { fromZonedTime } from "date-fns-tz";
 
 /**
@@ -45,22 +46,15 @@ export const isTimeStamp = (sample: any, treatAsNonTimestamp: any) => {
 
   // If treatAsNonTimestamp is false (timestamp field), check if all values are 16 digit numbers
   if (treatAsNonTimestamp === false) {
-    return sample.every((value: any) =>
-      microsecondsPattern.test(value?.toString()),
-    );
+    return sample.every((value: any) => microsecondsPattern.test(value?.toString()));
   }
   // If treatAsNonTimestamp is null or undefined, check if all values are 16 digits
   if (treatAsNonTimestamp === null || treatAsNonTimestamp === undefined) {
-    return sample.every((value: any) =>
-      microsecondsPattern.test(value?.toString()),
-    );
+    return sample.every((value: any) => microsecondsPattern.test(value?.toString()));
   }
 };
 
-export function convertOffsetToSeconds(
-  offset: string,
-  endISOTimestamp: number,
-) {
+export function convertOffsetToSeconds(offset: string, endISOTimestamp: number) {
   try {
     const periodValue = parseInt(offset.slice(0, -1)); // Extract the numeric part
     const period = offset.slice(-1); // Extract the last character (unit)
@@ -74,32 +68,32 @@ export function convertOffsetToSeconds(
 
     const subtractObject: any = {};
 
-    let periodAsStr = periodValue.toString();
+    let periodAsStr = "";
 
     switch (period) {
       case "s": // Seconds
         subtractObject.seconds = periodValue;
-        periodAsStr += " Seconds ago";
+        periodAsStr = gt("dashboard.utils.secondsAgo", { count: periodValue });
         break;
       case "m": // Minutes
         subtractObject.minutes = periodValue;
-        periodAsStr += " Minutes ago";
+        periodAsStr = gt("dashboard.utils.minutesAgo", { count: periodValue });
         break;
       case "h": // Hours
         subtractObject.hours = periodValue;
-        periodAsStr += " Hours ago";
+        periodAsStr = gt("dashboard.utils.hoursAgo", { count: periodValue });
         break;
       case "d": // Days
         subtractObject.days = periodValue;
-        periodAsStr += " Days ago";
+        periodAsStr = gt("dashboard.utils.daysAgo", { count: periodValue });
         break;
       case "w": // Weeks
         subtractObject.days = periodValue * 7;
-        periodAsStr += " Weeks ago";
+        periodAsStr = gt("dashboard.utils.weeksAgo", { count: periodValue });
         break;
       case "M": // Months (approximate, using 30 days per month)
         subtractObject.months = periodValue;
-        periodAsStr += " Months ago";
+        periodAsStr = gt("dashboard.utils.monthsAgo", { count: periodValue });
         break;
       default:
         return {
@@ -109,10 +103,7 @@ export function convertOffsetToSeconds(
     }
 
     // subtract period from endISOTimestamp
-    const startTimeStamp = date.subtractFromDate(
-      endISOTimestamp,
-      subtractObject,
-    );
+    const startTimeStamp = subtractRelativeTime(endISOTimestamp, subtractObject);
 
     // return difference of seconds between endISOTimestamp and startTimeStamp
     return {
@@ -129,10 +120,7 @@ export function convertOffsetToSeconds(
 }
 
 // Function to convert chart timestamp (timezone-adjusted) back to UTC
-export const getUTCTimestampFromZonedTimestamp = (
-  timestampMs: number,
-  currentTimeZone: string,
-) => {
+export const getUTCTimestampFromZonedTimestamp = (timestampMs: number, currentTimeZone: string) => {
   if (!timestampMs) return null;
 
   // Use fromZonedTime to convert from currentTimeZone back to UTC

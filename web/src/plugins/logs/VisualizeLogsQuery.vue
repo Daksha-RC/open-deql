@@ -16,14 +16,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <!-- eslint-disable vue/no-unused-components -->
 <template>
-  <div style="height: 100%; width: 100%">
+  <div class="h-full w-full">
     <!-- PanelEditor Content Area (no header for logs visualization) -->
     <PanelEditor
       ref="panelEditorRef"
       pageType="logs"
       :editMode="true"
       :dashboardData="{}"
-      :variablesData="{}"
+      :variablesData="emptyVariablesData"
       :selectedDateTime="dashboardPanelData.meta.dateTime"
       :externalChartData="chartData"
       :searchResponse="searchResponse"
@@ -37,17 +37,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
     />
 
     <!-- Add to Dashboard Dialog -->
-    <q-dialog
-      v-model="showAddToDashboardDialog"
-      position="right"
-      full-height
-      maximized
-    >
-      <add-to-dashboard
-        @save="addPanelToDashboard"
-        :dashboardPanelData="dashboardPanelData"
-      />
-    </q-dialog>
+    <AddToDashboard
+      v-model:open="showAddToDashboardDialog"
+      :dashboardPanelData="dashboardPanelData"
+      @save="addPanelToDashboard"
+    />
   </div>
 </template>
 
@@ -58,16 +52,20 @@ import {
   watch,
   defineAsyncComponent,
   computed,
+  provide,
+  inject,
+  toRefs,
+  onActivated,
 } from "vue";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped } from "@/types/i18n";
 import { useStore } from "vuex";
 import useDashboardPanelData from "@/composables/dashboard/useDashboardPanel";
-import { provide, inject, toRefs, onActivated } from "vue";
 import useNotifications from "@/composables/useNotifications";
 import { isSimpleSelectAllQuery } from "@/utils/query/sqlUtils";
 import { useSearchStream } from "@/composables/useLogs/useSearchStream";
 import { searchState } from "@/composables/useLogs/searchState";
 import { PanelEditor } from "@/components/dashboards/PanelEditor";
+import type { PanelEditorVariablesData } from "@/components/dashboards/PanelEditor";
 
 const AddToDashboard = defineAsyncComponent(() => {
   return import("./../metrics/AddToDashboard.vue");
@@ -110,20 +108,25 @@ export default defineComponent({
   },
   emits: ["handleChartApiError", "searchRequestTraceIdsUpdated"],
   setup(props, { emit }) {
-    const dashboardPanelDataPageKey = inject(
-      "dashboardPanelDataPageKey",
-      "logs",
-    );
-    const { t } = useI18n();
+    const dashboardPanelDataPageKey = inject("dashboardPanelDataPageKey", "logs");
+    const { t } = useI18nTyped();
     const store = useStore();
-    const { dashboardPanelData, resetAggregationFunction, validatePanel } =
-      useDashboardPanelData(dashboardPanelDataPageKey);
+    const { dashboardPanelData, resetAggregationFunction, validatePanel } = useDashboardPanelData(
+      dashboardPanelDataPageKey,
+      t,
+    );
     const resultMetaData = ref(null);
 
     const { showErrorNotification } = useNotifications();
 
     const { searchObj } = searchState();
-    const { buildSearch } = useSearchStream();
+    const { buildSearch } = useSearchStream(t);
+
+    // Logs visualization has no dashboard variables; keep the runtime `{}` value.
+    const emptyVariablesData = {} as PanelEditorVariablesData;
+
+    // Same reference as props.errorData; mutation targets its nested fields only.
+    const errorDataModel = computed(() => props.errorData);
 
     const regionClusterParams = computed(() => {
       if (store.state.zoConfig?.super_cluster_enabled) {
@@ -135,11 +138,7 @@ export default defineComponent({
       return undefined;
     });
 
-    const {
-      visualizeChartData,
-      is_ui_histogram,
-      shouldRefreshWithoutCache,
-    }: any = toRefs(props);
+    const { visualizeChartData, is_ui_histogram }: any = toRefs(props);
     const chartData = ref(visualizeChartData.value);
 
     const showAddToDashboardDialog = ref(false);
@@ -148,15 +147,7 @@ export default defineComponent({
     const panelEditorRef = ref<InstanceType<typeof PanelEditor> | null>(null);
 
     // Allowed chart types for logs visualization
-    const allowedChartTypes = [
-      "area",
-      "bar",
-      "h-bar",
-      "line",
-      "stacked",
-      "scatter",
-      "table",
-    ];
+    const allowedChartTypes = ["area", "area-stacked", "bar", "h-bar", "line", "scatter", "table"];
 
     // Watch for external chart data changes
     watch(
@@ -185,9 +176,7 @@ export default defineComponent({
         store.state.zoConfig.quick_mode_enabled === true &&
         isSimpleSelectAllQuery(logsPageQuery)
       ) {
-        showErrorNotification(
-          "Select * query is not supported for visualization.",
-        );
+        showErrorNotification(t("logs.visualizeLogsQuery.selectAllNotSupported"));
         // Prevent the change by not updating the type
         return;
       }
@@ -206,7 +195,7 @@ export default defineComponent({
         const errorList = props.errorData.errors ?? [];
         errorList.splice(0);
         errorList.push(errorMsg.message);
-        props.errorData.value = errorMsg?.message ?? "";
+        errorDataModel.value.value = errorMsg?.message ?? "";
       }
 
       emit("handleChartApiError", errorMsg);
@@ -227,12 +216,7 @@ export default defineComponent({
       setHoveredSeriesName: function (name: string) {
         hoveredSeriesState.value.hoveredSeriesName = name ?? "";
       },
-      setIndex: function (
-        dataIndex: number,
-        seriesIndex: number,
-        panelId: any,
-        hoveredTime?: any,
-      ) {
+      setIndex: function (dataIndex: number, seriesIndex: number, panelId: any, hoveredTime?: any) {
         hoveredSeriesState.value.dataIndex = dataIndex ?? -1;
         hoveredSeriesState.value.seriesIndex = seriesIndex ?? -1;
         hoveredSeriesState.value.panelId = panelId ?? -1;
@@ -257,8 +241,7 @@ export default defineComponent({
             searchObj.data.queryResults.converted_histogram_query;
         } else if (props.searchResponse?.converted_histogram_query) {
           // Fallback: check searchResponse (from logs search API)
-          dashboardPanelData.data.queries[0].query =
-            props.searchResponse.converted_histogram_query;
+          dashboardPanelData.data.queries[0].query = props.searchResponse.converted_histogram_query;
         } else if (panelResultMetaData?.[0]?.[0]?.converted_histogram_query) {
           // Fallback: check panelResultMetaData (new format)
           dashboardPanelData.data.queries[0].query =
@@ -279,10 +262,8 @@ export default defineComponent({
 
       if (errors.length) {
         // set errors into errorData
-        props.errorData.errors = errors;
-        showErrorNotification(
-          "There are some errors, please fix them and try again",
-        );
+        errorDataModel.value.errors = errors;
+        showErrorNotification(t("logs.visualizeLogsQuery.fixErrorsAndRetry"));
         return;
       } else {
         showAddToDashboardDialog.value = true;
@@ -312,8 +293,6 @@ export default defineComponent({
       showAddToDashboardDialog,
       addPanelToDashboard,
       addToDashboard,
-      is_ui_histogram,
-      shouldRefreshWithoutCache,
       hoveredSeriesState,
       resultMetaData,
       isSimpleSelectAllQuery,
@@ -321,11 +300,8 @@ export default defineComponent({
       panelEditorRef,
       allowedChartTypes,
       regionClusterParams,
+      emptyVariablesData,
     };
   },
 });
 </script>
-
-<style lang="scss" scoped>
-@import "@/styles/logs/visualizelogs-query.scss";
-</style>

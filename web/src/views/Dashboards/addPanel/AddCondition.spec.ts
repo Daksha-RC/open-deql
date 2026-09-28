@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mount, shallowMount } from "@vue/test-utils";
+import { shallowMount } from "@vue/test-utils";
 import { nextTick } from "vue";
 import AddCondition from "./AddCondition.vue";
 import { createI18n } from "vue-i18n";
@@ -39,7 +39,7 @@ vi.mock("../../../composables/dashboard/useDashboardPanel", () => ({
   })),
 }));
 
-// Mock DOM methods to prevent Quasar errors
+// Mock DOM methods to prevent errors from missing DOM APIs
 Object.defineProperty(Element.prototype, "removeAttribute", {
   writable: true,
   value: vi.fn(),
@@ -47,7 +47,6 @@ Object.defineProperty(Element.prototype, "removeAttribute", {
 
 describe("AddCondition.vue", () => {
   let wrapper: any;
-  let mockLoadFilterItem: any;
 
   const defaultProps = {
     condition: {
@@ -108,29 +107,13 @@ describe("AddCondition.vue", () => {
       props: { ...defaultProps, ...props },
       global: {
         plugins: [i18n],
-        stubs: [
-          "q-select",
-          "q-btn",
-          "q-btn-group",
-          "q-menu",
-          "q-tabs",
-          "q-tab",
-          "q-tab-panels",
-          "q-tab-panel",
-          "q-separator",
-          "q-item",
-          "q-item-section",
-          "q-checkbox",
-          "CommonAutoComplete",
-          "SanitizedHtmlRenderer",
-        ],
+        stubs: ["CommonAutoComplete", "SanitizedHtmlRenderer"],
       },
       ...mountOptions,
     });
   };
 
   beforeEach(() => {
-    mockLoadFilterItem = vi.fn();
     vi.clearAllMocks();
   });
 
@@ -149,7 +132,7 @@ describe("AddCondition.vue", () => {
   it("should not display logical operator when conditionIndex is 0", () => {
     wrapper = createWrapper({ conditionIndex: 0 });
     const logicalOperatorSelect = wrapper.find(
-      '[data-test="dashboard-add-condition-logical-operator-0}"]',
+      '[data-test="dashboard-add-condition-logical-operator-0"]',
     );
     expect(logicalOperatorSelect.exists()).toBe(false);
   });
@@ -157,7 +140,7 @@ describe("AddCondition.vue", () => {
   it("should display logical operator when conditionIndex is not 0", () => {
     wrapper = createWrapper({ conditionIndex: 1 });
     const logicalOperatorSelect = wrapper.find(
-      '[data-test="dashboard-add-condition-logical-operator-1}"]',
+      '[data-test="dashboard-add-condition-logical-operator-1"]',
     );
     expect(logicalOperatorSelect.exists()).toBe(true);
   });
@@ -262,10 +245,10 @@ describe("AddCondition.vue", () => {
 
     it("should return formatted condition for comparison operators", () => {
       const comparisonTests = [
-        { operator: ">=", value: "100", expected: "test_column >= '100'" },
-        { operator: "<=", value: "50", expected: "test_column <= '50'" },
-        { operator: ">", value: "10", expected: "test_column > '10'" },
-        { operator: "<", value: "5", expected: "test_column < '5'" },
+        { operator: ">=", value: "100", expected: "test_column >= 100" },
+        { operator: "<=", value: "50", expected: "test_column <= 50" },
+        { operator: ">", value: "10", expected: "test_column > 10" },
+        { operator: "<", value: "5", expected: "test_column < 5" },
       ];
 
       comparisonTests.forEach(({ operator, value, expected }) => {
@@ -362,7 +345,7 @@ describe("AddCondition.vue", () => {
       });
 
       const result = wrapper.vm.computedLabel(wrapper.props().condition);
-      expect(result).toBe("message NOT LIKE %debug%");
+      expect(result).toBe("message NOT LIKE '%debug%'");
     });
 
     it("should return LIKE condition for Starts With operator", () => {
@@ -376,7 +359,7 @@ describe("AddCondition.vue", () => {
       });
 
       const result = wrapper.vm.computedLabel(wrapper.props().condition);
-      expect(result).toBe("path LIKE /api%");
+      expect(result).toBe("path LIKE '/api%'");
     });
 
     it("should return LIKE condition for Ends With operator", () => {
@@ -390,7 +373,7 @@ describe("AddCondition.vue", () => {
       });
 
       const result = wrapper.vm.computedLabel(wrapper.props().condition);
-      expect(result).toBe("filename LIKE %.log");
+      expect(result).toBe("filename LIKE '%.log'");
     });
   });
 
@@ -466,13 +449,7 @@ describe("AddCondition.vue", () => {
 
       const options = wrapper.vm.sortedFilteredListOptions;
       expect(Array.isArray(options)).toBe(true);
-      expect(options).toEqual([
-        "alpha",
-        "option1",
-        "option2",
-        "option3",
-        "zebra",
-      ]); // Sorted alphabetically
+      expect(options).toEqual(["alpha", "option1", "option2", "option3", "zebra"]); // Sorted alphabetically
     });
 
     it("should filter list options based on search term", async () => {
@@ -518,32 +495,49 @@ describe("AddCondition.vue", () => {
   });
 
   describe("Operator array", () => {
+    // The `value` half is the wire format persisted on the panel and matched by
+    // identity in sqlUtils / dashboardAutoQueryBuilder / panelValidation, so it is
+    // asserted separately from the (translatable) label a person reads.
+    const expectedOperatorValues = [
+      "=",
+      "<>",
+      ">=",
+      "<=",
+      ">",
+      "<",
+      "IN",
+      "NOT IN",
+      "str_match",
+      "str_match_ignore_case",
+      "match_all",
+      "re_match",
+      "re_not_match",
+      "Contains",
+      "Starts With",
+      "Ends With",
+      "Not Contains",
+      "Is Null",
+      "Is Not Null",
+    ];
+
     it("should contain all expected operators", () => {
       wrapper = createWrapper();
 
-      const expectedOperators = [
-        "=",
-        "<>",
-        ">=",
-        "<=",
-        ">",
-        "<",
-        "IN",
-        "NOT IN",
-        "str_match",
-        "str_match_ignore_case",
-        "match_all",
-        "re_match",
-        "re_not_match",
-        "Contains",
-        "Starts With",
-        "Ends With",
-        "Not Contains",
-        "Is Null",
-        "Is Not Null",
-      ];
+      expect(wrapper.vm.operators.map((op: any) => op.value)).toEqual(expectedOperatorValues);
+    });
 
-      expect(wrapper.vm.operators).toEqual(expectedOperators);
+    it("labels the SQL tokens with themselves and the prose operators from i18n", () => {
+      wrapper = createWrapper();
+      const labelOf = Object.fromEntries(
+        wrapper.vm.operators.map((op: any) => [op.value, op.label]),
+      );
+
+      // Syntax is its own label — nothing to translate.
+      expect(labelOf["="]).toBe("=");
+      expect(labelOf["str_match"]).toBe("str_match");
+      // Prose goes through t(); this spec's t echoes the key path.
+      expect(labelOf["Starts With"]).toBe("dashboard.filterOperators.startsWith");
+      expect(labelOf["Is Not Null"]).toBe("dashboard.filterOperators.isNotNull");
     });
   });
 
@@ -551,7 +545,12 @@ describe("AddCondition.vue", () => {
     it("should contain AND and OR options", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.vm.filterOptions).toEqual(["AND", "OR"]);
+      // After OSelect migration, filterOptions uses the {label, value} object
+      // shape required by OSelect instead of a flat string array.
+      expect(wrapper.vm.filterOptions).toEqual([
+        { label: "AND", value: "AND" },
+        { label: "OR", value: "OR" },
+      ]);
     });
   });
 

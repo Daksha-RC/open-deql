@@ -41,6 +41,7 @@ pub enum ErrorSource {
     SsoClaimParser(SsoClaimParserError),
     Search,
     Other,
+    OrgStorage(OrgStorageError),
 }
 
 impl Serialize for ErrorSource {
@@ -89,6 +90,11 @@ impl Serialize for ErrorSource {
                     )?;
                 }
             }
+            ErrorSource::OrgStorage(ose) => {
+                state.serialize_field("error_source", "org_storage")?;
+                state.serialize_field("org_id", &ose.org_id)?;
+                state.serialize_field("error", &ose.error)?;
+            }
         }
         state.end()
     }
@@ -118,11 +124,12 @@ impl PipelineError {
         node_type: String,
         error: String,
         fn_name: Option<String>,
+        value: Option<serde_json::Value>,
     ) {
         self.node_errors
             .entry(node_id.clone())
             .or_insert_with(|| NodeErrors::new(node_id, node_type, fn_name))
-            .add_error(error);
+            .add_error(error, value);
     }
 }
 
@@ -131,8 +138,8 @@ impl PipelineError {
 pub struct NodeErrors {
     node_id: String,
     node_type: String,
-    errors: HashSet<String>,
-    error_count: i32,
+    pub errors: HashSet<(String, Option<serde_json::Value>)>,
+    pub error_count: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub function_name: Option<String>,
 }
@@ -148,9 +155,9 @@ impl NodeErrors {
         }
     }
 
-    pub fn add_error(&mut self, error: String) {
+    pub fn add_error(&mut self, error: String, value: Option<serde_json::Value>) {
         self.error_count += 1;
-        self.errors.insert(error);
+        self.errors.insert((error, value));
     }
 }
 
@@ -207,6 +214,12 @@ impl SsoClaimParserError {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrgStorageError {
+    pub org_id: String,
+    pub error: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,7 +239,7 @@ mod tests {
                     NodeErrors {
                         node_id: "node_1".to_string(),
                         node_type: "function".to_string(),
-                        errors: HashSet::from(["failed to compile".to_string()]),
+                        errors: HashSet::from([("failed to compile".to_string(), None)]),
                         error_count: 1,
                         function_name: None,
                     },
@@ -328,11 +341,13 @@ mod tests {
             "function".to_string(),
             "exec error".to_string(),
             Some("fn1".to_string()),
+            None,
         );
         pe.add_node_error(
             "node1".to_string(),
             "function".to_string(),
             "another error".to_string(),
+            None,
             None,
         );
         assert_eq!(pe.node_errors.len(), 1);
@@ -379,9 +394,9 @@ mod tests {
             Some("fn_name".to_string()),
         );
         assert_eq!(node.error_count, 0);
-        node.add_error("err1".to_string());
-        node.add_error("err1".to_string()); // duplicate — deduped in HashSet
-        node.add_error("err2".to_string());
+        node.add_error("err1".to_string(), None);
+        node.add_error("err1".to_string(), None); // duplicate — deduped in HashSet
+        node.add_error("err2".to_string(), None);
         assert_eq!(node.error_count, 3);
         assert_eq!(node.errors.len(), 2); // "err1" deduplicated
     }

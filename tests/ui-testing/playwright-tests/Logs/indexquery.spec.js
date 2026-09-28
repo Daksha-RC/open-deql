@@ -11,17 +11,21 @@ const { getAuthHeaders, getOrgIdentifier } = require('../utils/cloud-auth.js');
 // Legacy login function replaced by global authentication via navigateToBase
 
 const selectStream = async (pm, stream) => {
-  // Strategic 1000ms wait for stream selection UI stabilization - this is functionally necessary
-  await pm.page.waitForTimeout(1000);
+  // Stream selection UI stabilization - deterministic wait keyed on the index-dropdown wrapper
+  await pm.logsPage.waitForStreamSelectReady();
   await pm.logsPage.selectStream(stream);
 };
 
 async function applyQueryButton(pm) {
-  const search = pm.page.waitForResponse(logData.applyQuery);
-  // Strategic 1000ms wait for query preparation - this is functionally necessary
-  await pm.page.waitForTimeout(1000);
+  // Query preparation - deterministic wait keyed on refresh button readiness
+  await pm.logsPage.waitForRefreshButtonReady();
+  const search = pm.page.waitForResponse(
+    (response) => /\/api\/.+\/_search/.test(response.url()),
+    { timeout: 30000 }
+  );
   await pm.logsPage.clickRefreshButton();
-  await expect.poll(async () => (await search).status()).toBe(200);
+  const response = await search;
+  expect(response.status()).toBe(200);
 }
 
 async function runQuery(page, query) {
@@ -40,14 +44,14 @@ async function runQuery(page, query) {
 
         if (!response.ok) {
           const errorText = await response.text();
-          console.error('Query failed', response.status, errorText);
+          console.error('Query failed', response.status, errorText); // browser-context (page.evaluate) — testLogger unavailable
           return { error: errorText, status: response.status };
         }
 
         const result = await response.json();
         return result;
       } catch (err) {
-        console.error('Query execution error', err.message);
+        console.error('Query execution error', err.message); // browser-context (page.evaluate) — testLogger unavailable
         return { error: err.message };
       }
     }, {
@@ -75,9 +79,9 @@ test.describe("Compare SQL query execution times", () => {
     // Navigate to base URL with authentication
     await navigateToBase(page);
     pm = new PageManager(page);
-    
-    // Strategic 500ms wait for post-authentication stabilization - this is functionally necessary
-    await page.waitForTimeout(500);
+
+    // Post-authentication stabilization - deterministic wait keyed on DOM-ready state
+    await page.waitForLoadState('domcontentloaded');
 
     // Data ingestion for performance testing
     await ingestTestData(page);
@@ -285,8 +289,21 @@ test.describe("Compare SQL query execution times", () => {
     expect(ingestionResponse.status[0].successful).toBe(3);
     expect(ingestionResponse.status[0].failed).toBe(0);
     testLogger.info('Verified all 3 test logs were successfully ingested');
-    
-    await page.waitForTimeout(5000); // Wait for data to be indexed and available
+
+    // Wait for data to be indexed and available - poll the streams API until the new stream is discoverable
+    await expect.poll(async () => {
+      return await page.evaluate(async ({ url, headers, orgId, streamName }) => {
+        try {
+          const res = await fetch(`${url}/api/${orgId}/streams?type=logs`, { headers });
+          if (!res.ok) return false;
+          const data = await res.json();
+          const list = Array.isArray(data) ? data : (data?.list || []);
+          return list.some((s) => s.name === streamName);
+        } catch {
+          return false;
+        }
+      }, { url: process.env.INGESTION_URL, headers, orgId, streamName });
+    }, { intervals: [1000, 1000, 1500, 2000], timeout: 30000 }).toBe(true);
 
     // Navigate to logs page and select test stream
     await page.goto(`${logData.logsUrl}?org_identifier=${getOrgIdentifier()}`);
@@ -319,10 +336,12 @@ test.describe("Compare SQL query execution times", () => {
     await pm.logsPage.selectRelative6Hours(); // Using 6h since 2h might not exist
     await applyQueryButton(pm);
 
-    // Verify all 3 logs are visible (all within 6 hours)
+    // Verify all 3 logs are visible (all within 6 hours). Assert on the log
+    // message (the FTS "body" field shown in the default view) which uniquely
+    // identifies the row; the non-body "data_age" field is not in the default
+    // columns and is covered by the message text already.
     await pm.logsPage.expectLogsTableRowCount(3);
     await pm.logsPage.waitForSearchResultAndCheckText("Recent log entry - 1 hour ago");
-    await pm.logsPage.waitForSearchResultAndCheckText("1h_old");
     testLogger.info('6-hour range test passed: All 3 logs visible (all within 6 hours)');
 
     // Test 3: Return to 6 days - should show all 3 logs again (final verification)
@@ -330,15 +349,15 @@ test.describe("Compare SQL query execution times", () => {
     await pm.logsPage.clickPast6DaysButton();
     await applyQueryButton(pm);
 
-    // Verify all 3 logs are visible again (confirms filtering is reversible)
+    // Verify all 3 logs are visible again (confirms filtering is reversible).
+    // Assert on the log messages (the FTS "body" field shown by default), which
+    // uniquely identify each row; the non-body "data_age" values are redundant
+    // with these and are not in the default columns.
     await pm.logsPage.expectLogsTableRowCount(3);
     await pm.logsPage.waitForSearchResultAndCheckText("Recent log entry - 1 hour ago");
     await pm.logsPage.waitForSearchResultAndCheckText("Three hour old log entry - 3 hours ago");
     await pm.logsPage.waitForSearchResultAndCheckText("Four hour old log entry - 4 hours ago");
-    await pm.logsPage.waitForSearchResultAndCheckText("1h_old");
-    await pm.logsPage.waitForSearchResultAndCheckText("3h_old");
-    await pm.logsPage.waitForSearchResultAndCheckText("4h_old");
-    
+
     testLogger.info('Final verification passed: All 3 logs visible in 6-day range');
     testLogger.info('Time range filtering validation completed successfully - Progressive filtering works: 0 → 3 → 3 logs as range expands');
 

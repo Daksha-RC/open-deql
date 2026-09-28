@@ -13,25 +13,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import {
-  describe,
-  expect,
-  it,
-  beforeEach,
-  afterEach,
-  vi,
-} from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import * as quasar from "quasar";
+import { reactive } from "vue";
 import SearchResult from "@/plugins/traces/SearchResult.vue";
 import i18n from "@/locales";
 import router from "@/test/unit/helpers/router";
 import { createStore } from "vuex";
-
-installQuasar({
-  plugins: [quasar.Dialog, quasar.Notify],
-});
 
 const mockStore = createStore({
   state: {
@@ -44,7 +32,7 @@ const mockStore = createStore({
   },
 });
 
-const mockSearchObj = {
+const mockSearchObj = reactive({
   data: {
     queryResults: {
       hits: [
@@ -124,6 +112,9 @@ const mockSearchObj = {
     showHistogram: true,
     resultGrid: {
       rowsPerPage: 10,
+      // Mirrors `useTraces`, which seeds this false. Omitting it made the
+      // wrap binding start `undefined` and hid the reactivity problem below.
+      wrapCells: false,
       navigation: {
         currentRowIndex: 0,
       },
@@ -132,7 +123,7 @@ const mockSearchObj = {
   loading: false,
   searchApplied: true,
   organizationIdentifier: "test-org",
-};
+});
 
 vi.mock("@/composables/useTraces", () => ({
   default: () => ({
@@ -151,11 +142,10 @@ const globalOptions = {
     store: mockStore,
   },
   stubs: {
-    "q-resize-observer": true,
     TracesSearchResultList: {
       name: "TracesSearchResultList",
-      template: '<div data-test="traces-search-result-list" class="search-list tw:w-full"></div>',
-      props: ["hits", "loading", "searchPerformed", "showHeader"],
+      template: '<div data-test="traces-search-result-list" class="search-list w-full"></div>',
+      props: ["hits", "loading", "searchPerformed", "showHeader", "wrap"],
       emits: ["row-click", "load-more"],
     },
     TracesMetricsDashboard: {
@@ -174,6 +164,28 @@ describe("SearchResult", () => {
   beforeEach(async () => {
     wrapper = mount(SearchResult, { global: globalOptions });
     await flushPromises();
+  });
+
+  // A long operation name is often the widest thing on a trace or span row,
+  // and clipping it hides exactly the part that tells two entries apart. The
+  // logs table has this affordance; traces and spans need it too.
+  describe("wrap toggle", () => {
+    it("renders a wrap button", () => {
+      expect(wrapper.find('[data-test="traces-search-result-wrap-btn"]').exists()).toBe(true);
+    });
+
+    it("toggles the shared wrap flag and passes it to the list", async () => {
+      const before = mockSearchObj.meta.resultGrid.wrapCells;
+
+      await wrapper.find('[data-test="traces-search-result-wrap-btn"]').trigger("click");
+      expect(mockSearchObj.meta.resultGrid.wrapCells).toBe(!before);
+
+      const list = wrapper.findComponent({ name: "TracesSearchResultList" });
+      expect(list.props("wrap")).toBe(!before);
+
+      await wrapper.find('[data-test="traces-search-result-wrap-btn"]').trigger("click");
+      expect(mockSearchObj.meta.resultGrid.wrapCells).toBe(before);
+    });
   });
 
   afterEach(() => {
@@ -197,7 +209,7 @@ describe("SearchResult", () => {
     const searchList = wrapper.find('[data-test="traces-search-result-list"]');
     expect(searchList.exists()).toBe(true);
     expect(searchList.classes()).toContain("search-list");
-    expect(searchList.classes()).toContain("tw:w-full");
+    expect(searchList.classes()).toContain("w-full");
   });
 
   it("should render TracesMetricsDashboard component", () => {
@@ -248,7 +260,6 @@ describe("SearchResult", () => {
       expect(wrapper.emitted("update:scroll")).toBeTruthy();
 
       expect(mockSearchObj.data.resultGrid.currentPage).toBe(2);
-
     });
 
     it("should not emit update:scroll when loading is true", async () => {
@@ -267,6 +278,23 @@ describe("SearchResult", () => {
     it("should have expandRowDetail method for handling trace clicks", () => {
       expect(wrapper.vm.expandRowDetail).toBeDefined();
       expect(typeof wrapper.vm.expandRowDetail).toBe("function");
+    });
+
+    it("uses the exact aggregated trace range without padding", async () => {
+      const push = vi.spyOn(router, "push").mockResolvedValue(undefined as any);
+      const trace = mockSearchObj.data.queryResults.hits[0];
+
+      wrapper.vm.expandRowDetail(trace);
+
+      expect(push).toHaveBeenCalledWith(
+        expect.objectContaining({
+          query: expect.objectContaining({
+            from: trace.trace_start_time,
+            to: trace.trace_end_time,
+          }),
+        }),
+      );
+      push.mockRestore();
     });
   });
 
@@ -342,6 +370,12 @@ describe("SearchResult", () => {
         "get:traceDetails",
         "metrics:filters-updated",
         "run-query",
+        "remove-filter",
+        "jump-to-stream-data",
+        "error-only-toggled",
+        "ask-ai",
+        "send-to-ai-chat",
+        "open-mobile-fields",
       ];
 
       expect(wrapper.vm.$options.emits).toEqual(expectedEmits);

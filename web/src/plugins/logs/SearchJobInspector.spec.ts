@@ -15,14 +15,37 @@
 
 import { describe, expect, it, beforeEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import SearchJobInspector from "@/plugins/logs/SearchJobInspector.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import searchService from "@/services/search";
+import { chartColor } from "@/utils/chartTheme";
 
-installQuasar({ plugins: [Dialog, Notify] });
+// ── Stubs for migrated ODialog / ODrawer ────────────────────────────────────
+// Mirror the real contract: v-model:open, title, size and the named slots
+// (default + header-right) that SearchJobInspector relies on.
+const oDrawerStub = {
+  inheritAttrs: false,
+  template:
+    '<div data-test="o-drawer" v-if="open">' +
+    '<div data-test="o-drawer-title">{{ title }}</div>' +
+    '<div data-test="o-drawer-header-right"><slot name="header-right" /></div>' +
+    '<div data-test="o-drawer-body"><slot /></div>' +
+    "</div>",
+  props: ["open", "size", "title"],
+  emits: ["update:open"],
+};
+
+const oDialogStub = {
+  inheritAttrs: false,
+  template:
+    '<div data-test="o-dialog" v-if="open">' +
+    '<div data-test="o-dialog-title">{{ title }}</div>' +
+    '<div data-test="o-dialog-body"><slot /></div>' +
+    "</div>",
+  props: ["open", "size", "title"],
+  emits: ["update:open"],
+};
 
 // A fixed microsecond timestamp: 2024-03-15 09:30:00 UTC
 const START_TIME_US = "1710495000000000";
@@ -41,11 +64,14 @@ vi.mock("vue-router", () => ({
   useRouter: () => ({ back: vi.fn(), push: vi.fn() }),
 }));
 
-vi.mock("@/services/search", () => ({
-  default: {
-    get_search_profile: vi.fn().mockResolvedValue({ data: null }),
-  },
-}));
+vi.mock("@/services/search", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      get_search_profile: vi.fn().mockResolvedValue({ data: null }),
+    },
+  });
+});
 
 const mountComponent = () =>
   mount(SearchJobInspector, {
@@ -65,8 +91,20 @@ const setProfileData = (wrapper: any, overrides: object = {}) => {
     data_records: 1000,
     scan_records: 50000,
     events: [
-      { component: "flight:leader get file id", duration: 300, timestamp: "0", search_role: "leader", node_name: "node-1" },
-      { component: "service:search leader finish", duration: 50, timestamp: "1", search_role: "leader", node_name: "node-1" },
+      {
+        component: "flight:leader get file id",
+        duration: 300,
+        timestamp: "0",
+        search_role: "leader",
+        node_name: "node-1",
+      },
+      {
+        component: "service:search leader finish",
+        duration: 50,
+        timestamp: "1",
+        search_role: "leader",
+        node_name: "node-1",
+      },
     ],
     ...overrides,
   };
@@ -221,7 +259,7 @@ describe("SearchJobInspector — formatTimeRange timezone handling", () => {
 
   it("TC13: store timezone badge shows 'UTC' when timezone is not set", () => {
     store.commit("setTimezone", "");
-    const wrapper = mountComponent();
+    mountComponent();
 
     // The template renders: store.state.timezone || 'UTC'
     const effective = store.state.timezone || "UTC";
@@ -324,18 +362,19 @@ describe("SearchJobInspector — getResponseTimeLabel", () => {
     expect(wrapper.vm.getResponseTimeLabel(9999).text).toBe("Slow response");
   });
 
-  it("uses green color class in dark theme for ultra-fast/fast", () => {
+  // The dark/light green pair collapsed to a single semantic status token.
+  it("uses the positive status color class in dark theme for ultra-fast/fast", () => {
     store.commit("appTheme", "dark");
     const wrapper = mountComponent();
-    expect(wrapper.vm.getResponseTimeLabel(10).colorClass).toBe("tw:text-green-400");
-    expect(wrapper.vm.getResponseTimeLabel(100).colorClass).toBe("tw:text-green-400");
+    expect(wrapper.vm.getResponseTimeLabel(10).colorClass).toBe("text-status-positive");
+    expect(wrapper.vm.getResponseTimeLabel(100).colorClass).toBe("text-status-positive");
   });
 
-  it("uses green color class in light theme for ultra-fast/fast", () => {
+  it("uses the positive status color class in light theme for ultra-fast/fast", () => {
     store.commit("appTheme", "light");
     const wrapper = mountComponent();
-    expect(wrapper.vm.getResponseTimeLabel(10).colorClass).toBe("tw:text-green-600");
-    expect(wrapper.vm.getResponseTimeLabel(100).colorClass).toBe("tw:text-green-600");
+    expect(wrapper.vm.getResponseTimeLabel(10).colorClass).toBe("text-status-positive");
+    expect(wrapper.vm.getResponseTimeLabel(100).colorClass).toBe("text-status-positive");
     store.commit("appTheme", "dark"); // restore
   });
 });
@@ -350,8 +389,8 @@ describe("SearchJobInspector — getDurationColor", () => {
     setProfileData(wrapper, {
       events: [{ component: "a", duration: 100, timestamp: "0" }],
     });
-    expect(wrapper.vm.getDurationColor(100)).toBe("#f44336"); // 100% → red
-    expect(wrapper.vm.getDurationColor(76)).toBe("#f44336");  // 76% → red
+    expect(wrapper.vm.getDurationColor(100)).toBe(chartColor("--color-service-health-critical")); // 100% → critical
+    expect(wrapper.vm.getDurationColor(76)).toBe(chartColor("--color-service-health-critical")); // 76% → critical
   });
 
   it("returns orange for > 50% and <= 75% of maxDuration", () => {
@@ -359,8 +398,8 @@ describe("SearchJobInspector — getDurationColor", () => {
     setProfileData(wrapper, {
       events: [{ component: "a", duration: 100, timestamp: "0" }],
     });
-    expect(wrapper.vm.getDurationColor(51)).toBe("#ff9800");
-    expect(wrapper.vm.getDurationColor(75)).toBe("#ff9800");
+    expect(wrapper.vm.getDurationColor(51)).toBe(chartColor("--color-service-health-degraded"));
+    expect(wrapper.vm.getDurationColor(75)).toBe(chartColor("--color-service-health-degraded"));
   });
 
   it("returns yellow for > 25% and <= 50% of maxDuration", () => {
@@ -368,8 +407,8 @@ describe("SearchJobInspector — getDurationColor", () => {
     setProfileData(wrapper, {
       events: [{ component: "a", duration: 100, timestamp: "0" }],
     });
-    expect(wrapper.vm.getDurationColor(26)).toBe("#ffc107");
-    expect(wrapper.vm.getDurationColor(50)).toBe("#ffc107");
+    expect(wrapper.vm.getDurationColor(26)).toBe(chartColor("--color-service-health-warning"));
+    expect(wrapper.vm.getDurationColor(50)).toBe(chartColor("--color-service-health-warning"));
   });
 
   it("returns green for <= 25% of maxDuration", () => {
@@ -377,40 +416,37 @@ describe("SearchJobInspector — getDurationColor", () => {
     setProfileData(wrapper, {
       events: [{ component: "a", duration: 100, timestamp: "0" }],
     });
-    expect(wrapper.vm.getDurationColor(25)).toBe("#4caf50");
-    expect(wrapper.vm.getDurationColor(1)).toBe("#4caf50");
+    expect(wrapper.vm.getDurationColor(25)).toBe(chartColor("--color-service-health-healthy"));
+    expect(wrapper.vm.getDurationColor(1)).toBe(chartColor("--color-service-health-healthy"));
   });
 });
 
 // ---------------------------------------------------------------------------
-// getPaddingLeft
+// hierarchicalEvents — padding level-based tests
 // ---------------------------------------------------------------------------
-describe("SearchJobInspector — getPaddingLeft", () => {
-  it("returns '0px' for level 0 (top-level rows)", () => {
+describe("SearchJobInspector — hierarchicalEvents level properties", () => {
+  it("top-level events have level 0", () => {
     const wrapper = mountComponent();
-    expect(wrapper.vm.getPaddingLeft(0)).toBe("0px");
+    setProfileData(wrapper);
+    const events = wrapper.vm.hierarchicalEvents;
+    expect(events[0].level).toBe(0);
+    expect(events[1].level).toBe(0);
   });
 
-  it("returns '44px' for level 1", () => {
+  it("children of nested events have appropriate parent reference", () => {
     const wrapper = mountComponent();
-    expect(wrapper.vm.getPaddingLeft(1)).toBe("44px");
-  });
-
-  it("returns '56px' for level 2 (44 + 12)", () => {
-    const wrapper = mountComponent();
-    expect(wrapper.vm.getPaddingLeft(2)).toBe("56px");
-  });
-
-  it("returns '68px' for level 3 (44 + 24)", () => {
-    const wrapper = mountComponent();
-    expect(wrapper.vm.getPaddingLeft(3)).toBe("68px");
-  });
-
-  it("increments by 12px per additional level beyond 1", () => {
-    const wrapper = mountComponent();
-    const l4 = parseInt(wrapper.vm.getPaddingLeft(4));
-    const l5 = parseInt(wrapper.vm.getPaddingLeft(5));
-    expect(l5 - l4).toBe(12);
+    setProfileData(wrapper, {
+      events: [
+        {
+          component: "parent",
+          duration: 200,
+          timestamp: "0",
+          events: [{ component: "child", duration: 50, timestamp: "1" }],
+        },
+      ],
+    });
+    expect(wrapper.vm.hierarchicalEvents).toHaveLength(1);
+    expect(wrapper.vm.hierarchicalEvents[0].level).toBe(0);
   });
 });
 
@@ -426,7 +462,13 @@ describe("SearchJobInspector — hasNoData", () => {
 
   it("is true when events array is empty", () => {
     const wrapper = mountComponent();
-    wrapper.vm.profileData = { sql: "", start_time: "", end_time: "", total_duration: 0, events: [] };
+    wrapper.vm.profileData = {
+      sql: "",
+      start_time: "",
+      end_time: "",
+      total_duration: 0,
+      events: [],
+    };
     expect(wrapper.vm.hasNoData).toBe(true);
   });
 
@@ -438,9 +480,9 @@ describe("SearchJobInspector — hasNoData", () => {
 });
 
 // ---------------------------------------------------------------------------
-// hierarchicalEvents + toggleNode
+// hierarchicalEvents + tree structure
 // ---------------------------------------------------------------------------
-describe("SearchJobInspector — hierarchicalEvents tree & toggleNode", () => {
+describe("SearchJobInspector — hierarchicalEvents tree", () => {
   it("returns empty array when profileData has no events", () => {
     const wrapper = mountComponent();
     wrapper.vm.profileData = null;
@@ -463,9 +505,7 @@ describe("SearchJobInspector — hierarchicalEvents tree & toggleNode", () => {
           component: "follower parent",
           duration: 200,
           timestamp: "0",
-          events: [
-            { component: "child step", duration: 50, timestamp: "1" },
-          ],
+          events: [{ component: "child step", duration: 50, timestamp: "1" }],
         },
       ],
     });
@@ -473,7 +513,7 @@ describe("SearchJobInspector — hierarchicalEvents tree & toggleNode", () => {
     expect(wrapper.vm.hierarchicalEvents).toHaveLength(1);
   });
 
-  it("shows children after toggleNode expands parent", () => {
+  it("nested children are accessible in hierarchicalEvents data", () => {
     const wrapper = mountComponent();
     setProfileData(wrapper, {
       events: [
@@ -489,30 +529,8 @@ describe("SearchJobInspector — hierarchicalEvents tree & toggleNode", () => {
       ],
     });
     const parentRow = wrapper.vm.hierarchicalEvents[0];
-    wrapper.vm.toggleNode(parentRow);
-    // After expand: parent + 2 children
-    expect(wrapper.vm.hierarchicalEvents).toHaveLength(3);
-    expect(wrapper.vm.hierarchicalEvents[1].index).toBe("1.1");
-    expect(wrapper.vm.hierarchicalEvents[2].index).toBe("1.2");
-  });
-
-  it("collapses children when toggleNode called again on expanded parent", () => {
-    const wrapper = mountComponent();
-    setProfileData(wrapper, {
-      events: [
-        {
-          component: "parent",
-          duration: 100,
-          timestamp: "0",
-          events: [{ component: "child", duration: 20, timestamp: "1" }],
-        },
-      ],
-    });
-    const parentRow = wrapper.vm.hierarchicalEvents[0];
-    wrapper.vm.toggleNode(parentRow); // expand
-    expect(wrapper.vm.hierarchicalEvents).toHaveLength(2);
-    wrapper.vm.toggleNode(parentRow); // collapse
-    expect(wrapper.vm.hierarchicalEvents).toHaveLength(1);
+    expect(parentRow.events).toHaveLength(2);
+    expect(parentRow.events[0].component).toBe("child step 1");
   });
 });
 
@@ -522,7 +540,9 @@ describe("SearchJobInspector — hierarchicalEvents tree & toggleNode", () => {
 describe("SearchJobInspector — fetchProfileData", () => {
   it("sets loading to true while fetch is in flight, false after resolve", async () => {
     let resolvePromise: (val: any) => void;
-    const pendingPromise = new Promise((res) => { resolvePromise = res; });
+    const pendingPromise = new Promise((res) => {
+      resolvePromise = res;
+    });
     vi.mocked(searchService.get_search_profile).mockReturnValueOnce(pendingPromise as any);
 
     const wrapper = mountComponent();
@@ -573,5 +593,196 @@ describe("SearchJobInspector — fetchProfileData", () => {
     await flushPromises();
 
     expect(wrapper.vm.errorMessage).toBe("Trace ID not found");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ODialog / ODrawer migration coverage
+// ---------------------------------------------------------------------------
+describe("SearchJobInspector — ODrawer (SQL) & ODialog (Trace ID) migration", () => {
+  const mountWithStubs = async () => {
+    const wrapper = mount(SearchJobInspector, {
+      global: {
+        provide: { store },
+        plugins: [i18n],
+        stubs: {
+          ODrawer: oDrawerStub,
+          ODialog: oDialogStub,
+        },
+      },
+    });
+    // Settle the onMounted fetch (mocked to resolve { data: null }) so that
+    // subsequent profileData assignments are not overwritten.
+    await flushPromises();
+    return wrapper;
+  };
+
+  beforeEach(() => {
+    // Ensure each test starts from a clean clipboard mock
+    vi.restoreAllMocks();
+    Object.assign(navigator, {
+      clipboard: { writeText: vi.fn().mockResolvedValue(undefined) },
+    });
+  });
+
+  it("does not render the SQL ODrawer or Trace ID ODialog by default", async () => {
+    const wrapper = await mountWithStubs();
+    expect(wrapper.find('[data-test="o-drawer"]').exists()).toBe(false);
+    expect(wrapper.find('[data-test="o-dialog"]').exists()).toBe(false);
+  });
+
+  it("renders the SQL ODrawer with title 'SQL Query' once showSqlDialog flips true", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper);
+    wrapper.vm.showSqlDialog = true;
+    await flushPromises();
+
+    const drawer = wrapper.find('[data-test="o-drawer"]');
+    expect(drawer.exists()).toBe(true);
+    expect(wrapper.find('[data-test="o-drawer-title"]').text()).toBe("SQL Query");
+  });
+
+  it("renders the SQL content inside the ODrawer body slot", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper, { sql: "SELECT id FROM events" });
+    wrapper.vm.showSqlDialog = true;
+    await flushPromises();
+
+    const body = wrapper.find('[data-test="inspector-sql-query-content"]');
+    expect(body.exists()).toBe(true);
+    expect(body.text()).toBe("SELECT id FROM events");
+  });
+
+  it("falls back to 'No SQL query available' when profileData has no sql", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper, { sql: "" });
+    wrapper.vm.showSqlDialog = true;
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="inspector-sql-query-content"]').text()).toBe(
+      "No SQL query available",
+    );
+  });
+
+  it("exposes the Copy SQL button inside the ODrawer header-right slot when sql is present", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper, { sql: "SELECT 1" });
+    wrapper.vm.showSqlDialog = true;
+    await flushPromises();
+
+    const headerRight = wrapper.find('[data-test="o-drawer-header-right"]');
+    expect(headerRight.exists()).toBe(true);
+    expect(headerRight.find('[data-test="inspector-copy-sql-btn"]').exists()).toBe(true);
+  });
+
+  it("hides the Copy SQL button in the header-right slot when profileData.sql is empty", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper, { sql: "" });
+    wrapper.vm.showSqlDialog = true;
+    await flushPromises();
+
+    expect(wrapper.find('[data-test="inspector-copy-sql-btn"]').exists()).toBe(false);
+  });
+
+  it("closes the SQL ODrawer when it emits update:open=false (v-model:open contract)", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper);
+    wrapper.vm.showSqlDialog = true;
+    await flushPromises();
+
+    const drawer = wrapper.findComponent(oDrawerStub);
+    drawer.vm.$emit("update:open", false);
+    await flushPromises();
+
+    expect(wrapper.vm.showSqlDialog).toBe(false);
+    expect(wrapper.find('[data-test="o-drawer"]').exists()).toBe(false);
+  });
+
+  it("renders the Trace ID ODialog with title 'Full Trace ID' once showTraceIdDialog flips true", async () => {
+    const wrapper = await mountWithStubs();
+    wrapper.vm.showTraceIdDialog = true;
+    await flushPromises();
+
+    const dialog = wrapper.find('[data-test="o-dialog"]');
+    expect(dialog.exists()).toBe(true);
+    expect(wrapper.find('[data-test="o-dialog-title"]').text()).toBe("Full Trace ID");
+  });
+
+  it("renders the traceId from the route inside the ODialog body", async () => {
+    const wrapper = await mountWithStubs();
+    wrapper.vm.showTraceIdDialog = true;
+    await flushPromises();
+
+    // mockRoute.query.trace_id === "abc123"
+    expect(wrapper.find('[data-test="o-dialog-body"]').text()).toContain("abc123");
+  });
+
+  it("closes the Trace ID ODialog when it emits update:open=false (v-model:open contract)", async () => {
+    const wrapper = await mountWithStubs();
+    wrapper.vm.showTraceIdDialog = true;
+    await flushPromises();
+
+    const dialog = wrapper.findComponent(oDialogStub);
+    dialog.vm.$emit("update:open", false);
+    await flushPromises();
+
+    expect(wrapper.vm.showTraceIdDialog).toBe(false);
+    expect(wrapper.find('[data-test="o-dialog"]').exists()).toBe(false);
+  });
+
+  it("copySql writes profileData.sql to the clipboard and toggles copiedSql", async () => {
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper, { sql: "SELECT COUNT(*) FROM logs" });
+    wrapper.vm.copySql();
+    await flushPromises();
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("SELECT COUNT(*) FROM logs");
+    expect(wrapper.vm.copiedSql).toBe(true);
+  });
+
+  it("copySql writes an empty string when profileData is null and still resolves cleanly", async () => {
+    const wrapper = await mountWithStubs();
+    wrapper.vm.profileData = null;
+    wrapper.vm.copySql();
+    await flushPromises();
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("");
+    expect(wrapper.vm.copiedSql).toBe(true);
+  });
+
+  it("copyTraceId writes the route trace_id to the clipboard and toggles copiedTraceId", async () => {
+    const wrapper = await mountWithStubs();
+    wrapper.vm.copyTraceId();
+    await flushPromises();
+
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith("abc123");
+    expect(wrapper.vm.copiedTraceId).toBe(true);
+  });
+
+  it("copySql gracefully handles a clipboard rejection without throwing", async () => {
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn().mockRejectedValueOnce(new Error("denied")),
+      },
+    });
+    const wrapper = await mountWithStubs();
+    setProfileData(wrapper, { sql: "SELECT 1" });
+
+    expect(() => wrapper.vm.copySql()).not.toThrow();
+    await flushPromises();
+    expect(wrapper.vm.copiedSql).toBe(false);
+  });
+
+  it("copyTraceId gracefully handles a clipboard rejection without throwing", async () => {
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn().mockRejectedValueOnce(new Error("denied")),
+      },
+    });
+    const wrapper = await mountWithStubs();
+
+    expect(() => wrapper.vm.copyTraceId()).not.toThrow();
+    await flushPromises();
+    expect(wrapper.vm.copiedTraceId).toBe(false);
   });
 });

@@ -1,4 +1,4 @@
-<!-- Copyright 2026 OpenObserve Inc.
+﻿<!-- Copyright 2026 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,79 +15,122 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="row qp-2 tw:h-full tw:px-[0.625rem]">
-    <div class="col-12 row items-end tw:pb-[0.625rem]">
-      <div class="col-12 row card-container tw:px-[0.625rem] tw:py-[0.625rem]">
-        <div
-          class="flex justify-center items-center q-mr-md cursor-pointer hover:tw:text-[var(--o2-primary-btn-bg)] tw:border-[1.5px] tw:border-solid tw:rounded-full tw:w-[1.375rem] tw:h-[1.375rem]"
-          title="Go Back"
-          @click="router.back()"
-        >
-          <q-icon name="arrow_back_ios_new" size="0.875rem" />
-        </div>
-        <div class="text-caption ellipsis row items-center q-mr-md">
-          <q-icon name="language" size="0.875rem" class="q-pr-xs" />
+  <OPageLayout
+    class="qp-2"
+    :title="sessionDetails.id ? raw(sessionDetails.id) : t('rum.sessionReplay')"
+    :back="{
+      label: t('rum.sessionReplay'),
+      onClick: () => router.back(),
+      dataTest: 'session-viewer-back-btn',
+    }"
+    bleed
+  >
+    <template v-if="!sessionNotFound" #subtitle>
+      <div
+        class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1"
+        data-test="session-viewer-subtitle"
+      >
+        <div class="flex items-center gap-1.5 truncate text-xs">
+          <OIcon name="language" size="sm" />
           {{ sessionDetails.ip }}
         </div>
-        <div class="text-caption ellipsis row items-center q-mr-md">
-          <q-icon name="calendar_month" size="0.875rem" class="q-pr-xs" />
+        <div class="flex items-center gap-1.5 truncate text-xs">
+          <OIcon name="calendar-month" size="sm" />
           {{ sessionDetails.date }}
         </div>
-        <div class="text-caption ellipsis row items-center q-mr-md">
-          <q-icon name="person" size="0.875rem" class="q-pr-xs" />
-          {{ sessionDetails.user_email || "Unknown User" }}
+        <div class="flex items-center gap-1.5 truncate text-xs">
+          <OIcon name="person" size="sm" />
+          {{ sessionDetails.user_email || t("common.unknownUser") }}
         </div>
-        <div class="text-caption ellipsis row items-center q-mr-md">
-          <q-icon name="location_on" size="0.875rem" class="q-pr-xs" />
+        <div class="flex items-center gap-1.5 truncate text-xs">
+          <OIcon name="location-on" size="sm" />
           {{ sessionDetails.city }}, {{ sessionDetails.country }}
         </div>
-        <div class="text-caption ellipsis row items-center q-mr-md">
-          <q-icon name="settings" size="0.875rem" class="q-pr-xs" />
+        <div class="flex items-center gap-1.5 truncate text-xs">
+          <OIcon name="settings" size="sm" />
           {{ sessionDetails.browser }}, {{ sessionDetails.os }}
         </div>
         <div
           v-if="frustrationCount > 0"
-          class="text-caption ellipsis row items-center"
-          :title="`${frustrationCount} frustration signal${frustrationCount > 1 ? 's' : ''} detected`"
+          class="flex items-center truncate text-xs"
+          :title="
+            t('rum.frustrationSignalsDetected', { count: frustrationCount }, frustrationCount)
+          "
           data-test="session-viewer-frustration-summary"
         >
-          <q-icon
-            name="sentiment_very_dissatisfied"
-            size="0.875rem"
-            class="q-pr-xs"
-            style="color: #fb923c"
+          <OIcon
+            name="sentiment-very-dissatisfied"
+            size="sm"
+            class="text-severity-warning-color pe-1"
             data-test="frustration-summary-icon"
           />
           <span
-            class="tw:font-semibold"
-            style="color: #fb923c"
+            class="text-severity-warning-color font-semibold"
             data-test="frustration-summary-text"
-            >{{ frustrationCount }} Frustration{{
-              frustrationCount > 1 ? "s" : ""
-            }}</span
+            >{{ t("rum.frustration", { count: frustrationCount }, frustrationCount) }}</span
           >
         </div>
       </div>
-    </div>
+    </template>
+    <template v-if="!sessionNotFound" #actions>
+      <ShareButton
+        data-test="session-viewer-share-link-btn"
+        :url="shareUrl"
+        variant="outline"
+        size="icon-toolbar"
+      />
+    </template>
+    <OEmptyState
+      v-if="sessionNotFound"
+      size="hero"
+      illustration="no-results"
+      :title="t('rum.noReplayRecordedTitle')"
+      :description="t('rum.noReplayRecordedMessage', { id: sessionId })"
+      data-test="session-viewer-no-replay"
+    />
     <div
-      class="col-12 row card-container tw:overflow-hidden tw:mb-[0.325rem] tw:h-[calc(100%-58px)]!"
+      v-else
+      class="bg-card-glass-bg flex h-[calc(100%-3.125)]! min-h-0 w-full flex-1 overflow-hidden"
     >
-      <div class="col-9 full-height">
-        <VideoPlayer
-          ref="videoPlayerRef"
-          :events="segmentEvents"
-          :segments="segments"
-          :is-loading="!!isLoading.length"
-        />
-      </div>
-      <div class="col-3 row">
-        <q-separator vertical class="full-height" />
-        <PlayerEventsSidebar
-          :events="segmentEvents"
-          :sessionDetails="sessionDetails"
-          @event-emitted="handleSidebarEvent"
-        />
-      </div>
+      <OSplitter
+        v-model="splitterSize"
+        :limits="[200, 1400]"
+        unit="px"
+        class="h-full w-full"
+        separatorClass="bg-card-glass-border w-px! hover:bg-theme-accent"
+      >
+        <template #before>
+          <!-- Mobile SDKs record wireframes (not a DOM); play them with the wireframe
+               player. Browser sessions use the rrweb-based VideoPlayer. -->
+          <MobileSessionPlayer
+            v-if="isMobileReplay"
+            :segments="segments"
+            :events="segmentEvents"
+            :is-loading="segmentsLoading"
+            class="h-full"
+          />
+          <VideoPlayer
+            v-else
+            ref="videoPlayerRef"
+            :events="segmentEvents"
+            :segments="segments"
+            :is-loading="!!isLoading.length"
+            class="h-full"
+          />
+        </template>
+        <template #after>
+          <PlayerEventsSidebar
+            :events="segmentEvents"
+            :sessionDetails="sessionDetails"
+            :session-id="sessionId"
+            :current-time="currentTime"
+            :start-time="replayOrigin"
+            :end-time="sessionState.data.selectedSession?.end_time || 0"
+            @event-emitted="handleSidebarEvent"
+            class="h-full"
+          />
+        </template>
+      </OSplitter>
     </div>
 
     <!-- Event Detail Drawer -->
@@ -98,24 +141,34 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       :session-id="sessionId"
       :session-details="sessionDetails"
     />
-  </div>
+  </OPageLayout>
 </template>
 
 <script lang="ts" setup>
 import PlayerEventsSidebar from "@/components/rum/PlayerEventsSidebar.vue";
 import VideoPlayer from "@/components/rum/VideoPlayer.vue";
+import MobileSessionPlayer from "@/components/rum/MobileSessionPlayer.vue";
+import { isMobileReplaySource } from "@/composables/rum/useMobileSessionReplay";
 import EventDetailDrawer from "@/components/rum/EventDetailDrawer.vue";
 import { cloneDeep } from "lodash-es";
 import { computed, onBeforeMount, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useStore } from "vuex";
+import { raw, useI18nTyped } from "@/types/i18n";
 import searchService from "@/services/search";
 import useQuery from "@/composables/useQuery";
 import useSessionsReplay from "@/composables/useSessionReplay";
 import usePerformance from "@/composables/rum/usePerformance";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OSplitter from "@/lib/core/Splitter/OSplitter.vue";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import ShareButton from "@/components/common/ShareButton.vue";
+import useRum from "@/composables/rum/useRum";
 
-import { date } from "quasar";
+import { formatDate } from "@/utils/date";
 import { getUUID } from "@/utils/zincutils";
+import { sqlEquals } from "@/utils/query/sqlFilterBuilder";
 
 const defaultEvent = {
   id: "",
@@ -127,25 +180,59 @@ const defaultEvent = {
   displayTime: "",
   loading_time: "",
   loading_type: "",
-  user: {},
-  frustration_type: null,
-  frustration_types: [],
+  user: {} as Record<string, any>,
+  frustration_type: null as string | null,
+  frustration_types: [] as string[],
 };
 
 const sessionId = ref("1");
+const currentTime = ref(0);
 const router = useRouter();
 const store = useStore();
+const { t } = useI18nTyped();
+const { shareUrl } = useRum();
 const isLoading = ref<boolean[]>([]);
-const { buildQueryPayload, getTimeInterval, parseQuery } = useQuery();
+const { buildQueryPayload } = useQuery();
 const segments = ref<any[]>([]);
 const segmentEvents = ref<any[]>([]);
+// Dedicated to the replay-segment fetch, initialised true so the mobile player shows a
+// loading state from first paint. The shared isLoading counter can't be used here: it
+// dips back to 0 in the gap between getSession() resolving and getSessionSegments()
+// starting, which is exactly the moment the mobile player mounts — that dip is what let
+// the "No session replay available" empty state flash before the segments arrived.
+const segmentsLoading = ref(true);
+const sessionNotFound = ref(false);
+
+// Mobile sessions carry wireframe records (source: react-native/ios/android) → the
+// wireframe player; browser sessions use the rrweb VideoPlayer.
+const isMobileReplay = computed(() =>
+  isMobileReplaySource(sessionState.data.selectedSession?.source),
+);
 const { sessionState } = useSessionsReplay();
 const videoPlayerRef = ref<any>(null);
-const errorCount = ref(10);
+const splitterSize = ref(600);
 const { performanceState } = usePerformance();
 
-const session_start_time = 1692884313968;
-const session_end_time = 1692884769270;
+// Where playback actually begins, which is not always where the session begins.
+//
+// The converter resets its node-id counter and string table on every FullSnapshot
+// (utils/rum/sessionReplayChangeFormat.ts), so a stream MUST open with one. When the
+// first view loses its `index_in_view: 0` segment, the earliest rows by `start` are
+// orphan mutations that decode against an empty id space: rrweb builds no DOM and the
+// player paints nothing, even though the rest of the session is intact and playable.
+//
+// So play from the first full snapshot, and measure every timeline offset from that same
+// instant — event markers, breadcrumbs and trace rows all treat this as t=0, so they
+// desynchronise from the video if they keep counting from the session start.
+// `replay_start` is null when no segment carries a snapshot; then nothing is playable
+// anyway and the session start is the honest origin.
+const replayOrigin = computed(() =>
+  Number(
+    sessionState.data.selectedSession?.replay_start ??
+      sessionState.data.selectedSession?.start_time ??
+      0,
+  ),
+);
 
 const getSessionId = computed(() => router.currentRoute.value.params.id);
 
@@ -160,12 +247,11 @@ const forwardToEventTime = computed(() => {
     return null;
   }
 
-  // event_time is in milliseconds, session start_time is also in milliseconds
+  // event_time is in milliseconds, replayOrigin is also in milliseconds
   const eventTimestamp = Number(eventTime.value);
-  const sessionStartTime = Number(sessionState.data.selectedSession.start_time);
 
-  // Relative time in milliseconds from session start
-  const relativeTime = formatTimeDifference(eventTimestamp, sessionStartTime);
+  // Relative time in milliseconds from the start of playback
+  const relativeTime = formatTimeDifference(eventTimestamp, replayOrigin.value);
 
   // Only return valid positive relative times
   return relativeTime;
@@ -184,8 +270,7 @@ const sessionDetails = ref({
 
 const frustrationCount = computed(() => {
   return segmentEvents.value.filter(
-    (event: any) =>
-      event.frustration_types && event.frustration_types.length > 0,
+    (event: any) => event.frustration_types && event.frustration_types.length > 0,
   ).length;
 });
 
@@ -198,6 +283,7 @@ const rawEventsMap = ref<Map<string, any>>(new Map());
 onBeforeMount(async () => {
   sessionId.value = router.currentRoute.value.params.id as string;
   await getSession();
+  if (sessionNotFound.value) return;
   getSessionSegments();
   getSessionEvents();
 });
@@ -222,16 +308,15 @@ watch(
       segmentsCount > 0 &&
       eventsCount > 0 &&
       relativeTime &&
-      relativeTime[0] > 0
+      Number(relativeTime[0]) > 0
     ) {
       // Clear any existing timer
       if (seekTimer !== null) {
-        // eslint-disable-next-line no-undef
         clearTimeout(seekTimer);
       }
 
       // Use setTimeout to give video player time to fully initialize
-      // eslint-disable-next-line no-undef
+
       seekTimer = setTimeout(() => {
         if (videoPlayerRef.value) {
           try {
@@ -256,9 +341,9 @@ const getSessionDetails = () => {
     browser: sessionState.data.selectedSession?.browser,
     os: sessionState.data.selectedSession?.os,
     ip: sessionState.data.selectedSession?.ip,
-    user_email: sessionState.data.selectedSession?.user_email || "Unknown User",
-    city: sessionState.data.selectedSession?.city || "Unknown",
-    country: sessionState.data.selectedSession?.country || "Unknown",
+    user_email: sessionState.data.selectedSession?.user_email || t("common.unknownUser"),
+    city: sessionState.data.selectedSession?.city || t("common.unknown"),
+    country: sessionState.data.selectedSession?.country || t("common.unknown"),
     id: sessionState.data.selectedSession?.session_id,
   };
 };
@@ -267,27 +352,27 @@ const getSession = () => {
   return new Promise((resolve) => {
     let geoFields = "";
 
-    if (
-      performanceState.data.streams["_sessionreplay"]["schema"][
-        "geo_info_country"
-      ]
-    ) {
+    if (performanceState.data.streams["_sessionreplay"]["schema"]["geo_info_country"]) {
       geoFields += "min(geo_info_city) as city,";
     }
 
-    if (
-      performanceState.data.streams["_sessionreplay"]["schema"]["geo_info_city"]
-    ) {
+    if (performanceState.data.streams["_sessionreplay"]["schema"]["geo_info_city"]) {
       geoFields += "min(geo_info_country) as country,";
     }
 
+    // Older streams (and mobile schemas) have no has_full_snapshot column. Ask for the
+    // playback origin only when it exists; replayOrigin falls back to the session start.
+    const replayStartField = performanceState.data.streams["_sessionreplay"]["schema"][
+      "has_full_snapshot"
+    ]
+      ? "min(case when has_full_snapshot then start end) as replay_start,"
+      : "";
+
     const req = {
       query: {
-        sql: `select min(${store.state.zoConfig.timestamp_column}) as zo_sql_timestamp, min(start) as start_time, max(end) as end_time, min(user_agent_user_agent_family) as browser, min(user_agent_os_family) as os, min(ip) as ip, min(source) as source, ${geoFields} min(session_id) as session_id from "_sessionreplay" where session_id='${getSessionId.value}' order by zo_sql_timestamp`,
-        start_time:
-          Number(router.currentRoute.value.query.start_time) - 86400000000,
-        end_time:
-          Number(router.currentRoute.value.query.end_time) + 86400000000,
+        sql: `select min(${store.state.zoConfig.timestamp_column}) as zo_sql_timestamp, min(start) as start_time, max(end) as end_time, ${replayStartField} min(user_agent_user_agent_family) as browser, min(user_agent_os_family) as os, min(ip) as ip, min(source) as source, ${geoFields} min(session_id) as session_id from "_sessionreplay" where ${sqlEquals("session_id", getSessionId.value)} order by zo_sql_timestamp`,
+        start_time: Number(router.currentRoute.value.query.start_time) - 86400000000,
+        end_time: Number(router.currentRoute.value.query.end_time) + 86400000000,
         from: 0,
         size: 10,
       },
@@ -305,6 +390,8 @@ const getSession = () => {
       )
       .then((res) => {
         if (res.data.hits.length === 0) {
+          sessionNotFound.value = true;
+          segmentsLoading.value = false;
           return;
         }
 
@@ -329,25 +416,28 @@ const getSession = () => {
 };
 
 const getSessionSegments = () => {
-  if (!sessionState.data.selectedSession) return;
+  if (!sessionState.data.selectedSession) {
+    // No session to fetch a replay for — resolve the loading state so the player can fall
+    // through to its empty message instead of spinning forever.
+    segmentsLoading.value = false;
+    return;
+  }
 
   const queryPayload: any = {
     from: 0,
     size: 1000,
     timestamp_column: store.state.zoConfig.timestamp_column,
     timestamps: {
-      startTime:
-        Number(sessionState.data.selectedSession?.start_time) * 1000 - 300000,
-      endTime:
-        Number(sessionState.data.selectedSession?.end_time) * 1000 + 300000000,
+      startTime: Number(sessionState.data.selectedSession?.start_time) * 1000 - 300000,
+      endTime: Number(sessionState.data.selectedSession?.end_time) * 1000 + 300000000,
     },
     sqlMode: false,
     currentPage: 0,
     parsedQuery: null,
   };
 
-  const req = buildQueryPayload(queryPayload);
-  req.query.sql = `select * from "_sessionreplay" where session_id='${sessionId.value}' order by start asc`;
+  const req = buildQueryPayload(queryPayload, t);
+  req.query.sql = `select * from "_sessionreplay" where ${sqlEquals("session_id", sessionId.value)} order by start asc`;
   delete req.aggs;
   isLoading.value.push(true);
   searchService
@@ -360,9 +450,14 @@ const getSessionSegments = () => {
       "RUM",
     )
     .then((res) => {
+      // Skip anything before the first full snapshot — see replayOrigin. Only leading
+      // segments can be dropped here: replayOrigin IS the first snapshot's start, so
+      // every later segment passes.
+      const origin = replayOrigin.value;
       // const segmentsCopy = [];
       // const viewIds = [];
       res.data.hits.forEach((hit: any) => {
+        if (Number(hit.start) < origin) return;
         segments.value.push(JSON.parse(hit.segment));
       });
 
@@ -384,7 +479,12 @@ const getSessionSegments = () => {
     .catch((error) => {
       console.error("Failed to fetch session events:", error);
     })
-    .finally(() => isLoading.value.pop());
+    .finally(() => {
+      isLoading.value.pop();
+      // Segment fetch settled: the mobile player can now decide between the replay and the
+      // empty state without a premature "No session replay available" flash.
+      segmentsLoading.value = false;
+    });
 };
 
 const getSessionEvents = () => {
@@ -393,8 +493,7 @@ const getSessionEvents = () => {
     size: 150,
     timestamp_column: store.state.zoConfig.timestamp_column,
     timestamps: {
-      startTime:
-        Number(sessionState.data.selectedSession?.start_time) * 1000 - 1,
+      startTime: Number(sessionState.data.selectedSession?.start_time) * 1000 - 1,
       endTime: Number(sessionState.data.selectedSession?.end_time) * 1000 + 1,
     },
     sqlMode: false,
@@ -402,8 +501,8 @@ const getSessionEvents = () => {
     parsedQuery: null,
   };
 
-  const req = buildQueryPayload(queryPayload);
-  req.query.sql = `select * from "_rumdata" where session_id='${sessionId.value}' and (type='error' or type='action' or type='view') order by date asc`;
+  const req = buildQueryPayload(queryPayload, t);
+  req.query.sql = `select * from "_rumdata" where ${sqlEquals("session_id", sessionId.value)} and (type='error' or type='action' or type='view') order by date asc`;
   delete req.aggs;
   isLoading.value.push(true);
   searchService
@@ -418,10 +517,10 @@ const getSessionEvents = () => {
     .then((res) => {
       const events = ["action", "view", "error"];
 
-      if (
-        !sessionDetails.value.user_email ||
-        sessionDetails.value.user_email === "Unknown User"
-      )
+      // Test the SOURCE field, not the rendered value: user_email is filled with
+      // t("common.unknownUser") when absent, so comparing it to the English
+      // literal stopped this backfill firing in every non-English locale.
+      if (!sessionState.data.selectedSession?.user_email)
         sessionDetails.value.user_email = res.data.hits[0]?.usr_email;
 
       segmentEvents.value = res.data.hits.filter((hit: any) => {
@@ -452,8 +551,7 @@ const getSessionErrorLogs = () => {
     size: 150,
     timestamp_column: store.state.zoConfig.timestamp_column,
     timestamps: {
-      startTime:
-        Number(sessionState.data.selectedSession?.start_time) * 1000 - 1,
+      startTime: Number(sessionState.data.selectedSession?.start_time) * 1000 - 1,
       endTime: Number(sessionState.data.selectedSession?.end_time) * 1000 + 1,
     },
     sqlMode: false,
@@ -461,8 +559,8 @@ const getSessionErrorLogs = () => {
     parsedQuery: null,
   };
 
-  const req = buildQueryPayload(queryPayload);
-  req.query.sql = `select * from "_rumlog" where session_id='${sessionId.value}' and status='error' order by date asc`;
+  const req = buildQueryPayload(queryPayload, t);
+  req.query.sql = `select * from "_rumlog" where ${sqlEquals("session_id", sessionId.value)} and status='error' order by date asc`;
   delete req.aggs;
   isLoading.value.push(true);
   searchService
@@ -479,7 +577,7 @@ const getSessionErrorLogs = () => {
         return hit.date >= Number(sessionState.data.selectedSession.start_time);
       });
 
-      events.forEach((hit: any, index: number) => {
+      events.forEach((hit: any) => {
         hit.type = "error";
         hit.error_id = getUUID();
         hit.error_message = hit.message;
@@ -507,9 +605,11 @@ const getDefaultEvent = (event: any) => {
   _event.event_id = event[`${event.type}_id`];
   _event.type = event.type;
   _event.timestamp = event.date;
+  // formatTimeDifference is absolute, so an event from before playback begins would come
+  // back as a positive offset pointing the wrong way. Pin those to the first frame.
   const relativeTime = formatTimeDifference(
-    _event.timestamp,
-    Number(sessionState.data.selectedSession.start_time),
+    Math.max(_event.timestamp, replayOrigin.value),
+    replayOrigin.value,
   );
   _event.relativeTime = relativeTime[0] as number;
   _event.displayTime = relativeTime[1] as string;
@@ -525,7 +625,10 @@ const handleErrorEvent = (event: any) => {
 const handleActionEvent = (event: any) => {
   const _event = getDefaultEvent(event);
   _event.name =
-    event?.action_type + ' on "' + event?.action_target_name + '"' || "--";
+    t("rum.actionOnTarget", {
+      action: event?.action_type,
+      target: event?.action_target_name,
+    }) || "--";
 
   // Add frustration information if present
   if (event?.action_frustration_type) {
@@ -558,7 +661,13 @@ const handleViewEvent = (event: any) => {
   //     " error " +
   //     event.event.custom.error.stack;
   // }
-  _event.name = event?.view_loading_type + " : " + event?.view_url || "--";
+  // Browser view events carry `view_loading_type` (initial_load / route_change)
+  // and show as "type : url". Mobile SDK views have no loading_type, so fall back
+  // to the human view name (e.g. "ProductDetail") and only then the url — avoids
+  // the "undefined : <url>" label for mobile sessions.
+  _event.name = event?.view_loading_type
+    ? event.view_loading_type + " : " + event?.view_url
+    : event?.view_name || event?.view_url || "--";
   return _event;
 };
 
@@ -581,12 +690,8 @@ function formatTimeDifference(start_time: number, end_time: number) {
   const milliSeconds = Math.abs(start_time - end_time);
   // Calculate hours, minutes, and seconds
   let hours: string | number = Math.floor(milliSeconds / (1000 * 60 * 60));
-  let minutes: string | number = Math.floor(
-    (milliSeconds % (1000 * 60 * 60)) / (1000 * 60),
-  );
-  let seconds: string | number = Math.floor(
-    (milliSeconds % (1000 * 60)) / 1000,
-  );
+  let minutes: string | number = Math.floor((milliSeconds % (1000 * 60 * 60)) / (1000 * 60));
+  let seconds: string | number = Math.floor((milliSeconds % (1000 * 60)) / 1000);
 
   // Add leading zeros if needed
   hours = hours < 10 ? "0" + hours : hours;
@@ -605,7 +710,7 @@ function formatTimeDifference(start_time: number, end_time: number) {
 }
 
 const getFormattedDate = (timestamp: number) =>
-  date.formatDate(Math.floor(timestamp), "MMM DD, YYYY HH:mm:ss Z");
+  formatDate(Math.floor(timestamp), "MMM DD, YYYY HH:mm:ss Z");
 
 const handleSidebarEvent = (event: string, payload: any) => {
   if (event === "event-click") {
@@ -616,11 +721,6 @@ const handleSidebarEvent = (event: string, payload: any) => {
   }
 
   // Always seek to the event time in the video player
-  videoPlayerRef.value.goto(
-    payload.relativeTime,
-    !!videoPlayerRef.value.playerState?.isPlaying,
-  );
+  videoPlayerRef.value.goto(payload.relativeTime, !!videoPlayerRef.value.playerState?.isPlaying);
 };
 </script>
-
-<style scoped></style>

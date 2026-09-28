@@ -15,203 +15,207 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-page class="q-pa-none" style="min-height: inherit; height: calc(100vh - var(--navbar-height));">
-    <div>
-      <div class="card-container tw:mb-[0.625rem]">
-      <div class="tw:flex tw:justify-between tw:items-center tw:px-4 tw:py-3 tw:h-[68px]"
+  <OPageLayout :title="t('iam.roles')" icon="shield" bleed>
+    <template #subtitle>
+      <span data-test="iam-roles-subtitle">
+        {{ t("iam.rolesPage.subtitle") }}
+      </span>
+    </template>
+    <template #actions>
+      <OButton data-test="iam-roles-add-role-btn" variant="primary" size="sm" @click="addRole">
+        {{ t("iam.addRole") }}
+      </OButton>
+    </template>
+    <!-- ?member=<email> (from the token popup's "Assign a role" link) drives the Assign column below. -->
+    <OBanner
+      v-if="assignTarget"
+      variant="info"
+      icon="shield"
+      inline-actions
+      dense
+      data-test="iam-roles-assign-banner"
+      class="mb-3"
+    >
+      {{ t("iam.rolesPage.assignBannerText", { member: assignTarget }) }}
+      <template #actions>
+        <OButton
+          data-test="iam-roles-assign-banner-dismiss"
+          variant="ghost"
+          size="sm"
+          @click="clearAssignTarget"
         >
-        <div
-          data-test="iam-roles-section-title"
-          class="q-table__title tw:font-[600]"
+          {{ t("iam.rolesPage.assignBannerDone") }}
+        </OButton>
+      </template>
+    </OBanner>
+    <div class="min-h-0 w-full flex-1 overflow-hidden">
+      <div class="bg-card-glass-bg h-full">
+        <RoleTable
+          data-test="iam-roles-table-section"
+          :data="rows"
+          :loading="loading"
+          :forbidden="forbidden"
+          :action-loading="bulkDeleteLoading"
+          v-model:global-filter="filterQuery"
+          :selected-ids="selectedRoleNames"
+          :assign-target="assignTarget"
+          :assigning-role-name="assigningRoleName"
+          :assigned-role-names="assignedRoleNames"
+          @update:selected-ids="onSelectionChange"
+          @edit="editRole"
+          @delete="showConfirmDialog"
+          @bulk-delete="openBulkDeleteDialog"
+          @create="addRole"
+          @assign="assignMemberToRole"
         >
-          {{ t("iam.roles") }}
-        </div>
-        <div class="row items-center justify-end">
-            <div data-test="iam-roles-search-input">
-              <q-input
-                v-model="filterQuery"
-                borderless
-                dense
-                class="q-ml-auto no-border o2-search-input tw:h-[36px]"
-                :placeholder="t('iam.searchRole')"
-              >
-                <template #prepend>
-                  <q-icon class="o2-search-input-icon" name="search" />
-                </template>
-              </q-input>
-            </div>
-
-            <q-btn
-              data-test="alert-list-add-alert-btn"
-              class="q-ml-sm o2-primary-button tw:h-[36px]"
-              flat
-              no-caps
-              :label="t(`iam.addRole`)"
-              @click="addRole"
+          <template #toolbar-trailing>
+            <ORefreshButton
+              layout="inline"
+              variant="outline"
+              :last-run-at="lastUpdatedAt"
+              :loading="fetching"
+              shortcut-id="iamRolesRefresh"
+              data-test="iam-roles-refresh-btn"
+              @click="refreshRoles"
             />
-          </div>
+          </template>
+        </RoleTable>
       </div>
     </div>
-      <div class="tw:w-full tw:h-full">
-      <div class="card-container tw:h-[calc(100vh-var(--navbar-height)-92px)]">
-    <app-table
-      data-test="iam-roles-table-section"
-      class="iam-table o2-quasar-app-table o2-quasar-table-header-sticky"
-      :tableStyle="hasVisibleRows ? 'height: calc(100vh - var(--navbar-height) - 92px); overflow-y: auto;' : ''"
-      :rows="visibleRows"
-      :columns="columns"
-      pagination
-      :rows-per-page="20"
-      :filter="{
-        value: filterQuery,
-        method: filterRoles,
-      }"
-      :bordered="false"
-      :title="t('iam.roles')"
-      :hideTopPagination="true"
-      :showBottomPaginationWithTitle="true"
-      selection="multiple"
-      row-key="role_name"
-      v-model:selected="selectedRoles"
-      :theme="store.state.theme"
-    >
-      <template v-slot:actions="slotProps: any">
-        <div class="tw:flex tw:items-center tw:gap-2 tw:justify-center">
-          <q-btn
-            :data-test="`iam-roles-edit-${slotProps.column.row.role_name}-role-icon`"
-            padding="sm"
-            unelevated
-            size="sm"
-            round
-            flat
-            icon="edit"
-            :title="t('common.edit')"
-            @click="() => editRole(slotProps.column.row)"
-          >
-          </q-btn>
-          <q-btn
-            :data-test="`iam-roles-delete-${slotProps.column.row.role_name}-role-icon`"
-            padding="sm"
-            unelevated
-            size="sm"
-            round
-            flat
-            :icon="outlinedDelete"
-            :title="t('common.delete')"
-            @click="() => showConfirmDialog(slotProps.column.row)"
-          >
-          </q-btn>
-        </div>
-      </template>
-      <template v-slot:bottom-actions>
-        <q-btn
-          v-if="selectedRoles.length > 0"
-          data-test="iam-roles-bulk-delete-btn"
-          class="flex items-center q-mr-sm no-border o2-secondary-button tw:h-[36px]"
-          :class="
-            store.state.theme === 'dark'
-              ? 'o2-secondary-button-dark'
-              : 'o2-secondary-button-light'
-          "
-          no-caps
-          dense
-          @click="openBulkDeleteDialog"
-        >
-          <q-icon name="delete" size="16px" />
-          <span class="tw:ml-2">{{ t('common.delete') }}</span>
-        </q-btn>
-      </template>
-    </app-table>
-  </div>
-  </div>
-  </div>
-  <q-dialog v-model="showAddGroup" position="right" full-height maximized>
-    <AddRole
-      style="width: 30vw"
-      @cancel:hideform="hideForm"
-      @added:role="setupRoles"
-    />
-  </q-dialog>
+  </OPageLayout>
+  <AddRole v-model:open="showAddGroup" @added:role="onRoleAdded" />
   <ConfirmDialog
-    title="Delete Role"
-    :message="`Are you sure you want to delete '${deleteConformDialog?.data?.role_name as string}' role?`"
+    :title="t('iam.appRoles.deleteRole')"
+    :message="t('iam.appRoles.deleteConfirm', { roleName: deleteConformDialog?.data?.role_name })"
+    :warning-message="deleteImpactMessage"
     @update:ok="_deleteRole"
     @update:cancel="deleteConformDialog.show = false"
     v-model="deleteConformDialog.show"
   />
   <ConfirmDialog
-    title="Bulk Delete Roles"
-    :message="`Are you sure you want to delete ${selectedRoles.length} role(s)?`"
+    :title="t('iam.appRoles.bulkDeleteRoles')"
+    :message="t('iam.appRoles.bulkDeleteConfirm', { count: selectedRoleNames.length })"
+    :warning-message="bulkDeleteImpactMessage"
     @update:ok="bulkDeleteUserRoles"
     @update:cancel="confirmBulkDelete = false"
     v-model="confirmBulkDelete"
   />
-  </q-page>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeMount, ref } from "vue";
+import { useQuery } from "@tanstack/vue-query";
+import { useMutation } from "@tanstack/vue-query";
+import { useOrgId } from "@/composables/query/useOrgId";
+import { deleteRoleMutation, bulkDeleteRolesMutation } from "@/services/iam.queries";
+import { rolesQuery } from "@/services/iam.queries";
+import { allUserRolesQuery } from "@/services/users.queries";
+import { queryClient } from "@/composables/query/queryClient";
+import { computed, onBeforeMount, ref, watch } from "vue";
 import AddRole from "./AddRole.vue";
-import { useI18n } from "vue-i18n";
-import AppTable from "@/components/AppTable.vue";
-import { cloneDeep } from "lodash-es";
-import { useRouter } from "vue-router";
-import { getRoles, deleteRole, bulkDeleteRoles } from "@/services/iam";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OBanner from "@/lib/feedback/Banner/OBanner.vue";
+import ORefreshButton from "@/lib/core/RefreshButton/ORefreshButton.vue";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
+import { raw, useI18nTyped } from "@/types/i18n";
+import RoleTable from "./RoleTable.vue";
+import { useRoute, useRouter } from "vue-router";
+import { getRoleUsers, updateRole } from "@/services/iam";
+import users from "@/services/users";
+import config from "@/aws-exports";
 import { useStore } from "vuex";
 import usePermissions from "@/composables/iam/usePermissions";
-import { useQuasar } from "quasar";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import { useReo } from "@/services/reodotdev_analytics";
-import { outlinedDelete } from "@quasar/extras/material-icons-outlined";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { useShortcuts } from "@/lib/vue-shortcut-manager";
+import { focusSearchInput, isInputFocused } from "@/utils/keyboardShortcuts";
 
-const { t } = useI18n();
+const { t } = useI18nTyped();
 
 const { track } = useReo();
+
+const filterQuery = ref("");
 
 const showAddGroup = ref(false);
 
 const rows: any = ref([]);
 
 const router = useRouter();
+const route = useRoute();
 
 const store = useStore();
 
-const q = useQuasar();
+// ?member=<email> from the token popup's "Assign a role" link; drives the Assign column in RoleTable.
+const assignTarget = computed(() => (route.query.member as string) || "");
+const assigningRoleName = ref<string | null>(null);
+const assignedRoleNames = ref<string[]>([]);
+
+const loadAssignedRoleNames = async () => {
+  if (!assignTarget.value) {
+    assignedRoleNames.value = [];
+    return;
+  }
+  try {
+    const res = await users.getUserRoles(
+      store.state.selectedOrganization.identifier,
+      assignTarget.value,
+    );
+    assignedRoleNames.value = Array.isArray(res.data) ? res.data : [];
+  } catch {
+    // Silent: worst case a role the member already holds still shows an
+    // actionable "Assign" button — a redundant add_users is a harmless no-op.
+    assignedRoleNames.value = [];
+  }
+};
+
+watch(assignTarget, loadAssignedRoleNames, { immediate: true });
+
+const clearAssignTarget = () => {
+  const { member: _member, ...rest } = route.query;
+  router.replace({ name: "roles", query: rest });
+};
+
+const assignMemberToRole = async (role: any) => {
+  if (!assignTarget.value || assigningRoleName.value) return;
+  assigningRoleName.value = role.role_name;
+  try {
+    await updateRole({
+      role_id: role.role_name,
+      org_identifier: store.state.selectedOrganization.identifier,
+      payload: { add: [], remove: [], add_users: [assignTarget.value], remove_users: [] },
+    });
+    assignedRoleNames.value = [...assignedRoleNames.value, role.role_name];
+    toast({
+      message: t("iam.rolesPage.assignSuccess", {
+        member: assignTarget.value,
+        role: role.role_name,
+      }),
+      variant: "success",
+    });
+    loadRoleUserCounts(true).then(applyRoleUserCounts);
+  } catch (err: any) {
+    if (err?.response?.status != 403) {
+      toast({
+        message: err?.response?.data?.message || t("iam.rolesPage.assignError"),
+        variant: "error",
+      });
+    }
+  } finally {
+    assigningRoleName.value = null;
+  }
+};
 
 const deleteConformDialog = ref({
   show: false,
   data: null as any,
 });
 
-const selectedRoles: any = ref([]);
+const selectedRoleNames = ref<string[]>([]);
+const onSelectionChange = (ids: string[]) => {
+  selectedRoleNames.value = ids;
+};
 const confirmBulkDelete = ref(false);
-
-const columns: any = [
-  {
-    name: "#",
-    label: "#",
-    field: "#",
-    align: "left",
-    style: "width: 67px"
-  },
-  {
-    name: "role_name",
-    field: "role_name",
-    label: t("iam.roleName"),
-    align: "left",
-    sortable: true,
-  },
-  {
-    name: "actions",
-    field: "actions",
-    label: t("common.actions"),
-    align: "center",
-    sortable: false,
-    slot: true,
-    slotName: "actions",
-    classes: "actions-column",
-  },
-];
+const bulkDeleteLoading = ref(false);
 
 const { rolesState } = usePermissions();
 
@@ -219,25 +223,39 @@ onBeforeMount(() => {
   setupRoles();
 });
 
-const filterQuery = ref("");
-
 const updateTable = () => {
-   let counter = 1;
-  rows.value = cloneDeep(
-    rolesState.roles.map((role: { role_name: string }, index) => ({
-      ...role,
-      // "#": index + 1,
-       "#": counter <= 9 ? `0${counter++}` : counter++,
-    }))
-  );
+  rows.value = rolesState.roles;
 };
 
 const addRole = () => {
   track("Button Click", {
     button: "Add Role",
-    page: "Roles"
+    page: "Roles",
   });
   showAddGroup.value = true;
+};
+
+// After a role is created, route straight into EditRole on the Permissions tab
+// so the user can start assigning permissions instead of being dropped back on
+// the list with an empty, useless role. Any non-"custom" preset is passed
+// through so EditRole can seed the starting permissions.
+const onRoleAdded = (payload: { role_name: string; startFrom?: string }) => {
+  if (!payload?.role_name) {
+    setupRoles(true);
+    return;
+  }
+
+  router.push({
+    name: "editRole",
+    params: {
+      role_name: payload.role_name,
+    },
+    query: {
+      org_identifier: store.state.selectedOrganization.identifier,
+      tab: "permissions",
+      ...(payload.startFrom && payload.startFrom !== "custom" ? { preset: payload.startFrom } : {}),
+    },
+  });
 };
 
 const editRole = (role: any) => {
@@ -246,64 +264,164 @@ const editRole = (role: any) => {
     params: {
       role_name: role.role_name,
     },
-    query:{
-      org_identifier: store.state.selectedOrganization.identifier
-    }
+    query: {
+      org_identifier: store.state.selectedOrganization.identifier,
+    },
   });
 };
 
-const setupRoles = async () => {
-  await getRoles(store.state.selectedOrganization.identifier)
-    .then((res) => {
-      rolesState.roles = res.data.map((role: string) => ({
-        role_name: role,
-      }));
-      updateTable();
-    })
-    .catch((err) => {
-      console.log(err);
-    });
-};
+const orgIdForList = useOrgId();
+const rolesList = useQuery(() =>
+  Object.assign(rolesQuery(orgIdForList.value), { enabled: !!orgIdForList.value }),
+);
 
-const filterRoles = (rows: any, terms: any) => {
-  var filtered = [];
-  terms = terms.toLowerCase();
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i]["role_name"].toLowerCase().includes(terms)) {
-      filtered.push(rows[i]);
+// Bound to the query rather than hand-managed: `isPending` is the cold read,
+// `isFetching` is any request in flight.
+const loading = rolesList.isPending;
+// A request in flight while rows stay on screen — the refresh button's spinner.
+// `loading` is the skeleton, which only a cold read wants.
+const fetching = rolesList.isFetching;
+const lastUpdatedAt = rolesList.dataUpdatedAt;
+// A 403 lands in the query's error rather than a loader's catch, so derive the no-access state from it.
+const forbidden = computed(() => {
+  const e: any = rolesList.error.value;
+  return e?.status === 403 || e?.response?.status === 403;
+});
+
+// `GET /roles` returns role NAMES only, so a role row has nothing to show beyond
+// its name. The one fact worth surfacing — is anyone actually in this role — comes
+// from the batched user→roles map (a single request for the whole org), not from N
+// per-role lookups. Enterprise-only endpoint: on the community edition it 403s and
+// we simply render no member counts.
+const roleUserCounts = ref<Record<string, number> | null>(null);
+
+const loadRoleUserCounts = async (force = false) => {
+  if (config.isEnterprise !== "true" && config.isCloud !== "true") return;
+  try {
+    const options = allUserRolesQuery(store.state.selectedOrganization.identifier);
+    if (force) {
+      await queryClient.invalidateQueries({
+        queryKey: options.queryKey,
+        exact: true,
+        refetchType: "none",
+      });
     }
+    const res = await queryClient.fetchQuery(options);
+    const counts: Record<string, number> = {};
+    // Response is a map of user email -> role list.
+    Object.values(res ?? {}).forEach((roles: any) => {
+      (Array.isArray(roles) ? roles : []).forEach((role: any) => {
+        const key = String(role ?? "").trim();
+        if (!key) return;
+        counts[key] = (counts[key] ?? 0) + 1;
+      });
+    });
+    roleUserCounts.value = counts;
+  } catch {
+    // Silent: member counts are context. The list stays fully usable without them.
+    roleUserCounts.value = null;
   }
-  return filtered;
 };
 
-const hideForm = () => {
-  showAddGroup.value = false;
+// Patch the counts onto rows already on screen. null (not 0) while the map is
+// unavailable, so "unknown" and "nobody holds this role" stay distinguishable.
+const applyRoleUserCounts = () => {
+  const counts = roleUserCounts.value;
+  rolesState.roles = rolesState.roles.map((role: any) => ({
+    ...role,
+    user_count: counts ? (counts[role.role_name] ?? 0) : null,
+  }));
+  updateTable();
 };
+
+// `force` for every reload that follows a write or an explicit refresh —
+// an "added" event means the server has something new to show.
+// Named handler: binding setupRoles straight to @click puts the MouseEvent
+// in `force`.
+const refreshRoles = () => setupRoles(true);
+
+const applyRoles = (res: any) => {
+  rolesState.roles = res.map((role: string) => ({
+    role_name: role,
+    user_count: null,
+  }));
+  updateTable();
+  // Fire-and-forget: the roles list renders immediately and the member counts
+  // (a second request) fill in when they land. Awaiting here would hold the
+  // whole table hostage to a secondary, enterprise-only endpoint.
+  void loadRoleUserCounts().then(applyRoleUserCounts);
+};
+
+// The list is the query now: anything that invalidates the scope repaints these
+// rows without this component asking.
+watch(
+  rolesList.data,
+  (rows: any) => {
+    if (rows) applyRoles(rows);
+  },
+  { immediate: true },
+);
+watch(rolesList.error, (err: any) => {
+  if (err) console.log(err);
+});
+
+// Only an explicit call reads: refresh, post-write reload, search. Mount and
+// invalidation-driven repaints come from the query itself.
+const setupRoles = async (force = false) => {
+  if (!force) return;
+  await rolesList.refetch();
+  // Members are assigned from the Users page, and an unchanged roles list never re-fires the watcher.
+  await loadRoleUserCounts(true);
+  applyRoleUserCounts();
+};
+
+const orgId = useOrgId();
+const deleteRoleOne = useMutation(() => deleteRoleMutation(orgId.value));
+const bulkDeleteRolesAll = useMutation(() => bulkDeleteRolesMutation(orgId.value));
 
 const deleteUserRole = (role: any) => {
-  deleteRole(role.role_name, store.state.selectedOrganization.identifier)
+  // Was: invalidate, then delete — the refetch raced the write.
+  deleteRoleOne
+    .mutateAsync(role.role_name)
     .then(() => {
-      q.notify({
-        message: "Role deleted successfully!",
-        color: "positive",
-        position: "bottom",
+      toast({
+        message: t("iam.appRoles.roleDeletedSuccess"),
+        variant: "success",
       });
-      setupRoles();
+      setupRoles(true);
     })
     .catch((error: any) => {
       if (error.response.status != 403) {
-        q.notify({
-          message: "Error while deleting role!",
-          color: "negative",
-          position: "bottom",
+        toast({
+          message: t("iam.appRoles.roleDeleteError"),
+          variant: "error",
         });
       }
     });
 };
 
-const showConfirmDialog = (row: any) => {
+// Blast-radius warning for the single-role delete dialog. We resolve the live
+// user count with one getRoleUsers call on delete-click (the list payload has
+// no counts), and always warn about bound service accounts via static copy
+// since there is no role→service-accounts count endpoint.
+const deleteImpactMessage = ref(raw(""));
+
+const showConfirmDialog = async (row: any) => {
   deleteConformDialog.value.show = true;
   deleteConformDialog.value.data = row;
+  deleteImpactMessage.value = t("iam.rolesPage.delete.impact", { count: 0 });
+
+  try {
+    const res = await getRoleUsers(row.role_name, store.state.selectedOrganization.identifier);
+    const userCount = Array.isArray(res.data) ? res.data.length : 0;
+    deleteImpactMessage.value = t("iam.rolesPage.delete.impact", {
+      count: userCount,
+    });
+  } catch (err) {
+    // If the count lookup fails, keep the generic static warning rather than
+    // blocking the delete.
+    console.log(err);
+  }
 };
 
 const _deleteRole = () => {
@@ -311,17 +429,41 @@ const _deleteRole = () => {
   deleteConformDialog.value.data = null;
 };
 
-const openBulkDeleteDialog = () => {
+// Blast-radius warning for the bulk-delete dialog. With exactly one role
+// selected we resolve its live user count (one getRoleUsers call), matching the
+// per-row delete. For 2+ roles we keep static copy to avoid N requests.
+const bulkDeleteImpactMessage = ref(raw(""));
+
+const openBulkDeleteDialog = async () => {
   confirmBulkDelete.value = true;
+
+  if (selectedRoleNames.value.length === 1) {
+    bulkDeleteImpactMessage.value = t("iam.rolesPage.delete.impact", {
+      count: 0,
+    });
+    try {
+      const res = await getRoleUsers(
+        selectedRoleNames.value[0],
+        store.state.selectedOrganization.identifier,
+      );
+      const userCount = Array.isArray(res.data) ? res.data.length : 0;
+      bulkDeleteImpactMessage.value = t("iam.rolesPage.delete.impact", {
+        count: userCount,
+      });
+    } catch (err) {
+      console.log(err);
+    }
+  } else {
+    bulkDeleteImpactMessage.value = t("iam.rolesPage.bulkDelete.impact");
+  }
 };
 
 const bulkDeleteUserRoles = async () => {
-  const roleNames = selectedRoles.value.map((role: any) => role.role_name);
+  const roleNames = selectedRoleNames.value;
+  bulkDeleteLoading.value = true;
 
   try {
-    const response = await bulkDeleteRoles(store.state.selectedOrganization.identifier, {
-      ids: roleNames,
-    });
+    const response = await bulkDeleteRolesAll.mutateAsync(roleNames);
 
     const { successful = [], unsuccessful = [], err } = response.data || {};
 
@@ -330,63 +472,61 @@ const bulkDeleteUserRoles = async () => {
     }
 
     if (successful.length > 0 && unsuccessful.length === 0) {
-      q.notify({
-        message: `Successfully deleted ${successful.length} role(s)`,
-        color: "positive",
-        position: "bottom",
+      toast({
+        message: t("iam.appRoles.bulkDeleteSuccess", { count: successful.length }),
+        variant: "success",
       });
     } else if (successful.length > 0 && unsuccessful.length > 0) {
-      q.notify({
-        message: `Deleted ${successful.length} role(s). Failed to delete ${unsuccessful.length} role(s)`,
-        color: "warning",
-        position: "bottom",
+      toast({
+        message: t("iam.appRoles.bulkDeletePartial", {
+          count: successful.length,
+          unsuccessful: unsuccessful.length,
+        }),
+        variant: "warning",
       });
     } else if (unsuccessful.length > 0) {
-      q.notify({
-        message: `Failed to delete ${unsuccessful.length} role(s)`,
-        color: "negative",
-        position: "bottom",
+      toast({
+        message: t("iam.appRoles.bulkDeleteFailed", { count: unsuccessful.length }),
+        variant: "error",
       });
     }
 
-    await setupRoles();
-    selectedRoles.value = [];
+    await setupRoles(true);
+    selectedRoleNames.value = [];
     confirmBulkDelete.value = false;
   } catch (error: any) {
     if (error.response?.status != 403 || error?.status != 403) {
-      q.notify({
-        message: error.response?.data?.message || error?.message || "Error while deleting roles",
-        color: "negative",
-        position: "bottom",
+      toast({
+        message:
+          error.response?.data?.message || error?.message || t("iam.appRoles.bulkDeleteRolesError"),
+        variant: "error",
       });
     }
     confirmBulkDelete.value = false;
+  } finally {
+    bulkDeleteLoading.value = false;
   }
 };
 
-const visibleRows = computed(() => {
-  if (!filterQuery.value) return rows.value || []
-  return filterRoles(rows.value || [], filterQuery.value)
-})
-
-const hasVisibleRows = computed(() => visibleRows.value.length > 0)
+// ── Keyboard shortcuts ────────────────────────────────────────────────────
+useShortcuts([
+  {
+    id: "iamRolesAdd",
+    handler: () => {
+      if (!isInputFocused()) addRole();
+    },
+  },
+  {
+    id: "iamRolesRefresh",
+    handler: () => {
+      if (!isInputFocused()) setupRoles(true);
+    },
+  },
+  {
+    id: "iamRolesFocusSearch",
+    handler: () => {
+      focusSearchInput("iam-roles-search-input");
+    },
+  },
+]);
 </script>
-
-<style scoped></style>
-<style lang="scss">
-.iam-table {
-  .thead-sticky,
-  .tfoot-sticky {
-    position: sticky;
-    top: 0;
-    opacity: 1;
-    z-index: 1;
-    background: transparent !important;
-  }
-
-  .q-table--dark .thead-sticky,
-  .q-table--dark .tfoot-sticky {
-    background: transparent !important;
-  }
-}
-</style>

@@ -1,3 +1,5 @@
+import { getNumberLocale } from "@/locales/numberFormat";
+
 const units: any = {
   bytes: [
     { unit: "B", divisor: 1 },
@@ -159,10 +161,7 @@ export const getUnitValue = (
       }
 
       // calculate the final value: sign * absValue / divisor
-      const finalValue = (
-        (sign * absValue) /
-        units[unit][unitIndex].divisor
-      ).toFixed(decimals);
+      const finalValue = ((sign * absValue) / units[unit][unitIndex].divisor).toFixed(decimals);
       const finalUnit = units[unit][unitIndex].unit;
 
       // console.timeEnd("getUnitValue:");
@@ -173,6 +172,17 @@ export const getUnitValue = (
       return {
         value: `${parseFloat(value)?.toFixed(decimals) ?? 0}`,
         unit: `${customUnit ?? ""}`,
+      };
+    }
+    case "locale": {
+      const num = Number(value);
+      if (Number.isNaN(num)) return { value: value, unit: "" };
+      return {
+        value: new Intl.NumberFormat(getNumberLocale(), {
+          minimumFractionDigits: decimals,
+          maximumFractionDigits: decimals,
+        }).format(num),
+        unit: "",
       };
     }
     case "percent-1": {
@@ -222,17 +232,12 @@ export const getUnitValue = (
     case "default":
     default: {
       return {
-        value: isNaN(value)
-          ? value
-          : value === ""
-            ? "-"
-            : ((+value)?.toFixed(decimals) ?? 0),
+        value: isNaN(value) ? value : value === "" ? "-" : ((+value)?.toFixed(decimals) ?? 0),
         unit: "",
       };
     }
   }
 };
-
 
 /**
  * Formats a unit value.

@@ -1,11 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mount, VueWrapper } from "@vue/test-utils";
+import { mount, flushPromises, VueWrapper } from "@vue/test-utils";
 import { createStore } from "vuex";
 import i18n from "@/locales";
 import { createRouter, createWebHistory } from "vue-router";
 import { nextTick } from "vue";
-import { Quasar } from "quasar";
 import AppSessions from "./AppSessions.vue";
+import ShareButton from "@/components/common/ShareButton.vue";
+import searchService from "@/services/search";
 
 // Mock the composables
 const mockSessionState = {
@@ -68,31 +69,34 @@ vi.mock("@/composables/useStreams", () => ({
 }));
 
 // Mock services
-vi.mock("@/services/search", () => ({
-  default: {
-    search: vi.fn().mockResolvedValue({
-      data: {
-        hits: [
-          {
-            session_id: "session1",
-            zo_sql_timestamp: 1672531200000,
-            start_time: 1672531000,
-            end_time: 1672531300,
-            source: "web",
-            user_agent_user_agent_family: "Chrome",
-            user_agent_os_family: "Windows",
-            ip: "192.168.1.1",
-            error_count: 2,
-            user_email: "test@example.com",
-            country: "US",
-            city: "New York",
-            country_iso_code: "us",
-          },
-        ],
-      },
-    }),
-  },
-}));
+vi.mock("@/services/search", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      search: vi.fn().mockResolvedValue({
+        data: {
+          hits: [
+            {
+              session_id: "session1",
+              zo_sql_timestamp: 1672531200000,
+              start_time: 1672531000,
+              end_time: 1672531300,
+              source: "web",
+              user_agent_user_agent_family: "Chrome",
+              user_agent_os_family: "Windows",
+              ip: "192.168.1.1",
+              error_count: 2,
+              user_email: "test@example.com",
+              country: "US",
+              city: "New York",
+              country_iso_code: "us",
+            },
+          ],
+        },
+      }),
+    },
+  });
+});
 
 // Mock utility functions
 vi.mock("@/utils/zincutils", async (importOriginal) => {
@@ -110,21 +114,8 @@ vi.mock("@/utils/date", () => ({
     startTime: Date.now() - 900000,
     endTime: Date.now(),
   }),
+  formatDate: vi.fn().mockReturnValue("Jan 01, 2023 00:00:00 +0000"),
 }));
-
-// Mock Quasar
-vi.mock("quasar", async () => {
-  const actual = await vi.importActual("quasar");
-  return {
-    ...actual,
-    useQuasar: () => ({
-      notify: vi.fn(),
-    }),
-    date: {
-      formatDate: vi.fn((timestamp, format) => "Jan 01, 2023 12:00:00 +00:00"),
-    },
-  };
-});
 
 // Mock async components
 vi.mock("@/components/CodeQueryEditor.vue", () => ({
@@ -198,41 +189,31 @@ describe("AppSessions.vue", () => {
         isSessionReplayEnabled: true,
       },
       global: {
-        plugins: [store, router, i18n, Quasar],
+        plugins: [store, router, i18n],
         stubs: {
-          QPage: {
-            template: '<div class="q-page" v-bind="$attrs"><slot /></div>',
-          },
-          QBtn: {
+          OButton: {
             template:
-              '<button class="q-btn" v-bind="$attrs" @click="$emit(\'click\')"><slot /></button>',
+              '<button data-test-stub="o-button" v-bind="$attrs" @click="$emit(\'click\')"><slot /></button>',
+            emits: ["click"],
           },
-          QSeparator: {
-            template: '<hr class="q-separator" />',
-          },
-          QSplitter: {
+          OSplitter: {
             template:
-              '<div class="q-splitter"><slot name="before" /><slot name="separator" /><slot name="after" /></div>',
-            props: ["modelValue", "unit", "vertical"],
+              '<div data-test-stub="o-splitter"><slot name="before" /><slot name="after" /></div>',
+            props: ["modelValue", "unit", "horizontal"],
           },
-          QAvatar: {
-            template: '<div class="q-avatar" v-bind="$attrs"><slot /></div>',
+          OIcon: {
+            template: '<span data-test-stub="o-icon" v-bind="$attrs"></span>',
+            props: ["name", "size"],
           },
-          QIcon: {
-            template: '<span class="q-icon" v-bind="$attrs"></span>',
-          },
-          QSpinnerHourglass: {
-            template: '<div class="q-spinner-hourglass" v-bind="$attrs"></div>',
+          OTable: {
+            template:
+              '<div data-test="app-table" v-bind="$attrs"><slot name="empty" /><slot name="cell-frustration_count" :row="{ frustration_count: 0 }" /><slot name="cell-location" :row="{ geo_info_country: \'\', geo_info_city: \'\' }" /></div>',
+            props: ["data", "columns", "loading", "rowKey"],
           },
           DateTime: {
             template:
               '<div data-test="date-time" v-bind="$attrs" @on:date-change="$emit(\'on:date-change\', $event)"></div>',
-            props: [
-              "autoApply",
-              "defaultType",
-              "defaultAbsoluteTime",
-              "defaultRelativeTime",
-            ],
+            props: ["autoApply", "defaultType", "defaultAbsoluteTime", "defaultRelativeTime"],
             emits: ["on:date-change"],
           },
           SyntaxGuide: {
@@ -244,23 +225,22 @@ describe("AppSessions.vue", () => {
             props: ["query", "editorId", "debounceTime"],
             emits: ["update:query"],
           },
-          FieldList: {
+          SearchFieldList: {
+            name: "SearchFieldList",
             template:
               '<div data-test="field-list" v-bind="$attrs" @event-emitted="$emit(\'event-emitted\', $event)"></div>',
-            props: ["fields", "timeStamp", "streamName"],
+            props: ["fields", "timeStamp", "streamName", "query", "baseFilter"],
             emits: ["event-emitted"],
           },
-          AppTable: {
-            template:
-              '<div data-test="app-table" v-bind="$attrs" @event-emitted="$emit(\'event-emitted\', $event)"><slot /></div>',
-            props: ["columns", "rows", "bordered"],
-            emits: ["event-emitted"],
+          FrustrationBadge: {
+            template: '<div data-test-stub="frustration-badge" v-bind="$attrs"></div>',
+            props: ["count"],
           },
           SessionLocationColumn: {
-            template:
-              '<div data-test="session-location-column" v-bind="$attrs"></div>',
+            template: '<div data-test="session-location-column" v-bind="$attrs"></div>',
             props: ["column"],
           },
+          NoData: { template: '<div data-test-stub="no-data" />' },
         },
       },
     });
@@ -287,48 +267,29 @@ describe("AppSessions.vue", () => {
       );
     });
 
-    it("should render loading state when data is being fetched", async () => {
-      // Properly update the reactive ref by pushing instead of replacing
+    it("should set loading on OTable when data is being fetched", async () => {
       wrapper.vm.isLoading.push(true);
       await nextTick();
 
-      expect(wrapper.find(".q-spinner-hourglass").exists()).toBe(true);
-      expect(wrapper.text()).toContain(
-        "Hold on tight, we're fetching sessions.",
-      );
+      // The OTable receives :loading="isLoading.length > 0"
+      expect(wrapper.vm.isLoading.length).toBeGreaterThan(0);
 
       // Cleanup
       wrapper.vm.isLoading.pop();
     });
 
-    it("should render app table when not loading", async () => {
-      // Ensure component is properly set up for non-loading state
-      wrapper.vm.isLoading = [];
-      wrapper.vm.rows = [
-        {
-          session_id: "test-session",
-          timestamp: Date.now(),
-          user_email: "test@example.com",
-        },
-      ];
+    it("should render OTable when session replay is enabled and not loading", async () => {
       await nextTick();
 
-      // Check if table exists or if it's within the splitter after section
-      const tableExists = wrapper.find('[data-test="app-table"]').exists();
-      const splitterAfter = wrapper.find(".q-splitter").exists();
-
-      // If the component is properly structured, either the table should exist
-      // or the splitter structure should be present
-      expect(tableExists || splitterAfter).toBe(true);
+      // OTable renders with data-test="rum-sessions-table" (v-bind="$attrs" propagates it)
+      expect(wrapper.find('[data-test="rum-sessions-table"]').exists()).toBe(true);
     });
   });
 
   describe("Query Functionality", () => {
     it("should trigger run query when button is clicked", async () => {
       const runQuerySpy = vi.spyOn(wrapper.vm, "runQuery");
-      const runButton = wrapper.find(
-        '[data-test="metrics-explorer-run-query-button"]',
-      );
+      const runButton = wrapper.find('[data-test="metrics-explorer-run-query-button"]');
 
       if (runButton.exists()) {
         // Try multiple ways to trigger the event
@@ -370,7 +331,7 @@ describe("AppSessions.vue", () => {
   });
 
   describe("Table Interactions", () => {
-    it("should handle table events correctly", () => {
+    it("should handle cell click for action_play column", () => {
       const payload = {
         columnName: "action_play",
         row: {
@@ -380,8 +341,8 @@ describe("AppSessions.vue", () => {
         },
       };
 
-      // Test the method directly
-      const result = wrapper.vm.handleTableEvents("cell-click", payload);
+      // handleCellClick navigates when columnName is action_play
+      const result = wrapper.vm.handleCellClick(payload);
       expect(result).toBeUndefined(); // Method doesn't return anything
     });
 
@@ -409,49 +370,41 @@ describe("AppSessions.vue", () => {
       });
     });
 
-    it("should handle scroll events for pagination", () => {
-      const scrollData = { to: 100 };
-
-      // Test the method directly
-      wrapper.vm.handleScroll(scrollData);
-      expect(
-        wrapper.vm.sessionState.data.resultGrid.currentPage,
-      ).toBeGreaterThanOrEqual(0);
+    it("should handle scroll end events for pagination", () => {
+      // handleScrollEnd increments currentPage when sessions are fully fetched
+      wrapper.vm.handleScrollEnd();
+      expect(wrapper.vm.sessionState.data.resultGrid.currentPage).toBeGreaterThanOrEqual(0);
     });
   });
 
   describe("Session Data Management", () => {
     it("should initialize with correct columns structure", () => {
-      const columns = wrapper.vm.columns;
+      const columns = wrapper.vm.tableColumns;
 
       expect(columns).toHaveLength(7);
-      expect(columns[0].name).toBe("action_play");
-      expect(columns[1].name).toBe("timestamp");
-      expect(columns[2].name).toBe("user_email");
-      expect(columns[3].name).toBe("time_spent");
-      expect(columns[4].name).toBe("error_count");
-      expect(columns[5].name).toBe("frustration_count");
-      expect(columns[6].name).toBe("location");
+      expect(columns[0].id).toBe("action_play");
+      expect(columns[1].id).toBe("session");
+      expect(columns[2].id).toBe("platform");
+      expect(columns[3].id).toBe("activity");
+      expect(columns[4].id).toBe("health");
+      expect(columns[5].id).toBe("location");
+      expect(columns[6].id).toBe("duration");
     });
 
     it("should fetch stream fields on mount", async () => {
-      expect(mockStreams.getStream).toHaveBeenCalledWith(
-        "_rumdata",
-        "logs",
-        true,
-      );
+      expect(mockStreams.getStream).toHaveBeenCalledWith("_rumdata", "logs", true);
     });
 
     it("should get sessions data when component is mounted", async () => {
       expect(mockQueryFunctions.buildQueryPayload).toHaveBeenCalled();
     });
 
-    it("should format session data correctly", () => {
-      const getFormattedDate = wrapper.vm.getFormattedDate;
-      const timestamp = 1672531200; // Unix timestamp
-      const formatted = getFormattedDate(timestamp);
+    it("should format session duration as compact human-readable text", () => {
+      const formatSessionDuration = wrapper.vm.formatSessionDuration;
 
-      expect(typeof formatted).toBe("string");
+      expect(formatSessionDuration(0)).toBe("0s");
+      expect(formatSessionDuration(500)).toBe("<1s");
+      expect(formatSessionDuration(839_000)).toBe("13m 59s");
     });
 
     it("should include usr_email, session_id, and view_id in the field filter set", async () => {
@@ -488,14 +441,10 @@ describe("AppSessions.vue", () => {
         "resource_url",
         "session_id",
       ];
-      const streamFieldNames: string[] = wrapper.vm.streamFields.map(
-        (f: any) => f.name,
-      );
+      const streamFieldNames: string[] = wrapper.vm.streamFields.map((f: any) => f.name);
 
       // Collect only the entries that are priority fields, preserving their positions.
-      const priorityInResult = streamFieldNames.filter((n) =>
-        priorityNames.includes(n),
-      );
+      const priorityInResult = streamFieldNames.filter((n) => priorityNames.includes(n));
 
       expect(priorityInResult).toEqual(priorityNames);
     });
@@ -516,9 +465,7 @@ describe("AppSessions.vue", () => {
         (max, name, idx) => (prioritySet.has(name) ? idx : max),
         -1,
       );
-      const firstNonPriorityIndex = names.findIndex(
-        (name) => !prioritySet.has(name),
-      );
+      const firstNonPriorityIndex = names.findIndex((name) => !prioritySet.has(name));
 
       // Every priority field must come before every non-priority field.
       if (lastPriorityIndex !== -1 && firstNonPriorityIndex !== -1) {
@@ -531,9 +478,7 @@ describe("AppSessions.vue", () => {
     it("should handle sidebar events for field addition", () => {
       // Test the method directly
       wrapper.vm.handleSidebarEvent("add-field", "field_name='value'");
-      expect(wrapper.vm.sessionState.data.editorValue).toContain(
-        "field_name='value'",
-      );
+      expect(wrapper.vm.sessionState.data.editorValue).toContain("field_name='value'");
     });
 
     it("should add field to query when no existing query", () => {
@@ -544,16 +489,12 @@ describe("AppSessions.vue", () => {
     });
 
     it("should append field with AND when adding a different field", async () => {
-      const routerPushSpy = vi
-        .spyOn(router, "push")
-        .mockResolvedValue(undefined);
+      const routerPushSpy = vi.spyOn(router, "push").mockResolvedValue(undefined);
 
       mockSessionState.data.editorValue = "existing_field='test'";
       wrapper.vm.handleSidebarEvent("add-field", "new_field='value'");
 
-      expect(mockSessionState.data.editorValue).toBe(
-        "existing_field='test' and new_field='value'",
-      );
+      expect(mockSessionState.data.editorValue).toBe("existing_field='test' and new_field='value'");
 
       routerPushSpy.mockRestore();
     });
@@ -564,27 +505,32 @@ describe("AppSessions.vue", () => {
 
       expect(mockSessionState.data.editorValue).toBe("env='staging'");
     });
+
+    it("should pass the session-row base filter to the sidebar", () => {
+      const fieldList = wrapper.findComponent({ name: "SearchFieldList" });
+      expect(fieldList.props("baseFilter")).toBe("session_has_replay IS NOT NULL");
+    });
+
+    // The base filter used to be concatenated into `query`, which made the
+    // sidebar read it back as an active exclude filter and show session_id /
+    // session_has_replay permanently ticked.
+    it("should keep the base filter out of the sidebar query prop", () => {
+      const fieldList = wrapper.findComponent({ name: "SearchFieldList" });
+      expect(fieldList.props("query")).not.toContain("session_has_replay");
+    });
   });
 
   describe("URL Query Parameters", () => {
     it("should restore query parameters from URL", () => {
-      const restoreUrlQueryParamsSpy = vi.spyOn(
-        wrapper.vm,
-        "restoreUrlQueryParams",
-      );
+      const restoreUrlQueryParamsSpy = vi.spyOn(wrapper.vm, "restoreUrlQueryParams");
 
       // This would have been called during component setup
       expect(restoreUrlQueryParamsSpy).toBeDefined();
     });
 
     it("should update URL when query parameters change", async () => {
-      const updateUrlQueryParamsSpy = vi.spyOn(
-        wrapper.vm,
-        "updateUrlQueryParams",
-      );
-      const routerPushSpy = vi
-        .spyOn(router, "push")
-        .mockResolvedValue(undefined);
+      const updateUrlQueryParamsSpy = vi.spyOn(wrapper.vm, "updateUrlQueryParams");
+      const routerPushSpy = vi.spyOn(router, "push").mockResolvedValue(undefined);
 
       wrapper.vm.isMounted = true;
       await wrapper.vm.updateUrlQueryParams();
@@ -593,6 +539,16 @@ describe("AppSessions.vue", () => {
       expect(routerPushSpy).toHaveBeenCalled();
 
       routerPushSpy.mockRestore();
+    });
+
+    it("shares the live URL, so the link carries whatever filters the page pushed", async () => {
+      await router.push({ path: "/", query: { period: "15m", health: "errors" } });
+      await flushPromises();
+
+      const shareButton = wrapper.findComponent(ShareButton);
+
+      expect(shareButton.exists()).toBe(true);
+      expect(shareButton.props("url")).toBe(`${window.location.origin}/?period=15m&health=errors`);
     });
   });
 
@@ -618,9 +574,7 @@ describe("AppSessions.vue", () => {
 
       expect(wrapper.vm.dateTime.startTime).toBe(newDate.startTime);
       expect(wrapper.vm.dateTime.endTime).toBe(newDate.endTime);
-      expect(wrapper.vm.dateTime.relativeTimePeriod).toBe(
-        newDate.relativeTimePeriod,
-      );
+      expect(wrapper.vm.dateTime.relativeTimePeriod).toBe(newDate.relativeTimePeriod);
     });
 
     it("should not update if date is same", () => {
@@ -628,9 +582,7 @@ describe("AppSessions.vue", () => {
       wrapper.vm.updateDateChange(currentDate);
 
       // Should not trigger any side effects if date is the same
-      expect(JSON.stringify(wrapper.vm.dateTime)).toBe(
-        JSON.stringify(currentDate),
-      );
+      expect(JSON.stringify(wrapper.vm.dateTime)).toBe(JSON.stringify(currentDate));
     });
   });
 
@@ -653,22 +605,21 @@ describe("AppSessions.vue", () => {
           isSessionReplayEnabled: true,
         },
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router, i18n],
           stubs: {
-            QBtn: { template: "<button><slot /></button>" },
-            QSplitter: {
-              template:
-                '<div><slot name="before" /><slot name="after" /></div>',
+            OButton: { template: "<button><slot /></button>" },
+            OSplitter: {
+              template: '<div><slot name="before" /><slot name="after" /></div>',
             },
-            QAvatar: { template: "<div><slot /></div>" },
-            QIcon: { template: "<span></span>" },
-            QSpinnerHourglass: { template: "<div></div>" },
+            OIcon: { template: "<span></span>" },
+            OTable: { template: "<div></div>" },
             DateTime: { template: "<div></div>" },
             SyntaxGuide: { template: "<div></div>" },
             QueryEditor: { template: "<div></div>" },
-            FieldList: { template: "<div></div>" },
-            AppTable: { template: "<div></div>" },
+            SearchFieldList: { template: "<div></div>" },
+            FrustrationBadge: { template: "<div></div>" },
             SessionLocationColumn: { template: "<div></div>" },
+            NoData: { template: "<div></div>" },
           },
         },
       });
@@ -707,9 +658,7 @@ describe("AppSessions.vue", () => {
 
     it("should handle stream loading errors", async () => {
       const originalGetStream = mockStreams.getStream;
-      mockStreams.getStream = vi
-        .fn()
-        .mockRejectedValue(new Error("Stream Error"));
+      mockStreams.getStream = vi.fn().mockRejectedValue(new Error("Stream Error"));
 
       try {
         await wrapper.vm.getStreamFields();
@@ -796,24 +745,21 @@ describe("AppSessions.vue", () => {
     it("should default isSessionReplayEnabled to false", async () => {
       const newWrapper = mount(AppSessions, {
         global: {
-          plugins: [store, router, i18n, Quasar],
+          plugins: [store, router, i18n],
           stubs: {
-            QPage: { template: "<div><slot /></div>" },
-            QBtn: { template: "<button><slot /></button>" },
-            QSeparator: { template: "<hr />" },
-            QSplitter: {
-              template:
-                '<div><slot name="before" /><slot name="after" /></div>',
+            OButton: { template: "<button><slot /></button>" },
+            OSplitter: {
+              template: '<div><slot name="before" /><slot name="after" /></div>',
             },
-            QAvatar: { template: "<div><slot /></div>" },
-            QIcon: { template: "<span></span>" },
-            QSpinnerHourglass: { template: "<div></div>" },
+            OIcon: { template: "<span></span>" },
+            OTable: { template: "<div></div>" },
             DateTime: { template: "<div></div>" },
             SyntaxGuide: { template: "<div></div>" },
             QueryEditor: { template: "<div></div>" },
-            FieldList: { template: "<div></div>" },
-            AppTable: { template: "<div></div>" },
+            SearchFieldList: { template: "<div></div>" },
+            FrustrationBadge: { template: "<div></div>" },
             SessionLocationColumn: { template: "<div></div>" },
+            NoData: { template: "<div></div>" },
           },
         },
       });
@@ -825,10 +771,7 @@ describe("AppSessions.vue", () => {
 
   describe("Lifecycle Hooks", () => {
     it("should call restoreUrlQueryParams on beforeMount", () => {
-      const restoreUrlQueryParamsSpy = vi.spyOn(
-        wrapper.vm,
-        "restoreUrlQueryParams",
-      );
+      const restoreUrlQueryParamsSpy = vi.spyOn(wrapper.vm, "restoreUrlQueryParams");
 
       // This would be called during component setup
       expect(restoreUrlQueryParamsSpy).toBeDefined();
@@ -851,26 +794,26 @@ describe("AppSessions.vue", () => {
       expect(wrapper.vm.schemaMapping).toBeDefined();
     });
 
-    it("should have frustration_count column in columns definition", () => {
-      const frustrictionColumn = wrapper.vm.columns.find(
-        (col: any) => col.name === "frustration_count",
-      );
+    it("should have health column covering frustration signals", () => {
+      const healthColumn = wrapper.vm.tableColumns.find((col: any) => col.id === "health");
 
-      expect(frustrictionColumn).toBeDefined();
-      expect(frustrictionColumn.label).toContain("Frustration");
-      expect(frustrictionColumn.slot).toBe(true);
-      expect(frustrictionColumn.slotName).toBe("frustration_count_column");
+      expect(healthColumn).toBeDefined();
+      expect(healthColumn.sortable).toBe(true);
     });
 
-    it("should render FrustrationBadge in frustration_count column slot", () => {
-      const template = wrapper.html();
+    it("should sort health column by errors first, frustrations as tiebreak", () => {
+      const healthColumn = wrapper.vm.tableColumns.find((col: any) => col.id === "health");
 
-      // Check that the slot is defined for frustration count
-      expect(
-        wrapper.vm.columns.some(
-          (col: any) => col.slotName === "frustration_count_column",
-        ),
-      ).toBe(true);
+      const errorsOnly = healthColumn.accessorFn({
+        error_count: 2,
+        frustration_count: 0,
+      });
+      const frustrationsOnly = healthColumn.accessorFn({
+        error_count: 0,
+        frustration_count: 5,
+      });
+
+      expect(errorsOnly).toBeGreaterThan(frustrationsOnly);
     });
 
     it("should map frustration_count from API response", () => {
@@ -890,13 +833,10 @@ describe("AppSessions.vue", () => {
       };
 
       // Simulate the mapping logic from getSessionLogs
-      wrapper.vm.sessionState.data.sessions[
-        mockHit.session_id
-      ].frustration_count = mockHit.frustration_count || 0;
+      wrapper.vm.sessionState.data.sessions[mockHit.session_id].frustration_count =
+        mockHit.frustration_count || 0;
 
-      expect(
-        wrapper.vm.sessionState.data.sessions["test-123"].frustration_count,
-      ).toBe(3);
+      expect(wrapper.vm.sessionState.data.sessions["test-123"].frustration_count).toBe(3);
     });
 
     it("should default frustration_count to 0 when not present", () => {
@@ -911,43 +851,30 @@ describe("AppSessions.vue", () => {
       };
 
       // Simulate the mapping with missing frustration_count
-      wrapper.vm.sessionState.data.sessions[
-        mockHit.session_id
-      ].frustration_count = mockHit.frustration_count || 0;
+      wrapper.vm.sessionState.data.sessions[mockHit.session_id].frustration_count =
+        mockHit.frustration_count || 0;
 
-      expect(
-        wrapper.vm.sessionState.data.sessions["test-456"].frustration_count,
-      ).toBe(0);
+      expect(wrapper.vm.sessionState.data.sessions["test-456"].frustration_count).toBe(0);
     });
 
-    it("should make frustration_count column sortable", () => {
-      const frustrationColumn = wrapper.vm.columns.find(
-        (col: any) => col.name === "frustration_count",
-      );
+    it("should make health column sortable", () => {
+      const healthColumn = wrapper.vm.tableColumns.find((col: any) => col.id === "health");
 
-      expect(frustrationColumn.sortable).toBe(true);
+      expect(healthColumn.sortable).toBe(true);
     });
 
-    it("should position frustration_count column after error_count", () => {
-      const errorIndex = wrapper.vm.columns.findIndex(
-        (col: any) => col.name === "error_count",
-      );
-      const frustrationIndex = wrapper.vm.columns.findIndex(
-        (col: any) => col.name === "frustration_count",
-      );
+    it("should position health column after session", () => {
+      const sessionIndex = wrapper.vm.tableColumns.findIndex((col: any) => col.id === "session");
+      const healthIndex = wrapper.vm.tableColumns.findIndex((col: any) => col.id === "health");
 
-      expect(frustrationIndex).toBeGreaterThan(errorIndex);
+      expect(healthIndex).toBeGreaterThan(sessionIndex);
     });
 
-    it("should position frustration_count column before location", () => {
-      const frustrationIndex = wrapper.vm.columns.findIndex(
-        (col: any) => col.name === "frustration_count",
-      );
-      const locationIndex = wrapper.vm.columns.findIndex(
-        (col: any) => col.name === "location",
-      );
+    it("should position health column before location", () => {
+      const healthIndex = wrapper.vm.tableColumns.findIndex((col: any) => col.id === "health");
+      const locationIndex = wrapper.vm.tableColumns.findIndex((col: any) => col.id === "location");
 
-      expect(frustrationIndex).toBeLessThan(locationIndex);
+      expect(healthIndex).toBeLessThan(locationIndex);
     });
 
     it("should handle high frustration counts", () => {
@@ -959,20 +886,233 @@ describe("AppSessions.vue", () => {
       wrapper.vm.sessionState.data.sessions["test-789"] = {
         session_id: "test-789",
       };
-      wrapper.vm.sessionState.data.sessions[
-        mockHit.session_id
-      ].frustration_count = mockHit.frustration_count || 0;
+      wrapper.vm.sessionState.data.sessions[mockHit.session_id].frustration_count =
+        mockHit.frustration_count || 0;
 
-      expect(
-        wrapper.vm.sessionState.data.sessions["test-789"].frustration_count,
-      ).toBe(999);
+      expect(wrapper.vm.sessionState.data.sessions["test-789"].frustration_count).toBe(999);
     });
 
-    it("should include FrustrationBadge component import", () => {
-      // Check that the component has access to FrustrationBadge
-      expect(wrapper.findComponent({ name: "FrustrationBadge" }).exists()).toBe(
-        false,
-      ); // Since it's stubbed
+    it("should not render the removed FrustrationBadge component", () => {
+      // Frustration signals now render via SessionHealthCell in the health column
+      expect(wrapper.findComponent({ name: "FrustrationBadge" }).exists()).toBe(false);
+    });
+  });
+
+  describe("platform column", () => {
+    // OTable stub used only by this describe block: unlike the shared OTable
+    // stub (which only exposes the "health"/"location" scoped slots), these
+    // tests need the "cell-platform" slot rendered for every row in `data`
+    // so the platform label produced by classifySource() is actually visible.
+    const buildPlatformStubs = () => ({
+      OButton: {
+        template:
+          '<button data-test-stub="o-button" v-bind="$attrs" @click="$emit(\'click\')"><slot /></button>',
+        emits: ["click"],
+      },
+      OSplitter: {
+        template:
+          '<div data-test-stub="o-splitter"><slot name="before" /><slot name="after" /></div>',
+        props: ["modelValue", "unit", "horizontal"],
+      },
+      OIcon: {
+        template: '<span data-test-stub="o-icon" v-bind="$attrs"></span>',
+        props: ["name", "size"],
+      },
+      OTable: {
+        template:
+          '<div data-test="rum-sessions-table" v-bind="$attrs"><div v-for="row in data" :key="row.session_id"><slot name="cell-platform" :row="row" /></div></div>',
+        props: ["data", "columns", "loading", "rowKey", "columnVisibility", "getRowStatusColor"],
+      },
+      DateTime: {
+        template:
+          '<div data-test="date-time" v-bind="$attrs" @on:date-change="$emit(\'on:date-change\', $event)"></div>',
+        props: ["autoApply", "defaultType", "defaultAbsoluteTime", "defaultRelativeTime"],
+        emits: ["on:date-change"],
+      },
+      SyntaxGuide: { template: '<div data-test="syntax-guide"></div>' },
+      QueryEditor: {
+        template:
+          '<div data-test="query-editor" v-bind="$attrs" @update:query="$emit(\'update:query\', $event)"></div>',
+        props: ["query", "editorId", "debounceTime"],
+        emits: ["update:query"],
+      },
+      SearchFieldList: {
+        template:
+          '<div data-test="field-list" v-bind="$attrs" @event-emitted="$emit(\'event-emitted\', $event)"></div>',
+        props: ["fields", "timeStamp", "streamName"],
+        emits: ["event-emitted"],
+      },
+      FrustrationBadge: {
+        template: '<div data-test-stub="frustration-badge" v-bind="$attrs"></div>',
+        props: ["count"],
+      },
+      SessionLocationColumn: {
+        template: '<div data-test="session-location-column" v-bind="$attrs"></div>',
+        props: ["column"],
+      },
+      NoData: { template: '<div data-test-stub="no-data" />' },
+    });
+
+    // Remounts AppSessions with the platform-aware OTable stub. The default
+    // beforeEach's OTable stub only exposes the "health"/"location" scoped
+    // slots, so these tests need their own mount to render "cell-platform".
+    beforeEach(async () => {
+      wrapper.unmount();
+
+      wrapper = mount(AppSessions, {
+        props: { isSessionReplayEnabled: true },
+        global: {
+          plugins: [store, router, i18n],
+          stubs: buildPlatformStubs(),
+        },
+      });
+
+      await flushPromises();
+      await nextTick();
+    });
+
+    // Directly drives the rendered platform cell from a single session row —
+    // sidesteps the multi-call async search-service chain (window aggregate +
+    // main _rumdata query + _sessionreplay query) that populates `rows` in
+    // production, matching the existing spec's established pattern of setting
+    // `wrapper.vm.rows` directly (see "Error Handling" -> "should handle search
+    // service errors gracefully").
+    const setSessionRow = async (source: string | undefined) => {
+      wrapper.vm.rows = [
+        {
+          session_id: "session-1",
+          source,
+          error_count: 0,
+          frustration_count: 0,
+          events: 2,
+          time_spent: 5000,
+        },
+      ];
+
+      await nextTick();
+    };
+
+    it("renders React Native as the platform label when source is react-native", async () => {
+      // Act
+      await setSessionRow("react-native");
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("React Native");
+    });
+
+    it("renders iOS as the platform label when source is ios", async () => {
+      // Act
+      await setSessionRow("ios");
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("iOS");
+    });
+
+    it("renders Android as the platform label when source is android", async () => {
+      // Act
+      await setSessionRow("android");
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("Android");
+    });
+
+    it("renders Flutter as the platform label when source is flutter", async () => {
+      // Act
+      await setSessionRow("flutter");
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("Flutter");
+    });
+
+    it("renders Browser as the platform label when source is empty", async () => {
+      // Act
+      await setSessionRow("");
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("Browser");
+    });
+
+    it("renders Browser as the platform label when source is undefined", async () => {
+      // Act — browser RUM sessions omit the `source` field entirely.
+      await setSessionRow(undefined);
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("Browser");
+    });
+
+    it("renders the raw source value when source is unrecognized", async () => {
+      // Act
+      await setSessionRow("roku");
+
+      // Assert
+      const platformText = wrapper.find('[data-test="rum-app-sessions-platform-text"]');
+      expect(platformText.exists()).toBe(true);
+      expect(platformText.text()).toBe("roku");
+    });
+
+    it("includes min(source) as source in the main _rumdata search query", async () => {
+      // Arrange — getSessions() builds its 3 chained search requests by
+      // mutating a single shared request object in place (main query, then
+      // reused for the _sessionreplay query), so inspecting mock.calls
+      // afterwards would only ever see the final mutation. Instead, capture
+      // each request's SQL text at call time via a custom implementation.
+      vi.mocked(searchService.search).mockClear();
+      const capturedSqls: string[] = [];
+      vi.mocked(searchService.search).mockImplementation(async (params: any) => {
+        capturedSqls.push(params?.query?.query?.sql ?? "");
+        return { data: { hits: [] } };
+      });
+
+      // Act
+      wrapper.vm.getSessions();
+      await flushPromises();
+      await flushPromises();
+
+      const mainQuerySql = capturedSqls.find(
+        (sql) =>
+          sql.includes("GROUP BY session_id") &&
+          sql.includes('FROM "_rumdata"') &&
+          sql.includes("zo_sql_timestamp"),
+      );
+
+      // Assert
+      expect(mainQuerySql).toBeDefined();
+      expect(mainQuerySql).toContain("min(source) as source");
+
+      // Restore the default fixture response for any tests that run after.
+      vi.mocked(searchService.search).mockResolvedValue({
+        data: {
+          hits: [
+            {
+              session_id: "session1",
+              zo_sql_timestamp: 1672531200000,
+              start_time: 1672531000,
+              end_time: 1672531300,
+              source: "web",
+              user_agent_user_agent_family: "Chrome",
+              user_agent_os_family: "Windows",
+              ip: "192.168.1.1",
+              error_count: 2,
+              user_email: "test@example.com",
+              country: "US",
+              city: "New York",
+              country_iso_code: "us",
+            },
+          ],
+        },
+      });
     });
   });
 });

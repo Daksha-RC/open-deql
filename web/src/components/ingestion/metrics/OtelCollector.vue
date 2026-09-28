@@ -1,25 +1,32 @@
 <template>
-  <div>
-    <div class="q-pa-sm">
-      <div class="text-subtitle1 text-bold q-pl-xs">OTLP HTTP</div>
-      <ContentCopy :content="getOtelHttpConfig" />
+  <IngestionContent>
+    <div class="flex flex-col gap-2">
+      <div class="text-base font-semibold">{{ t("ingestion.hostMetricsReceiver") }}</div>
+      <ContentCopy :content="raw(getHostMetricsConfig)" />
+      <div class="text-text-secondary text-xs">
+        {{ t("ingestion.hostMetricsReceiverNote", { attr: raw("host.name") }) }}
+      </div>
     </div>
-    <div class="q-pa-sm" v-if="config.isCloud == 'false'">
-      <div class="text-subtitle1 text-bold q-mt-sm q-pl-xs">OTLP gRPC</div>
-      <ContentCopy :content="getOtelGrpcConfig" />
+    <div class="flex flex-col gap-2">
+      <div class="text-base font-semibold">{{ t("ingestion.otlpHttp") }}</div>
+      <ContentCopy :content="raw(getOtelHttpConfig)" />
     </div>
-  </div>
+    <div class="flex flex-col gap-2" v-if="config.isCloud == 'false'">
+      <div class="text-base font-semibold">{{ t("ingestion.otlpGrpc") }}</div>
+      <ContentCopy :content="raw(getOtelGrpcConfig)" />
+    </div>
+  </IngestionContent>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, type Ref } from "vue";
-import type { Endpoint } from "@/ts/interfaces";
+import { computed, ref } from "vue";
 import ContentCopy from "@/components/CopyContent.vue";
-import { useStore } from "vuex";
-import { b64EncodeStandard, getEndPoint, getIngestionURL } from "../../../utils/zincutils";
+import IngestionContent from "@/components/ingestion/IngestionContent.vue";
+import { getEndPoint, getIngestionURL } from "../../../utils/zincutils";
 import config from "@/aws-exports";
+import { raw, useI18nTyped } from "@/types/i18n";
 
-const store = useStore();
+const { t } = useI18nTyped();
 
 const props = defineProps({
   currOrgIdentifier: {
@@ -41,10 +48,37 @@ const endpoint: any = ref({
 const ingestionURL = getIngestionURL();
 endpoint.value = getEndPoint(ingestionURL);
 
-const accessKey = computed(() => {
-  return b64EncodeStandard(
-    `${props.currUserEmail}:${store.state.organizationData.organizationPasscode}`
-  );
+// Scrapers stay in lockstep with what the bundled Host Metrics dashboard queries.
+const getHostMetricsConfig = computed(() => {
+  return `receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+      memory:
+      disk:
+      filesystem:
+      load:
+      network:
+
+processors:
+  resourcedetection/system:
+    detectors: [system]
+    system:
+      hostname_sources: [os]
+
+exporters:
+  otlphttp/openobserve:
+    endpoint: ${endpoint.value.url}/api/${props.currOrgIdentifier}
+    headers:
+      Authorization: Basic [BASIC_PASSCODE]
+
+service:
+  pipelines:
+    metrics/hostmetrics:
+      receivers: [hostmetrics]
+      processors: [resourcedetection/system]
+      exporters: [otlphttp/openobserve]`;
 });
 
 const getOtelGrpcConfig = computed(() => {
@@ -78,5 +112,3 @@ service:
       level: warn`;
 });
 </script>
-
-<style scoped></style>

@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-export type ReportMediaType = "pdf" | "png";
+export type ReportMediaType = "pdf" | "png" | "csv";
 export type ReportEmailAttachmentType = "standard" | "inline";
 
 export interface ReportAttachmentDimensions {
@@ -31,6 +31,7 @@ export interface ScheduledDashboardReport {
   created_at: string;
   orgId: string | number;
   isCached: boolean;
-  /** When true and report_type is PDF, a PNG screenshot is embedded inline in the email. */
-  imagePreview: boolean;
+  /** When true and report_type is PDF, a PNG screenshot is embedded inline in the email.
+   * Optional: list rows built in ScheduledDashboards.vue omit it. */
+  imagePreview?: boolean;
 }

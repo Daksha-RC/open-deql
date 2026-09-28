@@ -15,9 +15,6 @@
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
-
 // ── TenstackTable mocks (required because PromQLTableChart → TableRenderer → TenstackTable) ──
 vi.mock("@tanstack/vue-virtual", () => ({
   useVirtualizer: (optsRef: any) => ({
@@ -88,10 +85,6 @@ vi.mock("@/utils/dashboard/panelValidation", () => ({
 import PromQLTableChart from "@/components/dashboards/panels/PromQLTableChart.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
-
-installQuasar({
-  plugins: [Dialog, Notify],
-});
 
 const mockTableData = {
   columns: [
@@ -174,7 +167,7 @@ describe("PromQLTableChart", () => {
     it("should render the component", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.find(".promql-table-chart").exists()).toBe(true);
+      expect(wrapper.find('[data-test="promql-table-chart"]').exists()).toBe(true);
     });
 
     it("should render TableRenderer component", () => {
@@ -526,6 +519,22 @@ describe("PromQLTableChart", () => {
       consoleSpy.mockRestore();
     });
 
+    // The tall triage tables were the worst offenders — bg-success-50 has no dark-mode variant.
+    it("the healthy-empty all-clear carries NO background fill", async () => {
+      wrapper = createWrapper({
+        data: { columns: mockTableData.columns, rows: [] },
+        config: { ...mockConfig, curated_empty_means_healthy: true },
+      });
+      await flushPromises();
+      const allClear = wrapper.find('[data-test="no-data-all-clear"]');
+      expect(allClear.exists()).toBe(true);
+      const fill = allClear.element.closest('[class*="bg-success"]');
+      expect(fill).toBe(null);
+      // Same token and glyph as PanelContainer's tile, so one section cannot look half-fixed.
+      expect(allClear.classes()).toContain("text-status-success-text");
+      expect(allClear.findComponent({ name: "OIcon" }).props("name")).toBe("check");
+    });
+
     it("should handle completely empty data", () => {
       const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
       wrapper = createWrapper({
@@ -566,7 +575,10 @@ describe("PromQLTableChart", () => {
       wrapper = createWrapper();
 
       const mockCSVFn = vi.fn();
-      (wrapper.vm as any).innerTableRef = { downloadTableAsCSV: mockCSVFn, downloadTableAsJSON: vi.fn() };
+      (wrapper.vm as any).innerTableRef = {
+        downloadTableAsCSV: mockCSVFn,
+        downloadTableAsJSON: vi.fn(),
+      };
 
       wrapper.vm.downloadTableAsCSV("test-title");
 
@@ -578,7 +590,10 @@ describe("PromQLTableChart", () => {
       wrapper = createWrapper();
 
       const mockJSONFn = vi.fn();
-      (wrapper.vm as any).innerTableRef = { downloadTableAsCSV: vi.fn(), downloadTableAsJSON: mockJSONFn };
+      (wrapper.vm as any).innerTableRef = {
+        downloadTableAsCSV: vi.fn(),
+        downloadTableAsJSON: mockJSONFn,
+      };
 
       wrapper.vm.downloadTableAsJSON("test-title");
 
@@ -600,7 +615,10 @@ describe("PromQLTableChart", () => {
       wrapper = createWrapper();
 
       const mockCSVFn = vi.fn();
-      (wrapper.vm as any).innerTableRef = { downloadTableAsCSV: mockCSVFn, downloadTableAsJSON: vi.fn() };
+      (wrapper.vm as any).innerTableRef = {
+        downloadTableAsCSV: mockCSVFn,
+        downloadTableAsJSON: vi.fn(),
+      };
 
       wrapper.vm.downloadTableAsCSV();
 
@@ -609,10 +627,10 @@ describe("PromQLTableChart", () => {
   });
 
   describe("Performance", () => {
-    it.skip("should handle large datasets", () => {
+    it("should handle large datasets", () => {
       const largeData = {
         columns: mockTableData.columns,
-        rows: Array.from({ length: 10000 }, (_, i) => ({
+        rows: Array.from({ length: 1000 }, (_, i) => ({
           __legend__: `series${i % 10}`,
           timestamp: `2023-01-01T00:${String(i % 60).padStart(2, "0")}:00Z`,
           value: i * 10,
@@ -623,14 +641,14 @@ describe("PromQLTableChart", () => {
       wrapper = createWrapper({ data: largeData });
       const endTime = performance.now();
 
-      expect(endTime - startTime).toBeLessThan(10000);
-      expect(wrapper.vm.tableRows.length).toBe(10000);
+      expect(endTime - startTime).toBeLessThan(5000);
+      expect(wrapper.vm.tableRows.length).toBe(1000);
     });
 
-    it.skip("should efficiently filter large datasets", async () => {
+    it("should efficiently filter large datasets", async () => {
       const largeData = {
         columns: mockTableData.columns,
-        rows: Array.from({ length: 5000 }, (_, i) => ({
+        rows: Array.from({ length: 1000 }, (_, i) => ({
           __legend__: `series${i % 5}`,
           timestamp: `2023-01-01T00:${String(i % 60).padStart(2, "0")}:00Z`,
           value: i * 10,
@@ -648,7 +666,7 @@ describe("PromQLTableChart", () => {
       const endTime = performance.now();
 
       expect(endTime - startTime).toBeLessThan(100);
-      expect(filtered.length).toBe(1000); // 5000 / 5 series
+      expect(filtered.length).toBe(200); // 1000 / 5 series
     });
   });
 });

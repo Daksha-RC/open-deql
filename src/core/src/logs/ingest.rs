@@ -1,0 +1,1807 @@
+// Copyright 2026 OpenObserve Inc.
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use std::{
+    collections::{HashMap, HashSet},
+    io::{BufRead, Cursor, Read},
+    sync::{LazyLock, Mutex},
+    time::{Duration, Instant},
+};
+
+use axum::http;
+use chrono::Utc;
+use config::{
+    ALL_VALUES_COL_NAME, ID_COL_NAME, ORIGINAL_DATA_COL_NAME, TIMESTAMP_COL_NAME,
+    meta::{
+        db_monitoring::is_dbm_server_stream,
+        self_reporting::usage::{UsageType, is_internal_rollup_stream},
+        stream::{StreamParams, StreamType},
+    },
+    metrics,
+    utils::{
+        flatten,
+        json::{self, estimate_json_bytes},
+        schema::format_stream_name,
+        time::now_micros,
+    },
+};
+use flate2::read::GzDecoder;
+use infra::{
+    errors::{Error, Result},
+    schema::get_flatten_level,
+};
+use ingestion_common::{
+    AWSRecordType, BulkResponse, GCPIngestionResponse, IngestUser, IngestionData,
+    IngestionDataIter, IngestionError, IngestionRequest, IngestionResponse, IngestionStatus,
+    IngestionValueType, KinesisFHIngestionResponse, RecordStatus, StreamStatus,
+};
+#[cfg(feature = "vectorscan")]
+use o2_enterprise::enterprise::re_patterns::get_pattern_manager;
+use opentelemetry_proto::tonic::{
+    collector::metrics::v1::ExportMetricsServiceRequest,
+    common::v1::{AnyValue, KeyValue, any_value::Value},
+    metrics::v1::metric::Data,
+};
+use prost::Message;
+use transform::TRANSFORM_FAILED;
+
+use super::{
+    IngestJsonData, bulk::TS_PARSE_FAILED, columnar::JsonColumnar, ingestion_log_enabled,
+    log_failed_record,
+};
+use crate::{
+    ingestion::check_ingestion_allowed, logs::handle_timestamp_for_value,
+    service::get_formatted_stream_name,
+};
+
+/// A misbehaving client can wholly fail thousands of batches a second per stream.
+const DISCARD_WARN_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Last wholly-discarded warn per `org/stream`, so the log stays one line a minute each.
+static DISCARD_WARN_AT: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+type LogDataByStream = HashMap<String, IngestJsonData>;
+
+struct FinalizeRecordContext<'a> {
+    stream_name: &'a str,
+    org_id: &'a str,
+    flatten_level: u32,
+    min_ts: i64,
+    max_ts: i64,
+    index_all_max_value_length: usize,
+    user_defined_schema_map: &'a HashMap<String, Option<HashSet<String>>>,
+    streams_need_original_map: &'a HashMap<String, bool>,
+    streams_need_all_values_map: &'a HashMap<String, bool>,
+    need_usage_report: bool,
+    log_ingestion_errors: bool,
+    dbm_enabled: bool,
+    stream_status: &'a mut StreamStatus,
+    json_data_by_stream: &'a mut LogDataByStream,
+}
+
+/// Why a record could not be prepared for writing.
+pub enum PrepareRecordError {
+    /// Flattening failed; the record is unusable.
+    Flatten(anyhow::Error),
+    /// Timestamp unresolvable or window-rejected; carries the flattened record.
+    Timestamp(json::Value, anyhow::Error),
+}
+
+/// The `_o2_` write-guard predicate (design §5.3): true when a logs ingest
+/// request targeting `stream_name` must be rejected because the stream is an
+/// internal rollup stream and the request is user-initiated. Internal writers
+/// pass on either flag the gRPC ServiceGraph arm already carries into this
+/// module: a `SystemJob` ingest user, or `is_derived`.
+fn is_blocked_internal_rollup_write(
+    stream_name: &str,
+    user: &IngestUser,
+    is_derived: bool,
+) -> bool {
+    is_internal_rollup_stream(stream_name) && !is_derived && matches!(user, IngestUser::User(_))
+}
+
+/// Keyed on the destination: gRPC relabels forwarded customer writes as `InternalGrpc`.
+#[cfg(any(feature = "vectorscan", test))]
+fn should_apply_sdr(org_id: &str, stream_name: &str) -> bool {
+    !config::meta::self_reporting::redaction::is_self_reporting_stream(
+        org_id,
+        stream_name,
+        StreamType::Logs,
+    )
+}
+
+pub async fn ingest(
+    thread_id: usize,
+    org_id: &str,
+    in_stream_name: &str,
+    in_req: IngestionRequest,
+    user: IngestUser,
+    extend_json: Option<&HashMap<String, serde_json::Value>>,
+    is_derived: bool,
+) -> Result<IngestionResponse> {
+    let start = std::time::Instant::now();
+    let started_at: i64 = Utc::now().timestamp_micros();
+    let cfg = config::get_config();
+    let need_usage_report = in_req.should_report_usage();
+    let log_ingestion_errors = ingestion_log_enabled().await;
+    // A scanner outage must never fail ingestion; the evidence row says it failed open.
+    #[cfg(feature = "vectorscan")]
+    let pattern_manager = match get_pattern_manager().await {
+        Ok(manager) => Some(manager),
+        Err(_) if !should_apply_sdr(org_id, in_stream_name) => None,
+        Err(e) => {
+            // Reported once the destination streams and their records are known, below.
+            log::error!("[LOGS:JSON] failed to get pattern manager for SDR redaction: {e}");
+            None
+        }
+    };
+    let stream_type = StreamType::Logs;
+
+    // check stream
+    let stream_name = if cfg.common.skip_formatting_stream_name {
+        get_formatted_stream_name(StreamParams::new(org_id, in_stream_name, stream_type)).await?
+    } else {
+        format_stream_name(in_stream_name.to_string())
+    };
+    if stream_name.is_empty() {
+        return Err(Error::IngestionError("Stream name is empty".to_string()));
+    }
+    let dbm_gate = cfg.db_monitoring.enabled && is_dbm_server_stream(&stream_name);
+
+    // Block user ingestion into internal rollup streams (_o2_*,
+    // _agent_signals) in ALL editions — they are written only by internal
+    // aggregation jobs (service graph, agent signals, database monitoring); a
+    // user write here would poison what the topology and DBM APIs serve. The
+    // platform's own writers pass: the gRPC ServiceGraph arm ingests as a
+    // `SystemJob` user with `is_derived` set (see
+    // `src/api/grpc/.../request/ingest.rs`), and pipeline-derived routing
+    // carries `is_derived` as well.
+    if is_blocked_internal_rollup_write(&stream_name, &user, is_derived) {
+        return Err(Error::IngestionError(format!(
+            "stream '{stream_name}' is an internal rollup stream and cannot be ingested into"
+        )));
+    }
+
+    // check system resource
+    check_ingestion_allowed(org_id, stream_type, Some(&stream_name)).await?;
+
+    let now = now_micros();
+    let min_ts = now - cfg.limit.ingest_allowed_upto_micro;
+    let max_ts = now + cfg.limit.ingest_allowed_in_future_micro;
+
+    let index_all_max_value_length = cfg.limit.index_all_max_value_length;
+
+    let mut derived_streams = HashSet::new();
+    if is_derived {
+        derived_streams.insert(stream_name.to_string());
+    }
+
+    // Start retrieve associated pipeline and construct pipeline components
+    let stream_param = StreamParams::new(org_id, &stream_name, stream_type);
+    let executable_pipelines =
+        crate::ingestion::get_stream_executable_pipelines(&stream_param).await;
+    let mut stream_params = vec![stream_param];
+    let mut pipeline_inputs = Vec::with_capacity(stream_params.len());
+    let mut original_options = Vec::with_capacity(stream_params.len());
+    // End pipeline params construction
+
+    if !executable_pipelines.is_empty() {
+        for exec_pl in &executable_pipelines {
+            let pl_destinations = exec_pl.get_all_destination_streams();
+            stream_params.extend(pl_destinations);
+        }
+    }
+
+    // Start get user defined schema
+    let mut user_defined_schema_map: HashMap<String, Option<HashSet<String>>> = HashMap::new();
+    let mut streams_need_original_map: HashMap<String, bool> = HashMap::new();
+    let mut streams_need_all_values_map: HashMap<String, bool> = HashMap::new();
+    crate::ingestion::get_uds_and_original_data_streams(
+        &stream_params,
+        &mut user_defined_schema_map,
+        &mut streams_need_original_map,
+        &mut streams_need_all_values_map,
+    )
+    .await;
+    // with pipeline, we need to store original if any of the destinations requires original
+    let store_original_when_pipeline_exists =
+        !executable_pipelines.is_empty() && streams_need_original_map.values().any(|val| *val);
+    // End get user defined schema
+
+    let flatten_level = get_flatten_level(org_id, &stream_name, stream_type).await;
+
+    // JsonColumnar::plan already refuses the fast path under vectorscan, before this is consulted.
+    let needs_json_records = !executable_pipelines.is_empty()
+        || extend_json.is_some()
+        || matches!(user_defined_schema_map.get(&stream_name), Some(Some(_)))
+        || streams_need_original_map
+            .get(&stream_name)
+            .is_some_and(|v| *v)
+        || streams_need_all_values_map
+            .get(&stream_name)
+            .is_some_and(|v| *v);
+    let mut columnar = if matches!(in_req, IngestionRequest::JSON(_)) && !needs_json_records {
+        JsonColumnar::plan(org_id, &stream_name, flatten_level, (min_ts, max_ts)).await
+    } else {
+        None
+    };
+
+    let json_req: Vec<json::Value>; // to hold json request because of borrow checker
+    let (endpoint, usage_type, data) = match in_req {
+        IngestionRequest::JSON(req) => {
+            json_req = match columnar.as_mut().and_then(|c| c.parse(&req)) {
+                Some(unaccepted) => unaccepted,
+                None => {
+                    columnar = None;
+                    parse_json_body(&req)?
+                }
+            };
+            (
+                "/api/org/ingest/logs/_json",
+                UsageType::Json,
+                IngestionData::JSON(json_req),
+            )
+        }
+        IngestionRequest::Multi(req) => (
+            "/api/org/ingest/logs/_multi",
+            UsageType::Multi,
+            IngestionData::Multi(req),
+        ),
+        IngestionRequest::JsonValues(IngestionValueType::Bulk, logs) => (
+            "/api/org/ingest/logs/_bulk",
+            UsageType::Bulk,
+            IngestionData::JSON(logs),
+        ),
+        IngestionRequest::JsonValues(IngestionValueType::Hec, logs) => (
+            "/api/org/ingest/logs/_hec",
+            UsageType::Hec,
+            IngestionData::JSON(logs),
+        ),
+        IngestionRequest::JsonValues(IngestionValueType::Loki, logs) => (
+            "/api/org/ingest/logs/_loki",
+            UsageType::Loki,
+            IngestionData::JSON(logs),
+        ),
+        IngestionRequest::GCP(req) => (
+            "/api/org/ingest/logs/_gcs",
+            UsageType::GCPSubscription,
+            IngestionData::GCP(req),
+        ),
+        IngestionRequest::KinesisFH(req) => (
+            "/api/org/ingest/logs/_kinesis",
+            UsageType::KinesisFirehose,
+            IngestionData::KinesisFH(req),
+        ),
+        IngestionRequest::RUM(req) => (
+            "/api/org/ingest/logs/_rum",
+            UsageType::RUM,
+            IngestionData::Multi(req),
+        ),
+        IngestionRequest::Usage(req) => {
+            json_req = parse_json_body(&req)?;
+            (
+                "/api/org/ingest/logs/_usage",
+                UsageType::Json,
+                IngestionData::JSON(json_req),
+            )
+        }
+    };
+
+    let mut stream_status = StreamStatus::new(&stream_name);
+    let mut json_data_by_stream: LogDataByStream = HashMap::new();
+    let mut size_by_stream = HashMap::new();
+    for ret in data.iter() {
+        let mut item = match ret {
+            Ok(item) => item,
+            Err(e) => {
+                log::error!("IngestionError: {e:?}");
+                return Err(Error::IngestionError(format!("Failed processing: {e:?}")));
+            }
+        };
+
+        if let Some(extend) = extend_json.as_ref() {
+            for (key, val) in extend.iter() {
+                item[key] = val.clone();
+            }
+        }
+
+        // store a copy of original data before it's being transformed and/or flattened, when
+        // 1. original data is an object
+        let original_data = if item.is_object() {
+            // 2. current stream does not have pipeline
+            if executable_pipelines.is_empty() {
+                // current stream requires original
+                streams_need_original_map
+                    .get(&stream_name)
+                    .is_some_and(|v| *v)
+                    .then(|| item.to_string())
+            } else {
+                // 3. with pipeline, storing original as long as streams_need_original_set is not
+                //    empty
+                // because not sure the pipeline destinations
+                store_original_when_pipeline_exists.then(|| item.to_string())
+            }
+        } else {
+            None // `item` won't be flattened, no need to store original
+        };
+
+        // we report stream size before pushing data to pipeline
+        // this is to capture the actual size of stream at the time of ingestion
+        let size: &mut usize = size_by_stream.entry(stream_name.clone()).or_insert(0);
+        *size += estimate_json_bytes(&item);
+
+        if !executable_pipelines.is_empty() {
+            // buffer the records, timestamp, and originals for pipeline batch processing
+            pipeline_inputs.push(item);
+            original_options.push(original_data);
+        } else if !finalize_and_buffer_record(
+            item,
+            original_data,
+            &mut FinalizeRecordContext {
+                stream_name: &stream_name,
+                org_id,
+                flatten_level,
+                min_ts,
+                max_ts,
+                index_all_max_value_length,
+                user_defined_schema_map: &user_defined_schema_map,
+                streams_need_original_map: &streams_need_original_map,
+                streams_need_all_values_map: &streams_need_all_values_map,
+                need_usage_report,
+                log_ingestion_errors,
+                dbm_enabled: dbm_gate,
+                stream_status: &mut stream_status,
+                json_data_by_stream: &mut json_data_by_stream,
+            },
+        ) {
+            continue;
+        }
+        tokio::task::coop::consume_budget().await;
+    }
+
+    if let Some(columnar) = columnar.as_ref().filter(|c| c.rows() > 0) {
+        *size_by_stream.entry(stream_name.clone()).or_insert(0) += columnar.input_bytes();
+        json_data_by_stream
+            .entry(stream_name.clone())
+            .or_insert_with(|| (Vec::new(), need_usage_report.then_some(0)));
+    }
+
+    // batch process records through pipeline
+    if !executable_pipelines.is_empty() {
+        let records_count = pipeline_inputs.len();
+        let mut evaluation_tasks = tokio::task::JoinSet::new();
+        for exec_pl in &executable_pipelines {
+            if exec_pl.kind == config::meta::pipeline::PipelineKind::Evaluation
+                && exec_pl.contains_llm_evaluation_node()
+            {
+                let exec_pl = exec_pl.clone();
+                let org_id = org_id.to_string();
+                let stream_name = stream_name.clone();
+                let records = pipeline_inputs.clone();
+                evaluation_tasks.spawn(async move {
+                    if let Err(e) = exec_pl
+                        .process_batch(&org_id, records, Some(stream_name.clone()))
+                        .await
+                    {
+                        log::error!(
+                            "[Pipeline] evaluation pipeline for stream {org_id}/{stream_name}: Batch execution error: {e}.",
+                        );
+                    }
+                });
+                continue;
+            }
+
+            let pipeline_start = std::time::Instant::now();
+            let pl_result = exec_pl
+                .process_batch(org_id, pipeline_inputs.clone(), Some(stream_name.clone()))
+                .await;
+            if cfg.common.print_key_event {
+                // Pipeline wall-time vs total ingest elapsed so far, to see the realtime
+                // pipeline's share of ingestion latency at the ingest layer.
+                log::info!(
+                    "[Pipeline:Timing] ingest org={org_id} stream={stream_name} pipeline={} records={records_count} pipeline_ms={} ingest_elapsed_ms={}",
+                    exec_pl.get_pipeline_name(),
+                    pipeline_start.elapsed().as_millis(),
+                    start.elapsed().as_millis(),
+                );
+            }
+            match pl_result {
+                Err(e) => {
+                    log::error!(
+                        "[Pipeline] for stream {org_id}/{stream_name}: Batch execution error: {e}.",
+                    );
+                    stream_status.status.failed += records_count as u32;
+                    stream_status.status.error = format!("Pipeline batch execution error: {e}");
+                    metrics::INGEST_ERRORS
+                        .with_label_values(&[
+                            org_id,
+                            StreamType::Logs.as_str(),
+                            &stream_name,
+                            TRANSFORM_FAILED,
+                        ])
+                        .inc();
+                }
+                Ok(pl_results) => {
+                    let function_no = exec_pl.num_of_func();
+                    for (stream_params, stream_pl_results) in pl_results {
+                        if stream_params.stream_type != StreamType::Logs {
+                            continue;
+                        }
+
+                        let destination_stream = stream_params.stream_name.to_string();
+                        let dest_dbm_gate =
+                            cfg.db_monitoring.enabled && is_dbm_server_stream(&destination_stream);
+                        if !derived_streams.contains(&destination_stream) {
+                            derived_streams.insert(destination_stream.clone());
+                        }
+
+                        if !user_defined_schema_map.contains_key(&destination_stream) {
+                            // a new dynamically created stream. need to check the two maps
+                            // again
+                            crate::ingestion::get_uds_and_original_data_streams(
+                                &[stream_params],
+                                &mut user_defined_schema_map,
+                                &mut streams_need_original_map,
+                                &mut streams_need_all_values_map,
+                            )
+                            .await;
+                        }
+
+                        for (idx, mut res) in stream_pl_results {
+                            // handle timestamp
+                            let timestamp =
+                                match handle_timestamp_for_value(&mut res, min_ts, max_ts) {
+                                    Ok(ts) => ts,
+                                    Err(e) => {
+                                        count_timestamp_rejection(&mut stream_status.status, &e);
+                                        metrics::INGEST_ERRORS
+                                            .with_label_values(&[
+                                                org_id,
+                                                StreamType::Logs.as_str(),
+                                                &stream_name,
+                                                TS_PARSE_FAILED,
+                                            ])
+                                            .inc();
+                                        log_failed_record(
+                                            log_ingestion_errors,
+                                            &res,
+                                            &e.to_string(),
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                            // we calculate the size BEFORE applying uds
+                            let original_size = estimate_json_bytes(&res);
+
+                            // get json object
+                            let mut local_val = match res.take() {
+                                json::Value::Object(val) => val,
+                                _ => unreachable!(),
+                            };
+
+                            // Keyed on the destination: client `o2_dbm_*` keys must not land raw.
+                            if dest_dbm_gate {
+                                crate::db_monitoring::server_vantage::canonicalize_dbm_record(
+                                    &mut local_val,
+                                );
+                            }
+
+                            if let Some(Some(fields)) =
+                                user_defined_schema_map.get(&destination_stream)
+                            {
+                                local_val = crate::ingestion::refactor_map(local_val, fields);
+                            }
+
+                            // usize::MAX used as a flag when pipeline is applied with
+                            // ResultArray vrl
+                            //  - invalid original_data
+                            // add `_original` and '_record_id` if required by StreamSettings
+                            if idx != usize::MAX
+                                && streams_need_original_map
+                                    .get(&destination_stream)
+                                    .is_some_and(|v| *v)
+                                && original_options[idx].is_some()
+                            {
+                                local_val.insert(
+                                    ORIGINAL_DATA_COL_NAME.to_string(),
+                                    original_options[idx].clone().unwrap().into(),
+                                );
+                                let record_id = crate::ingestion::generate_record_id(
+                                    org_id,
+                                    &destination_stream,
+                                    &StreamType::Logs,
+                                );
+                                local_val.insert(
+                                    ID_COL_NAME.to_string(),
+                                    json::Value::String(record_id.to_string()),
+                                );
+                            }
+
+                            // add `_all_values` if required by StreamSettings
+                            if streams_need_all_values_map
+                                .get(&destination_stream)
+                                .is_some_and(|v| *v)
+                            {
+                                let mut values = Vec::with_capacity(local_val.len());
+                                for (k, value) in local_val.iter() {
+                                    if ![
+                                        TIMESTAMP_COL_NAME,
+                                        ID_COL_NAME,
+                                        ORIGINAL_DATA_COL_NAME,
+                                        ALL_VALUES_COL_NAME,
+                                    ]
+                                    .contains(&k.as_str())
+                                        && (index_all_max_value_length == 0
+                                            || value.as_str().is_none_or(|s| {
+                                                s.len() <= index_all_max_value_length
+                                            }))
+                                    {
+                                        values.push(value.to_string());
+                                    }
+                                }
+                                local_val.insert(
+                                    ALL_VALUES_COL_NAME.to_string(),
+                                    json::Value::String(values.join(" ")),
+                                );
+                            }
+
+                            let (ts_data, fn_num) = json_data_by_stream
+                                .entry(destination_stream.clone())
+                                .or_insert_with(|| (Vec::new(), None));
+                            ts_data.push((timestamp, local_val));
+                            *fn_num = need_usage_report.then_some(function_no);
+
+                            // Since we report the size for the original stream before the
+                            // pipeline execution we need to
+                            // skip reporting the actual size on disk.
+                            if destination_stream.ne(&stream_name) {
+                                let size = size_by_stream
+                                    .entry(destination_stream.clone())
+                                    .or_insert(0);
+                                *size += original_size;
+                            }
+
+                            tokio::task::coop::consume_budget().await;
+                        }
+                    }
+                }
+            }
+        } // for each pipeline
+
+        while let Some(result) = evaluation_tasks.join_next().await {
+            if let Err(e) = result {
+                log::error!(
+                    "[Pipeline] evaluation pipeline task for stream {org_id}/{stream_name} failed: {e}.",
+                );
+            }
+        }
+
+        // When only evaluation pipelines exist for this stream (no user pipeline
+        // is responsible for writing to the source stream), preserve original
+        // records by writing them back to the source stream.
+        let has_user_pipeline = executable_pipelines
+            .iter()
+            .any(|p| p.kind == config::meta::pipeline::PipelineKind::User);
+        let has_evaluation_pipeline = executable_pipelines
+            .iter()
+            .any(|p| p.kind == config::meta::pipeline::PipelineKind::Evaluation);
+        log::debug!(
+            "[LOGS] source preservation check stream={stream_name}, pipelines={}, has_user_pipeline={has_user_pipeline}, has_evaluation_pipeline={has_evaluation_pipeline}, source_buffered={}",
+            executable_pipelines.len(),
+            json_data_by_stream.contains_key(&stream_name)
+        );
+        if !has_user_pipeline && !json_data_by_stream.contains_key(&stream_name) {
+            for (idx, item) in pipeline_inputs.iter().enumerate() {
+                let _ = finalize_and_buffer_record(
+                    item.clone(),
+                    original_options[idx].clone(),
+                    &mut FinalizeRecordContext {
+                        stream_name: &stream_name,
+                        org_id,
+                        flatten_level,
+                        min_ts,
+                        max_ts,
+                        index_all_max_value_length,
+                        user_defined_schema_map: &user_defined_schema_map,
+                        streams_need_original_map: &streams_need_original_map,
+                        streams_need_all_values_map: &streams_need_all_values_map,
+                        need_usage_report,
+                        log_ingestion_errors,
+                        dbm_enabled: dbm_gate,
+                        stream_status: &mut stream_status,
+                        json_data_by_stream: &mut json_data_by_stream,
+                    },
+                );
+            }
+        }
+    }
+
+    // if no data, fast return
+    if json_data_by_stream.is_empty() {
+        // Wholly-discarded batch skips the write path below, so count/warn its drops here.
+        warn_and_count_discards(org_id, endpoint, &stream_status);
+        return Ok(IngestionResponse::new(
+            http::StatusCode::OK.into(),
+            vec![stream_status],
+        ));
+    }
+
+    // drop memory-intensive variables
+    drop(streams_need_original_map);
+    drop(streams_need_all_values_map);
+    drop(executable_pipelines);
+    drop(original_options);
+    drop(user_defined_schema_map);
+
+    #[cfg(feature = "vectorscan")]
+    if pattern_manager.is_none() {
+        // One row per destination stream: a pipeline fans a request out to several.
+        for (stream, data) in json_data_by_stream.iter() {
+            if !should_apply_sdr(org_id, stream) {
+                continue;
+            }
+            let records = &data.0;
+            crate::self_reporting::redaction_evidence::publish_scan_unavailable(
+                &config::meta::self_reporting::redaction::EvidenceScope::new(
+                    org_id,
+                    stream,
+                    StreamType::Logs,
+                ),
+                config::meta::self_reporting::redaction::FailPosture::Open,
+                records.len() as u64,
+                config::meta::self_reporting::redaction::DataWindow::from_timestamps(
+                    records.iter().map(|(ts, _)| *ts),
+                ),
+            )
+            .await;
+        }
+    }
+
+    #[cfg(feature = "vectorscan")]
+    if let Some(pattern_manager) = pattern_manager.as_ref() {
+        for (stream, data) in json_data_by_stream.iter_mut() {
+            if !should_apply_sdr(org_id, stream) {
+                continue;
+            }
+            let before = super::snapshot_derived_sources(&data.0);
+            if let Err(e) =
+                pattern_manager.process_at_ingestion(org_id, StreamType::Logs, stream, &mut data.0)
+            {
+                log::error!("error in processing records for patterns for stream {stream} : {e}");
+            }
+            super::refresh_derived_columns(&before, &mut data.0);
+        }
+    }
+
+    let (metric_rpt_status_code, response_body, stream_skipped) = {
+        let mut status = if usage_type == UsageType::Bulk {
+            IngestionStatus::Bulk(BulkResponse {
+                took: 0,
+                errors: false,
+                items: vec![],
+            })
+        } else {
+            IngestionStatus::Record(stream_status.status.clone())
+        };
+        let write_result = super::write_logs_by_stream(
+            thread_id,
+            org_id,
+            &user.to_email(),
+            (started_at, &start),
+            usage_type,
+            &mut status,
+            json_data_by_stream,
+            size_by_stream,
+            derived_streams,
+            columnar,
+        )
+        .await;
+        match status {
+            IngestionStatus::Record(status) => {
+                stream_status.status = status;
+            }
+            IngestionStatus::Bulk(items) => {
+                stream_status.items = items.items;
+            }
+        };
+        match write_result {
+            Ok(skipped) => ("200", stream_status, skipped),
+            Err(e) => {
+                log::error!("Error while writing logs: {e}");
+                ("500", stream_status, false)
+            }
+        }
+    };
+
+    // update ingestion metrics
+    let took_time = start.elapsed().as_secs_f64();
+    // Bulk requests are counted by the bulk handler (bulk.rs) once per HTTP request.
+    // Counting here would result in N increments (one per stream) plus 1 from bulk.rs.
+    if !matches!(usage_type, UsageType::Bulk) {
+        metrics::HTTP_RESPONSE_TIME
+            .with_label_values(&[
+                endpoint,
+                metric_rpt_status_code,
+                org_id,
+                StreamType::Logs.as_str(),
+                "",
+                "",
+            ])
+            .observe(took_time);
+        metrics::HTTP_INCOMING_REQUESTS
+            .with_label_values(&[
+                endpoint,
+                metric_rpt_status_code,
+                org_id,
+                StreamType::Logs.as_str(),
+                "",
+                "",
+            ])
+            .inc();
+    }
+
+    warn_and_count_discards(org_id, endpoint, &response_body);
+
+    // A write failure used to be visible only in the metric label while the
+    // caller still saw 200. Signalled on `write_failed` and NOT on `code`, which
+    // is a serialized body field on every legacy route sharing this function.
+    Ok(
+        IngestionResponse::new(http::StatusCode::OK.into(), vec![response_body])
+            .with_write_failed(metric_rpt_status_code == "500")
+            .with_stream_skipped(stream_skipped),
+    )
+}
+
+/// Flatten a record and resolve its timestamp — the only two steps of record
+/// preparation that can reject an event.
+///
+/// Shared with the HEC collector's pre-write validation pass, which must reach
+/// the same verdict as the write does; a second implementation would drift.
+pub fn prepare_record(
+    item: json::Value,
+    flatten_level: u32,
+    min_ts: i64,
+    max_ts: i64,
+) -> std::result::Result<(json::Value, i64), PrepareRecordError> {
+    let mut res =
+        flatten::flatten_with_level(item, flatten_level).map_err(PrepareRecordError::Flatten)?;
+    match handle_timestamp_for_value(&mut res, min_ts, max_ts) {
+        Ok(ts) => Ok((res, ts)),
+        Err(e) => Err(PrepareRecordError::Timestamp(res, e)),
+    }
+}
+
+/// A body is an array of records or a single record.
+fn parse_json_body(body: &[u8]) -> Result<Vec<json::Value>> {
+    match json::from_slice(body) {
+        Ok(records) => Ok(records),
+        Err(_) => Ok(vec![json::from_slice(body)?]),
+    }
+}
+
+/// Count one rejected record on a stream's status, separating an ingestion-window
+/// POLICY drop from a record that genuinely could not be prepared.
+///
+/// Both the pipeline and non-pipeline timestamp paths must agree here: the HEC
+/// collector reads `failed > policy_dropped` to decide code 6 vs code 0, so a
+/// window drop counted only as `failed` returns a 400 the client never retries
+/// and makes it discard its in-window events too.
+fn count_timestamp_rejection(status: &mut ingestion_common::RecordStatus, e: &anyhow::Error) {
+    status.failed += 1;
+    if schema::is_window_discard_error(e) {
+        status.policy_dropped += 1;
+    }
+    status.error = e.to_string();
+}
+
+/// True when a batch stored nothing at all, the case a 200 hides most completely.
+fn is_wholly_discarded(status: &RecordStatus) -> bool {
+    status.failed > 0 && status.successful == 0
+}
+
+/// True when a discarded batch is worth a warn at all.
+///
+/// A partial drop qualifies: a mixed batch keeps `successful > 0` forever, so a source with
+/// skewed timestamps loses records indefinitely with nothing said.
+fn warrants_discard_warn(status: &RecordStatus) -> bool {
+    status.failed > 0
+}
+
+/// Warn and count the records a success status hides.
+fn warn_and_count_discards(org_id: &str, endpoint: &str, status: &StreamStatus) {
+    if status.status.policy_dropped > 0 {
+        metrics::INGEST_RECORDS_DROPPED
+            .with_label_values(&[org_id, StreamType::Logs.as_str(), "ingestion_window"])
+            .inc_by(status.status.policy_dropped as u64);
+    }
+    if !warrants_discard_warn(&status.status) {
+        return;
+    }
+    if !discard_warn_permitted(&format!("{org_id}/{}", status.name), Instant::now()) {
+        return;
+    }
+    if is_wholly_discarded(&status.status) {
+        log::warn!(
+            "[INGEST] {endpoint} {org_id}/{}: discarded all {} record(s), none stored: {}",
+            status.name,
+            status.status.failed,
+            status.status.error
+        );
+    } else {
+        log::warn!(
+            "[INGEST] {endpoint} {org_id}/{}: discarded {} of {} record(s), {} stored: {}",
+            status.name,
+            status.status.failed,
+            status.status.failed + status.status.successful,
+            status.status.successful,
+            status.status.error
+        );
+    }
+}
+
+/// At most one warn per stream per interval; a poisoned lock silences rather than panics.
+fn discard_warn_permitted(key: &str, now: Instant) -> bool {
+    let Ok(mut warned_at) = DISCARD_WARN_AT.lock() else {
+        return false;
+    };
+    match warned_at.get(key) {
+        Some(last) if now.duration_since(*last) < DISCARD_WARN_INTERVAL => false,
+        _ => {
+            warned_at.insert(key.to_string(), now);
+            true
+        }
+    }
+}
+
+/// Finalize a log record (flatten, resolve timestamp, apply UDS, add
+/// `_original` / `_all_values` if configured) and push it into
+/// `json_data_by_stream`.
+///
+/// Returns `true` on success, `false` when the record should be skipped
+/// (the caller should `continue`).
+fn finalize_and_buffer_record(
+    item: json::Value,
+    original_data: Option<String>,
+    ctx: &mut FinalizeRecordContext<'_>,
+) -> bool {
+    let (mut res, timestamp) = match prepare_record(item, ctx.flatten_level, ctx.min_ts, ctx.max_ts)
+    {
+        Ok(v) => v,
+        Err(PrepareRecordError::Flatten(e)) => {
+            ctx.stream_status.status.failed += 1;
+            ctx.stream_status.status.error = e.to_string();
+            log::error!("Record flattening error: {e}");
+            return false;
+        }
+        Err(PrepareRecordError::Timestamp(res, e)) => {
+            count_timestamp_rejection(&mut ctx.stream_status.status, &e);
+            metrics::INGEST_ERRORS
+                .with_label_values(&[
+                    ctx.org_id,
+                    StreamType::Logs.as_str(),
+                    ctx.stream_name,
+                    crate::logs::bulk::TS_PARSE_FAILED,
+                ])
+                .inc();
+            log_failed_record(ctx.log_ingestion_errors, &res, &e.to_string());
+            return false;
+        }
+    };
+    let mut local_val = match res.take() {
+        json::Value::Object(val) => val,
+        _ => {
+            ctx.stream_status.status.failed += 1;
+            return false;
+        }
+    };
+    // DBM server-vantage canonicalization (design D1, applied to logs): resolve the
+    // receiver-local vendor vocabulary (`dl_*`, `my_*`, `blocked_*`) into stable
+    // `o2_dbm_*` columns ONCE, here, so the read API and UI never touch a raw
+    // receiver field. Runs BEFORE `refactor_map` so a user-defined schema that
+    // lists the canonical columns keeps them (D1 condition 2).
+    //
+    // Client-supplied `o2_dbm_*` keys are dropped first — the logs path flattens
+    // user keys directly, so without this a caller could spoof a deadlock event
+    // (the same exposure D1 condition 1 closes for spans).
+    if ctx.dbm_enabled {
+        crate::db_monitoring::server_vantage::canonicalize_dbm_record(&mut local_val);
+    }
+
+    if let Some(Some(fields)) = ctx.user_defined_schema_map.get(ctx.stream_name) {
+        local_val = crate::ingestion::refactor_map(local_val, fields);
+    }
+    if ctx
+        .streams_need_original_map
+        .get(ctx.stream_name)
+        .is_some_and(|v| *v)
+        && let Some(ref od) = original_data
+    {
+        local_val.insert(ORIGINAL_DATA_COL_NAME.to_string(), od.clone().into());
+        let record_id =
+            crate::ingestion::generate_record_id(ctx.org_id, ctx.stream_name, &StreamType::Logs);
+        local_val.insert(
+            ID_COL_NAME.to_string(),
+            json::Value::String(record_id.to_string()),
+        );
+    }
+    if ctx
+        .streams_need_all_values_map
+        .get(ctx.stream_name)
+        .is_some_and(|v| *v)
+    {
+        let mut values = Vec::with_capacity(local_val.len());
+        for (k, value) in local_val.iter() {
+            if ![
+                TIMESTAMP_COL_NAME,
+                ID_COL_NAME,
+                ORIGINAL_DATA_COL_NAME,
+                ALL_VALUES_COL_NAME,
+            ]
+            .contains(&k.as_str())
+                && (ctx.index_all_max_value_length == 0
+                    || value
+                        .as_str()
+                        .is_none_or(|s| s.len() <= ctx.index_all_max_value_length))
+            {
+                values.push(value.to_string());
+            }
+        }
+        local_val.insert(
+            ALL_VALUES_COL_NAME.to_string(),
+            json::Value::String(values.join(" ")),
+        );
+    }
+    match ctx.json_data_by_stream.get_mut(ctx.stream_name) {
+        Some((ts_data, fn_num)) => {
+            ts_data.push((timestamp, local_val));
+            *fn_num = ctx.need_usage_report.then_some(0);
+        }
+        None => {
+            ctx.json_data_by_stream.insert(
+                ctx.stream_name.to_string(),
+                (
+                    vec![(timestamp, local_val)],
+                    ctx.need_usage_report.then_some(0),
+                ),
+            );
+        }
+    };
+    true
+}
+
+struct IngestionDataIterator(IngestionDataIter);
+
+impl Iterator for IngestionDataIterator {
+    type Item = Result<json::Value, IngestionError>;
+
+    fn next(&mut self) -> Option<Result<json::Value, IngestionError>> {
+        match &mut self.0 {
+            IngestionDataIter::JSONIter(iter) => iter.next().map(Ok),
+            IngestionDataIter::MultiIter(iter) => loop {
+                match iter.next() {
+                    Some(Ok(line)) if line.trim().is_empty() => {
+                        // If the line is empty, just continue to the next iteration.
+                        continue;
+                    }
+                    Some(Ok(line)) => {
+                        // If the line is not empty, attempt to parse it as JSON.
+                        return Some(json::from_str(&line).map_err(IngestionError::from));
+                    }
+                    Some(Err(e)) => {
+                        // If there's an error reading the line, return it.
+                        return Some(Err(IngestionError::from(e)));
+                    }
+                    None => {
+                        // If there are no more lines, return None.
+                        return None;
+                    }
+                }
+            },
+            IngestionDataIter::GCP(iter, err) => match err {
+                Some(e) => Some(Err(IngestionError::GCPError(e.clone()))),
+                None => iter.next().map(Ok),
+            },
+            IngestionDataIter::KinesisFH(iter, err) => match err {
+                Some(e) => Some(Err(IngestionError::AWSError(e.clone()))),
+                None => iter.next().map(Ok),
+            },
+        }
+    }
+}
+
+trait IngestionDataExt {
+    fn iter(self) -> IngestionDataIterator;
+}
+
+impl IngestionDataExt for IngestionData {
+    fn iter(self) -> IngestionDataIterator {
+        let iter = match self {
+            IngestionData::JSON(vec) => IngestionDataIter::JSONIter(vec.into_iter()),
+            IngestionData::Multi(data) => {
+                let cursor = Cursor::new(data);
+                IngestionDataIter::MultiIter(std::io::BufReader::new(cursor).lines())
+            }
+            IngestionData::GCP(request) => {
+                let data = &request.message.data;
+                let request_id = &request.message.message_id;
+                let req_timestamp = &request.message.publish_time;
+                match decode_and_decompress_to_string(data) {
+                    Ok(decompressed_data) => {
+                        let value: json::Value = json::from_str(&decompressed_data).unwrap();
+                        IngestionDataIter::GCP(vec![value].into_iter(), None)
+                    }
+                    Err(e) => IngestionDataIter::GCP(
+                        vec![].into_iter(),
+                        Some(GCPIngestionResponse {
+                            request_id: request_id.to_string(),
+                            error_message: Some(e.to_string()),
+                            timestamp: req_timestamp.to_string(),
+                        }),
+                    ),
+                }
+            }
+            IngestionData::KinesisFH(request) => {
+                let mut events = Vec::with_capacity(request.records.len());
+                let request_id = &request.request_id;
+                let req_timestamp = request.timestamp.unwrap_or(Utc::now().timestamp_micros());
+
+                for record in &request.records {
+                    match decode_and_decompress_to_vec(&record.data) {
+                        Err(err) => {
+                            return IngestionDataIterator(IngestionDataIter::KinesisFH(
+                                events.into_iter(),
+                                Some(KinesisFHIngestionResponse {
+                                    request_id: request_id.to_string(),
+                                    error_message: Some(err.to_string()),
+                                    timestamp: req_timestamp,
+                                }),
+                            ));
+                        }
+                        Ok(decompressed_data) => {
+                            match deserialize_aws_record_from_vec(decompressed_data, request_id) {
+                                Ok(parsed_events) => events.extend(parsed_events),
+                                Err(err) => {
+                                    return IngestionDataIterator(IngestionDataIter::KinesisFH(
+                                        events.into_iter(),
+                                        Some(KinesisFHIngestionResponse {
+                                            request_id: request_id.to_string(),
+                                            error_message: Some(err.to_string()),
+                                            timestamp: req_timestamp,
+                                        }),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
+                IngestionDataIter::KinesisFH(events.into_iter(), None)
+            }
+        };
+        IngestionDataIterator(iter)
+    }
+}
+
+// Protobufs are not valid UTF-8 strings, so we need to maintain them as byte arrays
+pub fn decode_and_decompress_to_vec(
+    encoded_data: &str,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let decoded_data = config::utils::base64::decode_raw(encoded_data)?;
+    let mut gz = GzDecoder::new(decoded_data.as_slice());
+    let mut vec = Vec::new();
+    match gz.read_to_end(&mut vec) {
+        Ok(_) => Ok(vec),
+        Err(_) => Ok(decoded_data),
+    }
+}
+
+// Use this function when we know the data is JSON since it will be valid UTF-8
+pub fn decode_and_decompress_to_string(
+    encoded_data: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let decoded_data = config::utils::base64::decode_raw(encoded_data)?;
+    let mut gz = GzDecoder::new(decoded_data.as_slice());
+    let mut decompressed_data = String::new();
+    match gz.read_to_string(&mut decompressed_data) {
+        Ok(_) => Ok(decompressed_data),
+        Err(_) => Ok(String::from_utf8(decoded_data)?),
+    }
+}
+
+/// Calculate size of VarInt header from byte array
+///
+/// See https://protobuf.dev/programming-guides/encoding/#varints for more info
+pub fn get_size_of_var_int_header(bytes: &[u8]) -> Option<usize> {
+    for (i, &b) in bytes.iter().enumerate() {
+        // if most significant bit is 0
+        if b & 0x80 == 0 {
+            return Some(i + 1);
+        }
+    }
+
+    None
+}
+
+fn deserialize_aws_record_from_vec(data: Vec<u8>, request_id: &str) -> Result<Vec<json::Value>> {
+    // If it's a protobuf, process it as an OpenTelemetry 1.0 metric
+    if let Some(header) = get_size_of_var_int_header(&data)
+        && let Ok(a) = ExportMetricsServiceRequest::decode(&mut Cursor::new(&data[header..]))
+    {
+        return construct_values_from_open_telemetry_v1_metric(a);
+    }
+
+    let mut events = vec![];
+    let mut value;
+    let data = String::from_utf8(data)?;
+
+    // It's likely newline-delimited JSON objects
+    for line in data.lines() {
+        match json::from_str(line) {
+            Ok(AWSRecordType::KinesisFHLogs(kfh_log_data)) => {
+                for event in kfh_log_data.log_events.iter() {
+                    value = json::to_value(event)?;
+                    let local_val = value
+                        .as_object_mut()
+                        .ok_or_else(|| anyhow::anyhow!("Error to convert Value to object"))?;
+
+                    local_val.insert("requestId".to_owned(), request_id.into());
+                    local_val.insert(
+                        "messageType".to_owned(),
+                        kfh_log_data.message_type.clone().into(),
+                    );
+                    local_val.insert("owner".to_owned(), kfh_log_data.owner.clone().into());
+                    local_val.insert("logGroup".to_owned(), kfh_log_data.log_group.clone().into());
+                    local_val.insert(
+                        "logStream".to_owned(),
+                        kfh_log_data.log_stream.clone().into(),
+                    );
+                    local_val.insert(
+                        "subscriptionFilters".to_owned(),
+                        kfh_log_data.subscription_filters.clone().into(),
+                    );
+
+                    let local_msg = event.message.as_str().unwrap();
+
+                    if local_msg.starts_with('{') && local_msg.ends_with('}') {
+                        let result: Result<json::Value, json::Error> = json::from_str(local_msg);
+
+                        match result {
+                            Err(_e) => {
+                                local_val.insert("message".to_owned(), event.message.clone());
+                            }
+                            Ok(message_val) => {
+                                local_val.insert("message".to_owned(), message_val.clone());
+                            }
+                        }
+                    } else {
+                        local_val.insert("message".to_owned(), local_msg.into());
+                    }
+
+                    local_val.insert(TIMESTAMP_COL_NAME.to_string(), event.timestamp.into());
+
+                    value = local_val.clone().into();
+                    events.push(value);
+                }
+            }
+            Ok(AWSRecordType::KinesisFHMetrics(kfh_metric_data)) => {
+                // Parse "dimensions" and "values" fields from KinesisFHMetricData
+                let values = json::to_value(kfh_metric_data.value.clone())?;
+                let dimensions = kfh_metric_data.dimensions.clone();
+                let timestamp = kfh_metric_data.timestamp;
+
+                let mut parsed_metric_value = json::to_value(kfh_metric_data)?;
+                let local_parsed_metric_value =
+                    parsed_metric_value.as_object_mut().ok_or_else(|| {
+                        anyhow::anyhow!("CloudWatch metrics failed to parse Metric Object")
+                    })?;
+
+                for (value_name, value_val) in values.as_object().ok_or_else(|| {
+                    anyhow::anyhow!("CloudWatch metrics failed to Metric Value Object")
+                })? {
+                    local_parsed_metric_value.insert(value_name.to_owned(), value_val.to_owned());
+                }
+                local_parsed_metric_value.remove("value");
+
+                let metric_dimensions = dimensions
+                    .as_object()
+                    .ok_or_else(|| anyhow::anyhow!("CloudWatch metrics dimensions parsing failed"))?
+                    .iter()
+                    .map(|(k, v)| format!("{k}=[{v}]"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                local_parsed_metric_value
+                    .insert("metric_dimensions".to_owned(), metric_dimensions.into());
+                local_parsed_metric_value.remove("dimensions");
+
+                local_parsed_metric_value.insert(TIMESTAMP_COL_NAME.to_string(), timestamp.into());
+                local_parsed_metric_value.remove("timestamp");
+
+                value = local_parsed_metric_value.clone().into();
+                events.push(value);
+            }
+            _ => {
+                value = json::from_str(line)?;
+                events.push(value);
+            }
+        }
+    }
+    Ok(events)
+}
+
+/// Extract a resource ID from an Amazon Resource Number string
+///
+/// See https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html for more information
+/// on ARNs
+fn extract_resource_id_from_amazon_resource_number(arn: &str) -> &str {
+    // skip the "arn" through the "account-id"
+    let mut iter = arn.split(':').skip(5);
+    // store directly into static array to avoid allocating Vec since we know what we want
+    let split = [iter.next(), iter.next()];
+
+    // If ARN looks like "arn:partition:service:region:account-id:resource-type:resource-id"
+    if let Some(resource_id) = split[1] {
+        return resource_id;
+    }
+
+    // If ARN looks like "arn:partition:service:region:account-id:resource-type/resource-id"
+    if let Some((_, resource_id)) = split[0].unwrap().split_once('/') {
+        return resource_id;
+    }
+
+    // ARN looks like "arn:partition:service:region:account-id:resource-id"
+    split[0].unwrap()
+}
+
+/// Get the StringValue pair from the nested open telemetry KeyValue struct, else return None if it
+/// isn't a StringValue
+fn get_tuple_from_open_telemetry_key_value(kv: KeyValue) -> Option<(String, String)> {
+    if let Some(AnyValue {
+        value: Some(Value::StringValue(s)),
+    }) = kv.value
+    {
+        Some((kv.key, s))
+    } else {
+        None
+    }
+}
+
+/// Convert an OpenTelemetry v1.0 formatted request into a vector of json values.
+///
+/// The values are formatted to look the same as the ones extracted from AWS JSON telemetry format
+fn construct_values_from_open_telemetry_v1_metric(
+    data: ExportMetricsServiceRequest,
+) -> Result<Vec<json::Value>> {
+    let mut events = Vec::new();
+
+    for resource_metric in data.resource_metrics {
+        if resource_metric.resource.is_none() {
+            continue;
+        }
+
+        // Collect all resource key value attributes e.g. cloud account ID and region
+        let resource_attributes: HashMap<_, _> = resource_metric
+            .resource
+            .unwrap()
+            .attributes
+            .into_iter()
+            .filter_map(get_tuple_from_open_telemetry_key_value)
+            .collect();
+
+        for sm in resource_metric.scope_metrics {
+            for m in sm.metrics {
+                let summary = match m.data {
+                    Some(Data::Summary(summary)) => summary,
+                    _ => continue, // AWS docs state that type should always be Summary
+                };
+
+                for i_sum in summary.data_points {
+                    let dimensions = i_sum
+                        .attributes
+                        .iter()
+                        .find(|kv| kv.key == "Dimensions")
+                        .cloned();
+
+                    let summary_attributes: HashMap<_, _> = i_sum
+                        .attributes
+                        .into_iter()
+                        .filter_map(get_tuple_from_open_telemetry_key_value)
+                        .collect();
+
+                    let resource_id = extract_resource_id_from_amazon_resource_number(
+                        resource_attributes.get("aws.exporter.arn").unwrap(),
+                    );
+
+                    let mut mv = json::json!({
+                        "metric_stream_name": resource_id,
+                        "account_id": resource_attributes.get("cloud.account.id").unwrap(),
+                        "region": resource_attributes.get("cloud.region").unwrap(),
+                        "namespace": summary_attributes.get("Namespace").unwrap(),
+                        "metric_name": summary_attributes.get("MetricName").unwrap(),
+                        TIMESTAMP_COL_NAME: std::time::Duration::from_nanos(i_sum.time_unix_nano).as_millis(),
+                        "unit": m.unit,
+                        "count": i_sum.count,
+                        "sum": i_sum.sum,
+                    });
+                    let metric_value = mv.as_object_mut().unwrap();
+
+                    if let Some(dimensions) = dimensions {
+                        let string = match dimensions.value {
+                            Some(AnyValue {
+                                value: Some(Value::KvlistValue(kv_list)),
+                            }) => kv_list.values,
+                            _ => Vec::new(),
+                        }
+                        .into_iter()
+                        .filter_map(get_tuple_from_open_telemetry_key_value)
+                        .map(|(k, v)| format!("{k}=[\"{v}\"]"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                        metric_value.insert("metric_dimensions".to_string(), string.into());
+                    }
+
+                    for q in i_sum.quantile_values {
+                        match q.quantile {
+                            // Min and max values are the observed values for 0.0 and 1.0 quantiles
+                            0.0 => metric_value.insert("min".to_string(), q.value.into()),
+                            1.0 => metric_value.insert("max".to_string(), q.value.into()),
+                            // Insert the rest of the quantiles in a format similar to p99.9
+                            _ => metric_value
+                                .insert(format!("p{:.1}", q.quantile * 100.0), q.value.into()),
+                        };
+                    }
+
+                    events.push(mv);
+                }
+            }
+        }
+    }
+
+    Ok(events)
+}
+
+#[cfg(test)]
+mod tests {
+
+    use config::meta::self_reporting::{
+        redaction::REDACTION_EVIDENCE_STREAM,
+        usage::{
+            AUDIT_STREAM, DATA_RETENTION_USAGE_STREAM, ERROR_STREAM, STATS_STREAM, TRIGGERS_STREAM,
+            USAGE_STREAM,
+        },
+    };
+    use ingestion_common::{IngestUser, SystemJobType};
+
+    use super::*;
+
+    /// A bulk ingest returned 200 while dropping every record as "Too old data", and
+    /// nothing server-side said so. The status code has to stay 200 — clients and
+    /// OpenObserve's own self-reporting retry a non-2xx, and "too old" never becomes
+    /// ingestible — so the total loss must be detected here to be logged.
+    #[test]
+    fn a_batch_that_stored_nothing_is_reported_as_wholly_discarded() {
+        let all_dropped = RecordStatus {
+            successful: 0,
+            failed: 1000,
+            policy_dropped: 1000,
+            error: "Too old data, only last 5 hours data can be ingested".to_string(),
+        };
+        assert!(is_wholly_discarded(&all_dropped));
+    }
+
+    /// A partial failure still stored data, and a clean batch failed nothing: neither is the
+    /// silent total loss, and warning on them would train operators to ignore the line.
+    #[test]
+    fn a_partial_or_clean_batch_is_not_wholly_discarded() {
+        let partial = RecordStatus {
+            successful: 57,
+            failed: 6_567,
+            policy_dropped: 6_567,
+            error: "Too old data".to_string(),
+        };
+        assert!(!is_wholly_discarded(&partial));
+        assert!(!is_wholly_discarded(&RecordStatus::default()));
+        assert!(!is_wholly_discarded(&RecordStatus {
+            successful: 10,
+            failed: 0,
+            policy_dropped: 0,
+            error: String::new(),
+        }));
+    }
+
+    #[test]
+    fn a_partial_drop_warrants_a_warn_even_though_the_batch_stored_records() {
+        let partial = RecordStatus {
+            successful: 9,
+            failed: 1,
+            policy_dropped: 1,
+            error: "too old".to_string(),
+        };
+        // The regression: gating the warn on `is_wholly_discarded` alone skips this,
+        // so a skewed source loses records indefinitely with nothing logged.
+        assert!(!is_wholly_discarded(&partial));
+        assert!(warrants_discard_warn(&partial));
+
+        // A batch that stored everything stays silent.
+        assert!(!warrants_discard_warn(&RecordStatus {
+            successful: 10,
+            failed: 0,
+            policy_dropped: 0,
+            error: String::new(),
+        }));
+    }
+
+    #[test]
+    fn a_policy_drop_increments_the_dropped_counter() {
+        let mut status = StreamStatus::new("s");
+        status.status = RecordStatus {
+            successful: 9,
+            failed: 1,
+            policy_dropped: 1,
+            error: "too old".to_string(),
+        };
+        let counter = metrics::INGEST_RECORDS_DROPPED
+            .get_metric_with_label_values(&["org_partial_drop", "logs", "ingestion_window"])
+            .unwrap();
+        let before = counter.get();
+
+        warn_and_count_discards("org_partial_drop", "/test", &status);
+
+        assert_eq!(counter.get(), before + 1);
+    }
+
+    /// The interval throttles per stream, so one bad client cannot drown the log.
+    #[test]
+    fn wholly_discarded_warns_are_rate_limited_per_stream() {
+        let now = Instant::now();
+        assert!(discard_warn_permitted("org_rl/stream_a", now));
+        assert!(!discard_warn_permitted("org_rl/stream_a", now));
+        assert!(!discard_warn_permitted(
+            "org_rl/stream_a",
+            now + DISCARD_WARN_INTERVAL - Duration::from_secs(1)
+        ));
+        assert!(discard_warn_permitted(
+            "org_rl/stream_a",
+            now + DISCARD_WARN_INTERVAL
+        ));
+        // Another stream is its own bucket.
+        assert!(discard_warn_permitted("org_rl/stream_b", now));
+    }
+
+    #[test]
+    fn a_window_drop_is_counted_as_a_policy_drop_on_both_timestamp_paths() {
+        // §11.1: the pipeline path timestamps the pipeline OUTPUT and used to
+        // count only `failed`, so one out-of-window event in a pipeline-attached
+        // HEC stream answered 400/code 6 and the client dropped its in-window
+        // events with it. Both paths now route through this one helper.
+        let mut status = ingestion_common::RecordStatus::default();
+        count_timestamp_rejection(&mut status, &schema::get_upto_discard_error());
+        assert_eq!(status.failed, 1);
+        assert_eq!(status.policy_dropped, 1);
+
+        count_timestamp_rejection(&mut status, &schema::get_future_discard_error());
+        assert_eq!(status.failed, 2);
+        assert_eq!(status.policy_dropped, 2);
+
+        // The collector's code-0 test: nothing but window drops.
+        assert!(status.failed <= status.policy_dropped);
+    }
+
+    #[test]
+    fn a_malformed_timestamp_is_not_a_policy_drop() {
+        let mut status = ingestion_common::RecordStatus::default();
+        count_timestamp_rejection(&mut status, &anyhow::anyhow!("Can't parse timestamp"));
+        assert_eq!(status.failed, 1);
+        assert_eq!(status.policy_dropped, 0);
+        // Which is what the collector turns into code 6.
+        assert!(status.failed > status.policy_dropped);
+        assert_eq!(status.error, "Can't parse timestamp");
+    }
+
+    #[test]
+    fn test_internal_rollup_write_guard_blocks_users_in_all_editions() {
+        let user = IngestUser::User("someone@example.com".to_string());
+        assert!(is_blocked_internal_rollup_write(
+            "_o2_db_stats",
+            &user,
+            false
+        ));
+        assert!(is_blocked_internal_rollup_write(
+            "_o2_service_graph",
+            &user,
+            false
+        ));
+        assert!(is_blocked_internal_rollup_write(
+            "_agent_signals",
+            &user,
+            false
+        ));
+        // Ordinary streams are unaffected.
+        assert!(!is_blocked_internal_rollup_write("default", &user, false));
+        assert!(!is_blocked_internal_rollup_write("o2_stuff", &user, false));
+    }
+
+    #[test]
+    fn test_internal_rollup_write_guard_exempts_internal_writers() {
+        // The gRPC ServiceGraph arm ingests as SystemJob(InternalGrpc) with
+        // is_derived=true — both flags independently pass the guard.
+        let internal = IngestUser::SystemJob(SystemJobType::InternalGrpc);
+        assert!(!is_blocked_internal_rollup_write(
+            "_o2_service_graph",
+            &internal,
+            true
+        ));
+        assert!(!is_blocked_internal_rollup_write(
+            "_o2_db_stats",
+            &internal,
+            false
+        ));
+        let user = IngestUser::User("someone@example.com".to_string());
+        assert!(!is_blocked_internal_rollup_write(
+            "_o2_db_stats",
+            &user,
+            true
+        ));
+    }
+
+    #[test]
+    fn test_should_apply_sdr_exempts_only_self_reporting_streams() {
+        for stream in [REDACTION_EVIDENCE_STREAM, USAGE_STREAM, TRIGGERS_STREAM] {
+            assert!(
+                !should_apply_sdr("any_org", stream),
+                "{stream} is per-org and must not be scanned in any org"
+            );
+        }
+        for stream in [
+            AUDIT_STREAM,
+            ERROR_STREAM,
+            STATS_STREAM,
+            DATA_RETENTION_USAGE_STREAM,
+        ] {
+            assert!(
+                !should_apply_sdr(config::META_ORG_ID, stream),
+                "{stream} must not be scanned in the meta org"
+            );
+        }
+    }
+
+    #[test]
+    fn test_should_apply_sdr_scans_customer_streams() {
+        // The gRPC funnel stamps InternalGrpc on these too, and they carry customer data.
+        for stream in ["default", "app_logs", "_o2_service_graph", "k8s_events"] {
+            assert!(should_apply_sdr("acme", stream), "{stream} must be scanned");
+        }
+    }
+
+    #[test]
+    fn a_customer_stream_named_like_a_meta_only_one_is_still_scanned() {
+        for stream in [
+            AUDIT_STREAM,
+            ERROR_STREAM,
+            STATS_STREAM,
+            DATA_RETENTION_USAGE_STREAM,
+        ] {
+            assert!(
+                should_apply_sdr("acme", stream),
+                "acme/{stream} is customer data and must be scanned"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_tuple_from_open_telemetry_key_value_string_value() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value::Value};
+        let kv = KeyValue {
+            key: "my_key".to_string(),
+            value: Some(AnyValue {
+                value: Some(Value::StringValue("my_val".to_string())),
+            }),
+            ..Default::default()
+        };
+        let result = get_tuple_from_open_telemetry_key_value(kv);
+        assert_eq!(result, Some(("my_key".to_string(), "my_val".to_string())));
+    }
+
+    #[test]
+    fn test_get_tuple_from_open_telemetry_key_value_non_string() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value::Value};
+        let kv = KeyValue {
+            key: "my_key".to_string(),
+            value: Some(AnyValue {
+                value: Some(Value::IntValue(42)),
+            }),
+            ..Default::default()
+        };
+        let result = get_tuple_from_open_telemetry_key_value(kv);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_tuple_from_open_telemetry_key_value_no_value() {
+        use opentelemetry_proto::tonic::common::v1::KeyValue;
+        let kv = KeyValue {
+            key: "my_key".to_string(),
+            value: None,
+            ..Default::default()
+        };
+        let result = get_tuple_from_open_telemetry_key_value(kv);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_decode_and_decompress_success_string() {
+        let encoded_data = "H4sIAAAAAAAAADWO0QqCMBiFX2XsOkKJZHkXot5YQgpdhMTSPzfSTbaZhPjuzbTLj3M45xtxC1rTGvJPB9jHQXrOL2lyP4VZdoxDvMFyEKDmpJF9NVBTskTW2gaNrGMl+85mC2VGAW0X1P1Dl4p3hksR8caA0ti/Fb9e+AZhZhwxr5a64VbD0NaOuR5xPLJzycEh+81fbxa4JmjVQ6uejwIG5YuLGjGgjWFIPlFll7ig8zOKuAImNWzxVExfL8ipzewAAAA=";
+        let expected = "{\"messageType\":\"CONTROL_MESSAGE\",\"owner\":\"CloudwatchLogs\",\"logGroup\":\"\",\"logStream\":\"\",\"subscriptionFilters\":[],\"logEvents\":[{\"id\":\"\",\"timestamp\":1680683189085,\"message\":\"CWL CONTROL MESSAGE: Checking health of destination Firehose.\"}]}";
+        let result = decode_and_decompress_to_string(encoded_data)
+            .expect("Failed to decode and decompress data");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_decode_and_decompress_success_vec() {
+        let encoded_data = "H4sIAAAAAAAAADWO0QqCMBiFX2XsOkKJZHkXot5YQgpdhMTSPzfSTbaZhPjuzbTLj3M45xtxC1rTGvJPB9jHQXrOL2lyP4VZdoxDvMFyEKDmpJF9NVBTskTW2gaNrGMl+85mC2VGAW0X1P1Dl4p3hksR8caA0ti/Fb9e+AZhZhwxr5a64VbD0NaOuR5xPLJzycEh+81fbxa4JmjVQ6uejwIG5YuLGjGgjWFIPlFll7ig8zOKuAImNWzxVExfL8ipzewAAAA=";
+        let expected = vec![
+            123, 34, 109, 101, 115, 115, 97, 103, 101, 84, 121, 112, 101, 34, 58, 34, 67, 79, 78,
+            84, 82, 79, 76, 95, 77, 69, 83, 83, 65, 71, 69, 34, 44, 34, 111, 119, 110, 101, 114,
+            34, 58, 34, 67, 108, 111, 117, 100, 119, 97, 116, 99, 104, 76, 111, 103, 115, 34, 44,
+            34, 108, 111, 103, 71, 114, 111, 117, 112, 34, 58, 34, 34, 44, 34, 108, 111, 103, 83,
+            116, 114, 101, 97, 109, 34, 58, 34, 34, 44, 34, 115, 117, 98, 115, 99, 114, 105, 112,
+            116, 105, 111, 110, 70, 105, 108, 116, 101, 114, 115, 34, 58, 91, 93, 44, 34, 108, 111,
+            103, 69, 118, 101, 110, 116, 115, 34, 58, 91, 123, 34, 105, 100, 34, 58, 34, 34, 44,
+            34, 116, 105, 109, 101, 115, 116, 97, 109, 112, 34, 58, 49, 54, 56, 48, 54, 56, 51, 49,
+            56, 57, 48, 56, 53, 44, 34, 109, 101, 115, 115, 97, 103, 101, 34, 58, 34, 67, 87, 76,
+            32, 67, 79, 78, 84, 82, 79, 76, 32, 77, 69, 83, 83, 65, 71, 69, 58, 32, 67, 104, 101,
+            99, 107, 105, 110, 103, 32, 104, 101, 97, 108, 116, 104, 32, 111, 102, 32, 100, 101,
+            115, 116, 105, 110, 97, 116, 105, 111, 110, 32, 70, 105, 114, 101, 104, 111, 115, 101,
+            46, 34, 125, 93, 125,
+        ];
+        let result = decode_and_decompress_to_vec(encoded_data)
+            .expect("Failed to decode and decompress data");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_decode_success_string() {
+        let encoded_data = "eyJtZXNzYWdlIjoiMiAwNTg2OTQ4NTY0NzYgZW5pLTAzYzBmNWJhNzlhNjZlZjE3IDEwLjMuMTY2LjcxIDEwLjMuMTQxLjIwOSA0NDMgMzg2MzQgNiAxMDMgNDI5MjYgMTY4MDgzODU1NiAxNjgwODM4NTc4IEFDQ0VQVCBPSyJ9Cg==";
+        let expected = "{\"message\":\"2 058694856476 eni-03c0f5ba79a66ef17 10.3.166.71 10.3.141.209 443 38634 6 103 42926 1680838556 1680838578 ACCEPT OK\"}\n";
+        let result = decode_and_decompress_to_string(encoded_data).expect("Failed to decode data");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_decode_success_vec() {
+        let encoded_data = "eyJtZXNzYWdlIjoiMiAwNTg2OTQ4NTY0NzYgZW5pLTAzYzBmNWJhNzlhNjZlZjE3IDEwLjMuMTY2LjcxIDEwLjMuMTQxLjIwOSA0NDMgMzg2MzQgNiAxMDMgNDI5MjYgMTY4MDgzODU1NiAxNjgwODM4NTc4IEFDQ0VQVCBPSyJ9Cg==";
+        let expected = vec![
+            123, 34, 109, 101, 115, 115, 97, 103, 101, 34, 58, 34, 50, 32, 48, 53, 56, 54, 57, 52,
+            56, 53, 54, 52, 55, 54, 32, 101, 110, 105, 45, 48, 51, 99, 48, 102, 53, 98, 97, 55, 57,
+            97, 54, 54, 101, 102, 49, 55, 32, 49, 48, 46, 51, 46, 49, 54, 54, 46, 55, 49, 32, 49,
+            48, 46, 51, 46, 49, 52, 49, 46, 50, 48, 57, 32, 52, 52, 51, 32, 51, 56, 54, 51, 52, 32,
+            54, 32, 49, 48, 51, 32, 52, 50, 57, 50, 54, 32, 49, 54, 56, 48, 56, 51, 56, 53, 53, 54,
+            32, 49, 54, 56, 48, 56, 51, 56, 53, 55, 56, 32, 65, 67, 67, 69, 80, 84, 32, 79, 75, 34,
+            125, 10,
+        ];
+        let result = decode_and_decompress_to_vec(encoded_data).expect("Failed to decode data");
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_decode_and_decompress_invalid_base64_string() {
+        let encoded_data = "H4sIAAAAAAAC/ytJLS4BAAxGw7gNAAA&"; // Invalid base64 string
+        let result = decode_and_decompress_to_string(encoded_data);
+        assert!(
+            result.is_err(),
+            "Expected an error due to invalid base64 input"
+        );
+    }
+
+    #[test]
+    fn test_decode_and_decompress_invalid_base64_vec() {
+        let encoded_data = "H4sIAAAAAAAC/ytJLS4BAAxGw7gNAAA&"; // Invalid base64 string
+        let result = decode_and_decompress_to_vec(encoded_data);
+        assert!(
+            result.is_err(),
+            "Expected an error due to invalid base64 input"
+        );
+    }
+
+    #[test]
+    fn test_deserialize_from_str_metrics() {
+        let encoded_data = "eyJtZXRyaWNfc3RyZWFtX25hbWUiOiJDdXN0b21QYXJ0aWFsLUJDbjVjQSIsImFjY291bnRfaWQiOiI3MzkxNDcyMjI5ODkiLCJyZWdpb24iOiJ1cy1lYXN0LTIiLCJuYW1lc3BhY2UiOiJBV1MvVXNhZ2UiLCJtZXRyaWNfbmFtZSI6IkNhbGxDb3VudCIsImRpbWVuc2lvbnMiOnsiQ2xhc3MiOiJOb25lIiwiUmVzb3VyY2UiOiJHZXRNZXRyaWNEYXRhIiwiU2VydmljZSI6IkNsb3VkV2F0Y2giLCJUeXBlIjoiQVBJIn0sInRpbWVzdGFtcCI6MTcxMzkwMjcwMDAwMCwidmFsdWUiOnsibWF4IjoxLjAsIm1pbiI6MS4wLCJzdW0iOjMuMCwiY291bnQiOjMuMH0sInVuaXQiOiJOb25lIn0KeyJtZXRyaWNfc3RyZWFtX25hbWUiOiJDdXN0b21QYXJ0aWFsLUJDbjVjQSIsImFjY291bnRfaWQiOiI3MzkxNDcyMjI5ODkiLCJyZWdpb24iOiJ1cy1lYXN0LTIiLCJuYW1lc3BhY2UiOiJBV1MvRmlyZWhvc2UiLCJtZXRyaWNfbmFtZSI6IktNU0tleUludmFsaWRTdGF0ZSIsImRpbWVuc2lvbnMiOnsiRGVsaXZlcnlTdHJlYW1OYW1lIjoiUFVULUhUUC1SZFFXOCJ9LCJ0aW1lc3RhbXAiOjE3MTM5MDI2NDAwMDAsInZhbHVlIjp7Im1heCI6MC4wLCJtaW4iOjAuMCwic3VtIjowLjAsImNvdW50Ijo2MC4wfSwidW5pdCI6IkNvdW50In0KeyJtZXRyaWNfc3RyZWFtX25hbWUiOiJDdXN0b21QYXJ0aWFsLUJDbjVjQSIsImFjY291bnRfaWQiOiI3MzkxNDcyMjI5ODkiLCJyZWdpb24iOiJ1cy1lYXN0LTIiLCJuYW1lc3BhY2UiOiJBV1MvRmlyZWhvc2UiLCJtZXRyaWNfbmFtZSI6IktNU0tleU5vdEZvdW5kIiwiZGltZW5zaW9ucyI6eyJEZWxpdmVyeVN0cmVhbU5hbWUiOiJQVVQtSFRQLVJkUVc4In0sInRpbWVzdGFtcCI6MTcxMzkwMjY0MDAwMCwidmFsdWUiOnsibWF4IjowLjAsIm1pbiI6MC4wLCJzdW0iOjAuMCwiY291bnQiOjYwLjB9LCJ1bml0IjoiQ291bnQifQo=";
+        let decoded = decode_and_decompress_to_vec(encoded_data);
+        assert!(decoded.is_ok());
+        let decoded = decoded.unwrap();
+        let request_id = "test_id".to_string();
+        let result = deserialize_aws_record_from_vec(decoded, &request_id);
+        assert!(result.is_ok());
+        let value = result.unwrap();
+        for val in value {
+            assert_eq!(val.get("account_id").unwrap(), "739147222989");
+        }
+    }
+
+    #[test]
+    fn test_deserialize_from_str_logs() {
+        let encoded_data = "eyJtZXNzYWdlVHlwZSI6IkRBVEFfTUVTU0FHRSIsIm93bmVyIjoiMTIzNDU2Nzg5MDEyIiwibG9nR3JvdXAiOiJsb2dfZ3JvdXBfbmFtZSIsImxvZ1N0cmVhbSI6ImxvZ19zdHJlYW1fbmFtZSIsInN1YnNjcmlwdGlvbkZpbHRlcnMiOlsic3Vic2NyaXB0aW9uX2ZpbHRlcl9uYW1lIl0sImxvZ0V2ZW50cyI6W3siaWQiOiIwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1IiwidGltZXN0YW1wIjoxNzEzOTgzNDQ2LCJtZXNzYWdlIjoibG9nbWVzc2FnZTEifSx7ImlkIjoiMDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NSIsInRpbWVzdGFtcCI6IDE3MTM5ODM0NDYsIm1lc3NhZ2UiOiJsb2dtZXNzYWdlMiJ9XX0=";
+        let decoded = decode_and_decompress_to_vec(encoded_data);
+        assert!(decoded.is_ok());
+        let decoded = decoded.unwrap();
+        let request_id = "test_id".to_string();
+        let result = deserialize_aws_record_from_vec(decoded, &request_id);
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        for val in result {
+            assert_eq!(val.get("owner").unwrap(), "123456789012");
+        }
+    }
+
+    #[test]
+    fn test_var_int_header_empty_array() {
+        let bytes = [];
+        assert_eq!(get_size_of_var_int_header(&bytes), None);
+    }
+
+    #[test]
+    fn test_var_int_header_no_valid_bytes() {
+        let bytes = [0xFF; 100];
+        assert_eq!(get_size_of_var_int_header(&bytes), None);
+    }
+
+    #[test]
+    fn test_var_int_header() {
+        let bytes: Vec<_> = (0..=u8::MAX).rev().collect();
+        assert_eq!(get_size_of_var_int_header(&bytes), Some(129));
+    }
+
+    #[test]
+    fn extract_resource_id_with_colon() {
+        let arn = "arn:partition:service:region:account-id:resource-type:resource-id";
+        assert_eq!(
+            extract_resource_id_from_amazon_resource_number(arn),
+            "resource-id"
+        );
+    }
+
+    #[test]
+    fn extract_resource_id_with_slash() {
+        let arn = "arn:partition:service:region:account-id:resource-type/resource-id";
+        assert_eq!(
+            extract_resource_id_from_amazon_resource_number(arn),
+            "resource-id"
+        );
+    }
+
+    #[test]
+    fn extract_resource_id_without_resource_type() {
+        let arn = "arn:partition:service:region:account-id:resource-id";
+        assert_eq!(
+            extract_resource_id_from_amazon_resource_number(arn),
+            "resource-id"
+        );
+    }
+
+    #[test]
+    fn test_parse_json_body_takes_an_array_or_a_single_record() {
+        assert_eq!(
+            parse_json_body(br#"[{"a":1},{"b":2}]"#).unwrap(),
+            vec![json::json!({"a": 1}), json::json!({"b": 2})]
+        );
+        assert_eq!(
+            parse_json_body(br#"{"a":1}"#).unwrap(),
+            vec![json::json!({"a": 1})]
+        );
+        assert!(parse_json_body(br#"[{"a":1}"#).is_err());
+    }
+}

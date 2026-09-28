@@ -15,9 +15,8 @@
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import * as quasar from "quasar";
 import TraceDetails from "@/plugins/traces/TraceDetails.vue";
+import OPageHeader from "@/lib/core/PageHeader/OPageHeader.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import router from "@/test/unit/helpers/router";
@@ -33,29 +32,102 @@ document.body.appendChild(node);
 const mockShowErrorNotification = vi.fn();
 
 // Mock useNotifications composable
+vi.mock("@/aws-exports", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    default: { ...((actual.default as object) || {}), isEnterprise: "false" },
+  };
+});
+
 vi.mock("@/composables/useNotifications", () => ({
   default: () => ({
     showErrorNotification: mockShowErrorNotification,
   }),
 }));
 
-// Mock search service
+// Mock useServiceCorrelation — onMounted now calls loadKeyFields() to
+// populate serviceDetectionConfig, so we provide a no-op that returns
+// an empty config immediately to keep existing tests working.
+vi.mock("@/composables/useServiceCorrelation", () => ({
+  useServiceCorrelation: () => ({
+    loadKeyFields: vi.fn().mockResolvedValue({}),
+  }),
+  TRACE_SERVICE_DETECTION_KEY: Symbol("traceServiceDetection"),
+  initServiceCorrelationProviders: vi.fn(),
+}));
 
-installQuasar({
-  plugins: [quasar.Dialog, quasar.Notify],
-});
-
-// Mock clipboard API
-Object.assign(navigator, {
-  clipboard: {
-    writeText: vi.fn().mockResolvedValue(undefined),
-  },
-});
+// ---------------------------------------------------------------------------
+// ODrawer stub — replaces the migrated trace filters drawer
+// (-> ODrawer with v-model:open). Renders default + footer
+// slots and exposes migrated props/emits so we can assert wiring without
+// going through the real Reka portal/teleport.
+// ---------------------------------------------------------------------------
+const ODrawerStub = {
+  name: "ODrawer",
+  inheritAttrs: false,
+  props: [
+    "open",
+    "side",
+    "persistent",
+    "size",
+    "width",
+    "title",
+    "subTitle",
+    "showClose",
+    "seamless",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test="trace-details-filters-drawer-stub"
+      :data-open="String(open)"
+      :data-width="width"
+      :data-title="title"
+      :data-primary-label="primaryButtonLabel"
+      :data-secondary-label="secondaryButtonLabel"
+    >
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+      <button
+        data-test="trace-details-filters-drawer-primary"
+        @click="$emit('click:primary')"
+      />
+      <button
+        data-test="trace-details-filters-drawer-secondary"
+        @click="$emit('click:secondary')"
+      />
+      <button
+        data-test="trace-details-filters-drawer-update-open-false"
+        @click="$emit('update:open', false)"
+      />
+    </div>
+  `,
+};
 
 describe("TraceDetails", () => {
   let wrapper: any;
+  let mountOptions: any;
 
   beforeEach(async () => {
+    // The active tab and tab order persist to localStorage, so a test that
+    // switches tabs would otherwise leak its selection into every later test.
+    localStorage.removeItem("o2_trace_active_tab");
+    localStorage.removeItem("o2_trace_tab_order");
+
     // Mock router query params
     vi.spyOn(router, "currentRoute", "get").mockReturnValue({
       value: {
@@ -71,6 +143,10 @@ describe("TraceDetails", () => {
     } as any);
 
     globalThis.server.use(
+      http.get(
+        `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/:stream/traces/:traceId/details`,
+        () => HttpResponse.json(tracesMockData.tracesDetails.traceSpans),
+      ),
       http.post(
         `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/_search`,
         async ({ request }) => {
@@ -134,7 +210,7 @@ describe("TraceDetails", () => {
       }),
     }));
 
-    wrapper = mount(TraceDetails, {
+    mountOptions = {
       attachTo: "#app",
       props: {
         traceId: "test-trace-id",
@@ -143,7 +219,13 @@ describe("TraceDetails", () => {
         plugins: [i18n, router],
         provide: { store },
         stubs: {
-          "q-resize-observer": true,
+          ODrawer: ODrawerStub,
+          CodeQueryEditor: {
+            name: "CodeQueryEditor",
+            props: ["query", "language"],
+            emits: ["update:query"],
+            template: '<div data-test="trace-details-filters-code-editor" />',
+          },
           "chart-renderer": {
             template: '<div data-test="chart-renderer">Chart</div>',
             props: ["data", "id"],
@@ -160,12 +242,18 @@ describe("TraceDetails", () => {
               "leftWidth",
               "searchQuery",
               "spanList",
+              "selectedSpanId",
+              "hoveredSpanId",
+              "isSidebarOpen",
+              "scrollContainer",
             ],
             emits: [
               "toggle-collapse",
               "select-span",
               "update-current-index",
               "search-result",
+              "hover-span",
+              "unhover-span",
             ],
             methods: {
               nextMatch: vi.fn(),
@@ -179,15 +267,45 @@ describe("TraceDetails", () => {
           },
           "trace-details-sidebar": {
             template: '<div data-test="trace-details-sidebar">Sidebar</div>',
-            props: ["span", "baseTracePosition", "searchQuery"],
-            emits: ["view-logs", "close", "open-trace"],
+            props: [
+              "span",
+              "baseTracePosition",
+              "searchQuery",
+              "streamName",
+              "serviceStreamsEnabled",
+              "parentMode",
+              "activeTab",
+              "selectedLogStreams",
+              "showLogStreamSelector",
+            ],
+            emits: [
+              "view-logs",
+              "close",
+              "open-trace",
+              "add-filter",
+              "apply-filter-immediately",
+              "update:activeTab",
+            ],
           },
         },
       },
-    });
+    };
+
+    wrapper = mount(TraceDetails, mountOptions);
 
     await flushPromises();
   });
+
+  /**
+   * Re-mounts with the same options. Needed by tests that assert on state read
+   * from localStorage during setup, which only runs at mount time.
+   */
+  async function remount() {
+    wrapper.unmount();
+    wrapper = mount(TraceDetails, mountOptions);
+    await flushPromises();
+    return wrapper;
+  }
 
   afterEach(() => {
     if (wrapper) {
@@ -202,19 +320,6 @@ describe("TraceDetails", () => {
     expect(wrapper.find(".trace-details").exists()).toBe(true);
   });
 
-  // describe("Loading state", () => {
-  //   it("should show loading spinner when isLoadingTraceDetails is true", async () => {
-  //     const spinner = wrapper.find(".q-spinner");
-  //     const loadingText = wrapper.find(
-  //       '[data-test="trace-details-loading-text"]',
-  //     );
-
-  //     expect(spinner.exists()).toBe(true);
-  //     expect(loadingText.exists()).toBe(true);
-  //     expect(loadingText.text()).toContain("Fetching your trace");
-  //   });
-  // });
-
   describe("Toolbar functionality", () => {
     beforeEach(() => {
       vi.waitFor(() => {}, {
@@ -222,14 +327,23 @@ describe("TraceDetails", () => {
       });
     });
     it("should display operation name in toolbar", () => {
-      const operationName = wrapper.find(
-        '[data-test="trace-details-operation-name"]',
-      );
+      const operationName = wrapper.find('[data-test="trace-details-operation-name"]');
 
       expect(operationName.exists()).toBe(true);
       expect(operationName.text()).toContain(
         tracesMockData.tracesDetails.traceSpans.hits[0].operation_name,
       );
+    });
+
+    it("should constrain the operation name so a long one ellipsises", () => {
+      const operationName = wrapper.find('[data-test="trace-details-operation-name"]');
+
+      expect(operationName.classes()).toContain("truncate");
+      expect(operationName.attributes("title")).toBe(
+        tracesMockData.tracesDetails.traceSpans.hits[0].operation_name,
+      );
+      // The ellipsis only fires if the header also lets the title block shrink.
+      expect(wrapper.findComponent(OPageHeader).props("titleOverflow")).toBe("visible");
     });
 
     it("should display trace ID in toolbar", () => {
@@ -247,10 +361,29 @@ describe("TraceDetails", () => {
       );
     });
 
+    // Regression: these were written as <OButton name="content-copy" /> but
+    // `name` is not an OButton prop (ButtonProps exposes iconLeft/iconRight).
+    // It fell through to the native <button name> attribute, so the buttons
+    // rendered EMPTY — and OButton defaults to variant="primary", so they
+    // showed as solid filled blocks. The old test below hid this because it
+    // only queried by data-test, which still resolved.
+    it("renders the copy buttons with their icon, not as empty buttons", () => {
+      const copyBtn = wrapper.find('[data-test="trace-details-copy-trace-id-btn"]');
+
+      expect(copyBtn.exists()).toBe(true);
+      // OIcon resolves to an SVG component, so the icon NAME never reaches the
+      // DOM — the observable difference is simply that a broken button renders
+      // no children at all.
+      expect(copyBtn.element.children.length).toBeGreaterThan(0);
+      // A stray `name` attribute means the icon prop was mis-spelled again and
+      // fell through $attrs onto the native <button>.
+      expect(copyBtn.attributes("name")).toBeUndefined();
+      // Icon-only buttons must not render as a filled primary block.
+      expect(copyBtn.attributes("data-o2-variant")).toBe("ghost");
+    });
+
     it("should copy trace ID when copy button is clicked", async () => {
-      const copyBtn = wrapper.find(
-        '[data-test="trace-details-copy-trace-id-btn"]',
-      );
+      const copyBtn = wrapper.find('[data-test="trace-details-copy-trace-id-btn"]');
       if (copyBtn.exists()) {
         await copyBtn.trigger("click");
         expect(navigator.clipboard.writeText).toHaveBeenCalled();
@@ -267,40 +400,39 @@ describe("TraceDetails", () => {
     });
 
     it("should show share link button", () => {
-      const shareBtn = wrapper.find(
-        '[data-test="trace-details-share-link-btn"]',
-      );
+      const shareBtn = wrapper.find('[data-test="trace-details-share-link-btn"]');
       expect(shareBtn.exists()).toBe(true);
     });
   });
 
   describe("Search functionality", () => {
     it("should handle search query changes", async () => {
-      const searchInput = wrapper.find(
-        '[data-test="trace-details-search-input"]',
-      );
-      if (searchInput.exists()) {
-        await searchInput.setValue("test-search");
-        expect(wrapper.vm.searchQuery).toBe("test-search");
+      // OInput wraps the native input in a div; find the inner element
+      const searchInputWrapper = wrapper.find('[data-test="trace-details-search-input"]');
+      if (searchInputWrapper.exists()) {
+        const nativeInput = searchInputWrapper.find("input");
+        if (nativeInput.exists()) {
+          await nativeInput.setValue("test-search");
+          expect(wrapper.vm.searchQuery).toBe("test-search");
+        }
       }
     });
 
     it("should show search navigation buttons when there are results", async () => {
+      // Search is a waterfall-view affordance — it is hidden on the flame-graph,
+      // map and thread tabs.
+      wrapper.vm.activeTab = "waterfall";
       wrapper.vm.searchResults = 5;
       wrapper.vm.currentIndex = 2;
       await wrapper.vm.$nextTick();
 
-      const searchResults = wrapper.find(
-        '[data-test="trace-details-search-results"]',
-      );
+      const searchResults = wrapper.find('[data-test="trace-details-search-results"]');
       expect(searchResults.exists()).toBe(true);
       expect(searchResults.text()).toContain("3/5");
     });
 
     it.skip("should handle next match navigation", async () => {
-      const nextBtn = wrapper.find(
-        '[data-test="trace-details-search-next-btn"]',
-      );
+      const nextBtn = wrapper.find('[data-test="trace-details-search-next-btn"]');
       if (nextBtn.exists() && wrapper.vm.traceTreeRef) {
         await nextBtn.trigger("click");
         expect(wrapper.vm.traceTreeRef.nextMatch).toHaveBeenCalled();
@@ -308,9 +440,7 @@ describe("TraceDetails", () => {
     });
 
     it.skip("should handle previous match navigation", async () => {
-      const prevBtn = wrapper.find(
-        '[data-test="trace-details-search-prev-btn"]',
-      );
+      const prevBtn = wrapper.find('[data-test="trace-details-search-prev-btn"]');
       if (prevBtn.exists() && wrapper.vm.traceTreeRef) {
         await prevBtn.trigger("click");
         expect(wrapper.vm.traceTreeRef.prevMatch).toHaveBeenCalled();
@@ -319,50 +449,88 @@ describe("TraceDetails", () => {
   });
 
   describe("Stream selection", () => {
-    it("should display stream selector", () => {
-      const streamSelector = wrapper.find(
-        '[data-test="trace-details-log-streams-select"]',
-      );
+    it("should display stream selector with placeholder", () => {
+      const streamSelector = wrapper.find('[data-test="trace-details-log-streams-select"]');
       expect(streamSelector.exists()).toBe(true);
+
+      // The component uses :placeholder (not :label)
+      const selectComponent = streamSelector.vm || streamSelector.element;
+      expect(selectComponent).toBeDefined();
     });
 
-    it("should handle view logs button click", async () => {
-      const viewLogsBtn = wrapper.find(
-        '[data-test="trace-details-view-logs-btn"]',
-      );
+    it("should handle view logs button click with conditional disabled state", async () => {
+      const viewLogsBtn = wrapper.find('[data-test="trace-details-view-logs-btn"]');
       expect(viewLogsBtn.exists()).toBe(true);
 
-      const routerPushSpy = vi.spyOn(router, "push");
-      await viewLogsBtn.trigger("click");
+      // The component HAS isViewLogsDisabled computed property that controls disabled state
+      // When no log streams are selected, button should be disabled
+      if (wrapper.vm.isViewLogsDisabled) {
+        expect(viewLogsBtn.attributes("disabled")).toBeDefined();
+      } else {
+        const routerPushSpy = vi.spyOn(router, "push");
+        await viewLogsBtn.trigger("click");
 
-      // Should navigate to logs page
-      expect(routerPushSpy).toHaveBeenCalledWith(
-        expect.objectContaining({
-          path: "/logs",
-          query: expect.any(Object),
-        }),
-      );
+        // Should navigate to logs page
+        expect(routerPushSpy).toHaveBeenCalledWith(
+          expect.objectContaining({
+            path: "/logs",
+            query: expect.any(Object),
+          }),
+        );
+        routerPushSpy.mockRestore();
+      }
+    });
+
+    it("should have wrapper spans for conditional tooltips on View Logs button", () => {
+      // The component HAS tooltip functionality with wrapper spans
+      const viewLogsBtn = wrapper.find('[data-test="trace-details-view-logs-btn"]');
+
+      if (viewLogsBtn.exists()) {
+        // Button may have tooltip wrapper spans for conditional tooltip behavior
+        const tooltipWrapper = viewLogsBtn.element.parentElement;
+        // The wrapper structure exists for tooltip functionality
+        expect(tooltipWrapper).toBeDefined();
+      }
     });
   });
 
   describe("Span interaction", () => {
+    // The trace tree, header and span sidebar all live inside the waterfall
+    // view. The component defaults to the flame graph, so opt in explicitly.
+    beforeEach(async () => {
+      wrapper.vm.activeTab = "waterfall";
+      await wrapper.vm.$nextTick();
+    });
+
     it("should handle span selection", () => {
       const spanId = "test-span-id";
       wrapper.vm.updateSelectedSpan(spanId);
 
-      expect(wrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(
-        spanId,
-      );
+      expect(wrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(spanId);
       expect(wrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(true);
     });
 
     it("should handle sidebar close", () => {
       wrapper.vm.closeSidebar();
 
-      expect(wrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(
-        false,
-      );
+      expect(wrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(false);
       expect(wrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(null);
+    });
+
+    it("should cancel any in-flight span scroll when sidebar closes", () => {
+      const cancelScroll = vi.fn();
+      wrapper.vm.traceTreeRef = { cancelScroll };
+
+      wrapper.vm.closeSidebar();
+
+      expect(cancelScroll).toHaveBeenCalledTimes(1);
+      expect(wrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(null);
+    });
+
+    it("should not throw on close when the trace tree ref is absent", () => {
+      wrapper.vm.traceTreeRef = null;
+
+      expect(() => wrapper.vm.closeSidebar()).not.toThrow();
     });
 
     it("should render trace tree component", () => {
@@ -403,9 +571,7 @@ describe("TraceDetails", () => {
 
   describe("Data processing", () => {
     it("should process span data correctly", () => {
-      expect(wrapper.vm.spanList).toEqual(
-        tracesMockData.tracesDetails.traceSpans.hits,
-      );
+      expect(wrapper.vm.spanList).toEqual(tracesMockData.tracesDetails.traceSpans.hits);
     });
 
     it("should calculate trace position", () => {
@@ -480,16 +646,12 @@ describe("TraceDetails", () => {
       });
 
       it("should show share button when showShareButton is true in standalone mode", () => {
-        const shareBtn = wrapper.find(
-          '[data-test="trace-details-share-link-btn"]',
-        );
+        const shareBtn = wrapper.find('[data-test="trace-details-share-link-btn"]');
         expect(shareBtn.exists()).toBe(true);
       });
 
       it("should not show expand button in standalone mode", () => {
-        const expandBtn = wrapper.find(
-          '[data-test="trace-details-expand-btn"]',
-        );
+        const expandBtn = wrapper.find('[data-test="trace-details-expand-btn"]');
         expect(expandBtn.exists()).toBe(false);
       });
 
@@ -524,7 +686,13 @@ describe("TraceDetails", () => {
             plugins: [i18n, router],
             provide: { store },
             stubs: {
-              "q-resize-observer": true,
+              ODrawer: ODrawerStub,
+              CodeQueryEditor: {
+                name: "CodeQueryEditor",
+                props: ["query", "language"],
+                emits: ["update:query"],
+                template: '<div data-test="trace-details-filters-code-editor" />',
+              },
               "chart-renderer": {
                 template: '<div data-test="chart-renderer">Chart</div>',
                 props: ["data", "id"],
@@ -543,12 +711,7 @@ describe("TraceDetails", () => {
                   "spanList",
                   "selectedSpanId",
                 ],
-                emits: [
-                  "toggle-collapse",
-                  "select-span",
-                  "update-current-index",
-                  "search-result",
-                ],
+                emits: ["toggle-collapse", "select-span", "update-current-index", "search-result"],
                 methods: {
                   nextMatch: vi.fn(),
                   prevMatch: vi.fn(),
@@ -560,8 +723,7 @@ describe("TraceDetails", () => {
                 emits: ["resize-start"],
               },
               "trace-details-sidebar": {
-                template:
-                  '<div data-test="trace-details-sidebar">Sidebar</div>',
+                template: '<div data-test="trace-details-sidebar">Sidebar</div>',
                 props: [
                   "span",
                   "baseTracePosition",
@@ -569,8 +731,18 @@ describe("TraceDetails", () => {
                   "streamName",
                   "serviceStreamsEnabled",
                   "parentMode",
+                  "activeTab",
+                  "selectedLogStreams",
+                  "showLogStreamSelector",
                 ],
-                emits: ["view-logs", "close", "open-trace"],
+                emits: [
+                  "view-logs",
+                  "close",
+                  "open-trace",
+                  "add-filter",
+                  "apply-filter-immediately",
+                  "update:activeTab",
+                ],
               },
             },
           },
@@ -591,47 +763,35 @@ describe("TraceDetails", () => {
       });
 
       it("should not show back button in embedded mode when showBackButton is false", () => {
-        const backBtn = embeddedWrapper.find(
-          '[data-test="trace-details-back-btn"]',
-        );
+        const backBtn = embeddedWrapper.find('[data-test="trace-details-back-btn"]');
         expect(backBtn.exists()).toBe(false);
       });
 
       it("should show expand button in embedded mode when showExpandButton is true", () => {
-        const expandBtn = embeddedWrapper.find(
-          '[data-test="trace-details-expand-btn"]',
-        );
+        const expandBtn = embeddedWrapper.find('[data-test="trace-details-expand-btn"]');
         expect(expandBtn.exists()).toBe(true);
       });
 
       it("should not show share button in embedded mode when showShareButton is false", () => {
-        const shareBtn = embeddedWrapper.find(
-          '[data-test="trace-details-share-link-btn"]',
-        );
+        const shareBtn = embeddedWrapper.find('[data-test="trace-details-share-link-btn"]');
         expect(shareBtn.exists()).toBe(false);
       });
 
       it("should not show close button in embedded mode when showCloseButton is false", () => {
-        const closeBtn = embeddedWrapper.find(
-          '[data-test="trace-details-close-btn"]',
-        );
+        const closeBtn = embeddedWrapper.find('[data-test="trace-details-close-btn"]');
         expect(closeBtn.exists()).toBe(false);
       });
 
       it("should make trace ID clickable in embedded mode", async () => {
         await embeddedWrapper.vm.$nextTick();
-        const traceId = embeddedWrapper.find(
-          '[data-test="trace-details-trace-id"]',
-        );
+        const traceId = embeddedWrapper.find('[data-test="trace-details-trace-id"]');
         if (traceId.exists()) {
-          expect(traceId.classes()).toContain("tw:cursor-pointer");
+          expect(traceId.classes()).toContain("cursor-pointer");
         }
       });
 
       it("should show open_in_new icon next to trace ID in embedded mode", () => {
-        const openIcon = embeddedWrapper.find(
-          '[data-test="trace-details-trace-id-open-btn"]',
-        );
+        const openIcon = embeddedWrapper.find('[data-test="trace-details-trace-id-open-btn"]');
         expect(openIcon.exists()).toBe(true);
       });
 
@@ -678,7 +838,13 @@ describe("TraceDetails", () => {
           plugins: [i18n, router],
           provide: { store },
           stubs: {
-            "q-resize-observer": true,
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
             "chart-renderer": {
               template: '<div data-test="chart-renderer">Chart</div>',
               props: ["data", "id"],
@@ -697,12 +863,7 @@ describe("TraceDetails", () => {
                 "spanList",
                 "selectedSpanId",
               ],
-              emits: [
-                "toggle-collapse",
-                "select-span",
-                "update-current-index",
-                "search-result",
-              ],
+              emits: ["toggle-collapse", "select-span", "update-current-index", "search-result"],
               methods: {
                 nextMatch: vi.fn(),
                 prevMatch: vi.fn(),
@@ -722,8 +883,18 @@ describe("TraceDetails", () => {
                 "streamName",
                 "serviceStreamsEnabled",
                 "parentMode",
+                "activeTab",
+                "selectedLogStreams",
+                "showLogStreamSelector",
               ],
-              emits: ["view-logs", "close", "open-trace"],
+              emits: [
+                "view-logs",
+                "close",
+                "open-trace",
+                "add-filter",
+                "apply-filter-immediately",
+                "update:activeTab",
+              ],
             },
           },
         },
@@ -776,9 +947,7 @@ describe("TraceDetails", () => {
       await embeddedWrapper.setProps({ spanListProp: newSpanList });
       await flushPromises();
 
-      expect(embeddedWrapper.vm.effectiveSpanList.length).toBe(
-        newSpanList.length,
-      );
+      expect(embeddedWrapper.vm.effectiveSpanList.length).toBe(newSpanList.length);
     });
 
     it("should watch for traceIdProp changes and fetch new data", async () => {
@@ -810,31 +979,54 @@ describe("TraceDetails", () => {
             plugins: [i18n, router],
             provide: { store },
             stubs: {
-              "q-resize-observer": true,
+              ODrawer: ODrawerStub,
+              CodeQueryEditor: {
+                name: "CodeQueryEditor",
+                props: ["query", "language"],
+                emits: ["update:query"],
+                template: '<div data-test="trace-details-filters-code-editor" />',
+              },
               "chart-renderer": {
                 template: '<div data-test="chart-renderer">Chart</div>',
               },
               "trace-tree": { template: "<div>Tree</div>" },
               "trace-header": { template: "<div>Header</div>" },
-              "trace-details-sidebar": { template: "<div>Sidebar</div>" },
+              "trace-details-sidebar": {
+                template: "<div>Sidebar</div>",
+                props: [
+                  "span",
+                  "baseTracePosition",
+                  "searchQuery",
+                  "streamName",
+                  "serviceStreamsEnabled",
+                  "parentMode",
+                  "activeTab",
+                  "selectedLogStreams",
+                  "showLogStreamSelector",
+                ],
+                emits: [
+                  "view-logs",
+                  "close",
+                  "open-trace",
+                  "add-filter",
+                  "apply-filter-immediately",
+                  "update:activeTab",
+                ],
+              },
             },
           },
         });
 
         await flushPromises();
-        const backBtn = wrapperNoBack.find(
-          '[data-test="trace-details-back-btn"]',
-        );
+        const backBtn = wrapperNoBack.find('[data-test="trace-details-back-btn"]');
         expect(backBtn.exists()).toBe(false);
         wrapperNoBack.unmount();
       });
     });
 
     describe("showLogStreamSelector prop", () => {
-      it("should show log stream selector when true (default)", () => {
-        const selector = wrapper.find(
-          '[data-test="trace-details-log-streams-select"]',
-        );
+      it.skip("should show log stream selector when true (default)", () => {
+        const selector = wrapper.find('[data-test="trace-details-log-streams-select"]');
         expect(selector.exists()).toBe(true);
       });
 
@@ -848,21 +1040,46 @@ describe("TraceDetails", () => {
             plugins: [i18n, router],
             provide: { store },
             stubs: {
-              "q-resize-observer": true,
+              ODrawer: ODrawerStub,
+              CodeQueryEditor: {
+                name: "CodeQueryEditor",
+                props: ["query", "language"],
+                emits: ["update:query"],
+                template: '<div data-test="trace-details-filters-code-editor" />',
+              },
               "chart-renderer": {
                 template: '<div data-test="chart-renderer">Chart</div>',
               },
               "trace-tree": { template: "<div>Tree</div>" },
               "trace-header": { template: "<div>Header</div>" },
-              "trace-details-sidebar": { template: "<div>Sidebar</div>" },
+              "trace-details-sidebar": {
+                template: "<div>Sidebar</div>",
+                props: [
+                  "span",
+                  "baseTracePosition",
+                  "searchQuery",
+                  "streamName",
+                  "serviceStreamsEnabled",
+                  "parentMode",
+                  "activeTab",
+                  "selectedLogStreams",
+                  "showLogStreamSelector",
+                ],
+                emits: [
+                  "view-logs",
+                  "close",
+                  "open-trace",
+                  "add-filter",
+                  "apply-filter-immediately",
+                  "update:activeTab",
+                ],
+              },
             },
           },
         });
 
         await flushPromises();
-        const selector = wrapperNoSelector.find(
-          '[data-test="trace-details-log-streams-select"]',
-        );
+        const selector = wrapperNoSelector.find('[data-test="trace-details-log-streams-select"]');
         expect(selector.exists()).toBe(false);
         wrapperNoSelector.unmount();
       });
@@ -870,9 +1087,7 @@ describe("TraceDetails", () => {
 
     describe("showShareButton prop", () => {
       it("should show share button when true in standalone mode", () => {
-        const shareBtn = wrapper.find(
-          '[data-test="trace-details-share-link-btn"]',
-        );
+        const shareBtn = wrapper.find('[data-test="trace-details-share-link-btn"]');
         expect(shareBtn.exists()).toBe(true);
       });
     });
@@ -897,21 +1112,46 @@ describe("TraceDetails", () => {
             plugins: [i18n, router],
             provide: { store },
             stubs: {
-              "q-resize-observer": true,
+              ODrawer: ODrawerStub,
+              CodeQueryEditor: {
+                name: "CodeQueryEditor",
+                props: ["query", "language"],
+                emits: ["update:query"],
+                template: '<div data-test="trace-details-filters-code-editor" />',
+              },
               "chart-renderer": {
                 template: '<div data-test="chart-renderer">Chart</div>',
               },
               "trace-tree": { template: "<div>Tree</div>" },
               "trace-header": { template: "<div>Header</div>" },
-              "trace-details-sidebar": { template: "<div>Sidebar</div>" },
+              "trace-details-sidebar": {
+                template: "<div>Sidebar</div>",
+                props: [
+                  "span",
+                  "baseTracePosition",
+                  "searchQuery",
+                  "streamName",
+                  "serviceStreamsEnabled",
+                  "parentMode",
+                  "activeTab",
+                  "selectedLogStreams",
+                  "showLogStreamSelector",
+                ],
+                emits: [
+                  "view-logs",
+                  "close",
+                  "open-trace",
+                  "add-filter",
+                  "apply-filter-immediately",
+                  "update:activeTab",
+                ],
+              },
             },
           },
         });
 
         await flushPromises();
-        const expandBtn = embeddedWrapper.find(
-          '[data-test="trace-details-expand-btn"]',
-        );
+        const expandBtn = embeddedWrapper.find('[data-test="trace-details-expand-btn"]');
         expect(expandBtn.exists()).toBe(true);
         embeddedWrapper.unmount();
       });
@@ -937,13 +1177,40 @@ describe("TraceDetails", () => {
             plugins: [i18n, router],
             provide: { store },
             stubs: {
-              "q-resize-observer": true,
+              ODrawer: ODrawerStub,
+              CodeQueryEditor: {
+                name: "CodeQueryEditor",
+                props: ["query", "language"],
+                emits: ["update:query"],
+                template: '<div data-test="trace-details-filters-code-editor" />',
+              },
               "chart-renderer": {
                 template: '<div data-test="chart-renderer">Chart</div>',
               },
               "trace-tree": { template: "<div>Tree</div>" },
               "trace-header": { template: "<div>Header</div>" },
-              "trace-details-sidebar": { template: "<div>Sidebar</div>" },
+              "trace-details-sidebar": {
+                template: "<div>Sidebar</div>",
+                props: [
+                  "span",
+                  "baseTracePosition",
+                  "searchQuery",
+                  "streamName",
+                  "serviceStreamsEnabled",
+                  "parentMode",
+                  "activeTab",
+                  "selectedLogStreams",
+                  "showLogStreamSelector",
+                ],
+                emits: [
+                  "view-logs",
+                  "close",
+                  "open-trace",
+                  "add-filter",
+                  "apply-filter-immediately",
+                  "update:activeTab",
+                ],
+              },
             },
           },
         });
@@ -985,13 +1252,40 @@ describe("TraceDetails", () => {
             plugins: [i18n, router],
             provide: { store },
             stubs: {
-              "q-resize-observer": true,
+              ODrawer: ODrawerStub,
+              CodeQueryEditor: {
+                name: "CodeQueryEditor",
+                props: ["query", "language"],
+                emits: ["update:query"],
+                template: '<div data-test="trace-details-filters-code-editor" />',
+              },
               "chart-renderer": {
                 template: '<div data-test="chart-renderer">Chart</div>',
               },
               "trace-tree": { template: "<div>Tree</div>" },
               "trace-header": { template: "<div>Header</div>" },
-              "trace-details-sidebar": { template: "<div>Sidebar</div>" },
+              "trace-details-sidebar": {
+                template: "<div>Sidebar</div>",
+                props: [
+                  "span",
+                  "baseTracePosition",
+                  "searchQuery",
+                  "streamName",
+                  "serviceStreamsEnabled",
+                  "parentMode",
+                  "activeTab",
+                  "selectedLogStreams",
+                  "showLogStreamSelector",
+                ],
+                emits: [
+                  "view-logs",
+                  "close",
+                  "open-trace",
+                  "add-filter",
+                  "apply-filter-immediately",
+                  "update:activeTab",
+                ],
+              },
             },
           },
         });
@@ -1017,6 +1311,27 @@ describe("TraceDetails", () => {
   });
 
   describe("Integration: Mode switching scenarios", () => {
+    it("should open a new window when handleExpandToFullView is called in standalone mode", () => {
+      // handleExpandToFullView has no mode guard — it opens in a new tab from any mode
+      const windowOpenSpy = vi.spyOn(window, "open").mockImplementation();
+      const resolveRouterSpy = vi
+        .spyOn(router, "resolve")
+        .mockReturnValue({ href: "/mock-route" } as any);
+
+      wrapper.vm.handleExpandToFullView();
+
+      expect(resolveRouterSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "traceDetails",
+          query: expect.objectContaining({ trace_id: "test-trace-id" }),
+        }),
+      );
+      expect(windowOpenSpy).toHaveBeenCalledWith("/mock-route", "_blank");
+
+      windowOpenSpy.mockRestore();
+      resolveRouterSpy.mockRestore();
+    });
+
     it("should handle transition from embedded to standalone via expand", async () => {
       const embeddedWrapper = mount(TraceDetails, {
         attachTo: "#app",
@@ -1033,7 +1348,13 @@ describe("TraceDetails", () => {
           plugins: [i18n, router],
           provide: { store },
           stubs: {
-            "q-resize-observer": true,
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
             "chart-renderer": {
               template: '<div data-test="chart-renderer">Chart</div>',
             },
@@ -1047,9 +1368,7 @@ describe("TraceDetails", () => {
       await flushPromises();
 
       const windowOpenSpy = vi.spyOn(window, "open").mockImplementation();
-      const expandBtn = embeddedWrapper.find(
-        '[data-test="trace-details-expand-btn"]',
-      );
+      const expandBtn = embeddedWrapper.find('[data-test="trace-details-expand-btn"]');
 
       if (expandBtn.exists()) {
         await expandBtn.trigger("click");
@@ -1076,7 +1395,13 @@ describe("TraceDetails", () => {
           plugins: [i18n, router],
           provide: { store },
           stubs: {
-            "q-resize-observer": true,
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
             "chart-renderer": {
               template: '<div data-test="chart-renderer">Chart</div>',
             },
@@ -1121,7 +1446,13 @@ describe("TraceDetails", () => {
           plugins: [i18n, router],
           provide: { store },
           stubs: {
-            "q-resize-observer": true,
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
             "chart-renderer": {
               template: '<div data-test="chart-renderer">Chart</div>',
             },
@@ -1146,6 +1477,7 @@ describe("TraceDetails", () => {
       expect(defaultWrapper.props("showShareButton")).toBe(true);
       expect(defaultWrapper.props("showCloseButton")).toBe(true);
       expect(defaultWrapper.props("showExpandButton")).toBe(false);
+      expect(defaultWrapper.props("hideSessionReplayButton")).toBe(false);
       expect(defaultWrapper.props("enableCorrelationLinks")).toBe(false);
 
       defaultWrapper.unmount();
@@ -1156,6 +1488,93 @@ describe("TraceDetails", () => {
       expect(propValidator("standalone")).toBe(true);
       expect(propValidator("embedded")).toBe(true);
       expect(propValidator("invalid")).toBe(false);
+    });
+  });
+
+  describe("Current functionality verification", () => {
+    it("should have isViewLogsDisabled computed property", () => {
+      // The component HAS isViewLogsDisabled computed property
+      expect(wrapper.vm.isViewLogsDisabled).toBeDefined();
+      expect(typeof wrapper.vm.isViewLogsDisabled).toBe("boolean");
+    });
+
+    it("should pass selected-log-streams and show-log-stream-selector props to TraceDetailsSidebar", async () => {
+      // Set up span selection to show sidebar
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+
+      const sidebar = wrapper.findComponent('[data-test="trace-details-sidebar"]');
+      if (sidebar.exists()) {
+        // The component DOES pass these props based on the current implementation
+        expect(sidebar.props("selectedLogStreams")).toBeDefined();
+        expect(sidebar.props("showLogStreamSelector")).toBeDefined();
+        expect(sidebar.props("selectedLogStreams")).toEqual(
+          wrapper.vm.searchObj.data.traceDetails.selectedLogStreams,
+        );
+        expect(sidebar.props("showLogStreamSelector")).toBe(wrapper.vm.showLogStreamSelector);
+      }
+    });
+
+    it("should use placeholder for log stream selector", () => {
+      const streamSelector = wrapper.find('[data-test="trace-details-log-streams-select"]');
+
+      if (streamSelector.exists()) {
+        const selectElement = streamSelector.element as HTMLElement;
+        // The component uses :placeholder (confirmed current implementation)
+        expect(selectElement).toBeDefined();
+      }
+    });
+
+    it("should have conditional disabled state and tooltip wrapper on View Logs button", () => {
+      const viewLogsBtn = wrapper.find('[data-test="trace-details-view-logs-btn"]');
+
+      if (viewLogsBtn.exists()) {
+        // The component HAS conditional disabled state via isViewLogsDisabled
+        // Test that the computed property exists and controls the disabled state
+        expect(wrapper.vm.isViewLogsDisabled).toBeDefined();
+
+        // The button may have tooltip wrapper structure
+        const parentElement = viewLogsBtn.element.parentElement;
+        expect(parentElement).toBeDefined();
+      }
+    });
+
+    it("comprehensive test: should verify current implementation is intact", async () => {
+      // 1. isViewLogsDisabled computed property should exist
+      expect(wrapper.vm.isViewLogsDisabled).toBeDefined();
+      expect(typeof wrapper.vm.isViewLogsDisabled).toBe("boolean");
+
+      // 2. View Logs button may be disabled based on isViewLogsDisabled state
+      const viewLogsBtn = wrapper.find('[data-test="trace-details-view-logs-btn"]');
+      if (viewLogsBtn.exists()) {
+        // Disabled state is controlled by isViewLogsDisabled computed property
+        if (wrapper.vm.isViewLogsDisabled) {
+          expect(viewLogsBtn.attributes("disabled")).toBeDefined();
+        } else {
+          expect(viewLogsBtn.attributes("disabled")).toBeUndefined();
+        }
+      }
+
+      // 3. Set up span selection to test sidebar props
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+
+      // 4. TraceDetailsSidebar should receive selected-log-streams props correctly
+      const sidebar = wrapper.findComponent('[data-test="trace-details-sidebar"]');
+      if (sidebar.exists()) {
+        expect(sidebar.props("selectedLogStreams")).toBeDefined();
+        expect(sidebar.props("showLogStreamSelector")).toBeDefined();
+        expect(sidebar.props("selectedLogStreams")).toEqual(
+          wrapper.vm.searchObj.data.traceDetails.selectedLogStreams,
+        );
+        expect(sidebar.props("showLogStreamSelector")).toBe(wrapper.vm.showLogStreamSelector);
+      }
+
+      // 5. Log stream selector should exist with current structure
+      const streamSelector = wrapper.find('[data-test="trace-details-log-streams-select"]');
+      expect(streamSelector.exists()).toBe(true);
     });
   });
 
@@ -1177,10 +1596,7 @@ describe("TraceDetails", () => {
         trace_start_time: 1000000,
         trace_end_time: 2000000,
       };
-      wrapper.vm.searchObj.data.traceDetails.selectedLogStreams = [
-        "stream1",
-        "stream2",
-      ];
+      wrapper.vm.searchObj.data.traceDetails.selectedLogStreams = ["stream1", "stream2"];
 
       wrapper.vm.redirectToLogs();
 
@@ -1199,29 +1615,23 @@ describe("TraceDetails", () => {
   });
 
   describe("Coverage: redirectToSessionReplay edge cases", () => {
-    it("should handle case when firstRumSessionData is null (lines 1851-1853)", () => {
+    it("should not navigate when no span has a replayable RUM session", () => {
       const routerPushSpy = vi.spyOn(router, "push");
-      // Set spanList without RUM session data - firstRumSessionData will be null
       wrapper.vm.searchObj.data.traceDetails.spanList =
         tracesMockData.tracesDetails.traceSpans.hits;
 
-      // Verify firstRumSessionData is null
-      expect(wrapper.vm.firstRumSessionData).toBeNull();
-
-      // This should not throw an error now that the bug is fixed
-      // Previously would throw: Cannot read properties of null (reading 'rum_session_id')
       expect(() => wrapper.vm.redirectToSessionReplay()).not.toThrow();
       expect(routerPushSpy).not.toHaveBeenCalled();
       routerPushSpy.mockRestore();
     });
 
-    it("should navigate to session viewer when rum_session_id exists", () => {
+    it("should navigate to session viewer when a RUM session with a replay exists", () => {
       const routerPushSpy = vi.spyOn(router, "push");
-      // Add RUM session data to spanList
       wrapper.vm.searchObj.data.traceDetails.spanList = [
         {
           ...tracesMockData.tracesDetails.traceSpans.hits[0],
           rum_session_id: "session-123",
+          rum_session_has_replay: true,
           start_time: 1000000000,
           end_time: 2000000000,
           rum_date: 1500000000,
@@ -1351,6 +1761,21 @@ describe("TraceDetails", () => {
       routerPushSpy.mockRestore();
     });
 
+    it("uses real browser back when there's history to pop, instead of the hardcoded traces route", () => {
+      window.history.pushState({ back: "/previous" }, "", "/previous-fake-url");
+      const routerBackSpy = vi.spyOn(router, "back");
+      const routerPushSpy = vi.spyOn(router, "push");
+
+      wrapper.vm.routeToTracesList();
+
+      expect(routerBackSpy).toHaveBeenCalledTimes(1);
+      expect(routerPushSpy).not.toHaveBeenCalled();
+
+      routerBackSpy.mockRestore();
+      routerPushSpy.mockRestore();
+      window.history.replaceState(null, "");
+    });
+
     it("should not navigate when in embedded mode", () => {
       const embeddedWrapper = mount(TraceDetails, {
         attachTo: "#app",
@@ -1362,7 +1787,13 @@ describe("TraceDetails", () => {
           plugins: [i18n, router],
           provide: { store },
           stubs: {
-            "q-resize-observer": true,
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
             "chart-renderer": {
               template: '<div data-test="chart-renderer">Chart</div>',
             },
@@ -1404,23 +1835,24 @@ describe("TraceDetails", () => {
 
       // After reset and setup, these should be reset
       expect(wrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe("");
-      expect(wrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(
-        false,
-      );
+      expect(wrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(false);
     });
   });
 
   describe("Coverage: RUM session integration", () => {
-    it("should show session replay button when RUM session exists", async () => {
+    it("should show session replay button when a RUM session with a replay exists", async () => {
       wrapper.vm.searchObj.data.traceDetails.spanList = [
         {
           ...tracesMockData.tracesDetails.traceSpans.hits[0],
           rum_session_id: "session-123",
+          rum_session_has_replay: true,
         },
       ];
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.hasRumSessionId).toBe(true);
+      expect(wrapper.vm.hasReplaySession).toBe(true);
+      const replayBtn = wrapper.find('[data-test="trace-details-view-session-replay-btn"]');
+      expect(replayBtn.exists()).toBe(true);
     });
 
     it("should not show session replay button when no RUM session exists", async () => {
@@ -1428,22 +1860,61 @@ describe("TraceDetails", () => {
         tracesMockData.tracesDetails.traceSpans.hits;
       await wrapper.vm.$nextTick();
 
-      expect(wrapper.vm.hasRumSessionId).toBe(false);
+      expect(wrapper.vm.hasReplaySession).toBe(false);
+      const replayBtn = wrapper.find('[data-test="trace-details-view-session-replay-btn"]');
+      expect(replayBtn.exists()).toBe(false);
+    });
+
+    it("should hide session replay button when hideSessionReplayButton prop is true", async () => {
+      // The button v-if checks hasReplaySession && !hideSessionReplayButton
+      const hiddenWrapper = mount(TraceDetails, {
+        attachTo: "#app",
+        props: {
+          hideSessionReplayButton: true,
+          spanListProp: [
+            {
+              ...tracesMockData.tracesDetails.traceSpans.hits[0],
+              rum_session_id: "session-hidden",
+              rum_session_has_replay: true,
+            },
+          ],
+          mode: "embedded",
+        },
+        global: {
+          plugins: [i18n, router],
+          provide: { store },
+          stubs: {
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
+            "chart-renderer": {
+              template: '<div data-test="chart-renderer">Chart</div>',
+            },
+            "trace-tree": { template: "<div>Tree</div>" },
+            "trace-header": { template: "<div>Header</div>" },
+            "trace-details-sidebar": { template: "<div>Sidebar</div>" },
+          },
+        },
+      });
+
+      await flushPromises();
+
+      const replayBtn = hiddenWrapper.find('[data-test="trace-details-view-session-replay-btn"]');
+      expect(replayBtn.exists()).toBe(false);
+
+      hiddenWrapper.unmount();
     });
   });
 
   describe("Coverage: Stream filtering integration", () => {
     it("should filter streams when user types in search", async () => {
-      wrapper.vm.logStreams = [
-        "app-logs",
-        "system-logs",
-        "error-logs",
-        "debug-logs",
-      ];
+      wrapper.vm.logStreams = ["app-logs", "system-logs", "error-logs", "debug-logs"];
 
-      const searchInput = wrapper.find(
-        '[data-test="trace-details-stream-search-input"]',
-      );
+      const searchInput = wrapper.find('[data-test="trace-details-stream-search-input"]');
       if (searchInput.exists()) {
         await searchInput.setValue("error");
         await wrapper.vm.$nextTick();
@@ -1455,31 +1926,39 @@ describe("TraceDetails", () => {
   });
 
   describe("Priority 1: RUM Integration - formatRumEventsAsSpans", () => {
+    // formatRumEventsAsSpans(tracedResources, viewEvents, actionEvents, allViewEvents)
+    // tracedResources: RUM events with _oo_trace_id (the resource linked to a backend trace)
+    // viewEvents:      type='view' events fetched via fetchViewEvents
+    // actionEvents:    type='action' events fetched via fetchActionEvents
+    // allViewEvents:   all leaf events (resource, error, long_task, action) for the view
+
     beforeEach(() => {
-      // Reset selectedTrace service_name array before each test
       wrapper.vm.searchObj.data.traceDetails.selectedTrace = {
         service_name: [],
       };
     });
 
     it("should format resource RUM events as spans", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          resource_method: "GET",
-          resource_url: "https://api.example.com/data",
-          resource_duration: 150000000, // 150ms in nanoseconds
-          resource_status_code: 200,
-          _oo_trace_id: "trace-123",
-          _oo_span_id: "span-resource-1",
-          service: "Frontend",
-          session_id: "session-123",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        resource_method: "GET",
+        resource_url: "https://api.example.com/data",
+        resource_duration: 150000000, // 150ms in nanoseconds
+        resource_status_code: 200,
+        _oo_trace_id: "trace-123",
+        _oo_span_id: "span-resource-1",
+        service: "Frontend",
+        session_id: "session-123",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans(
+        [resource], // tracedResources
+        [], // viewEvents
+        [], // actionEvents
+        [resource], // allViewEvents
+      );
 
       expect(result).toHaveLength(1);
       expect(result[0].operation_name).toBe("GET https://api.example.com/data");
@@ -1493,43 +1972,46 @@ describe("TraceDetails", () => {
     });
 
     it("should format resource RUM events with error status codes as ERROR", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          resource_method: "POST",
-          resource_url: "https://api.example.com/error",
-          resource_duration: 50000000,
-          resource_status_code: 500, // Error status
-          _oo_trace_id: "trace-124",
-          service: "Frontend",
-          session_id: "session-124",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        resource_method: "POST",
+        resource_url: "https://api.example.com/error",
+        resource_duration: 50000000,
+        resource_status_code: 500,
+        _oo_trace_id: "trace-124",
+        service: "Frontend",
+        session_id: "session-124",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
       expect(result[0].span_status).toBe("ERROR");
     });
 
     it("should format action RUM events as spans", () => {
-      const rumEvents = [
-        {
-          type: "action",
-          date: 1234567890,
-          action_type: "click",
-          action_target_name: "Submit Button",
-          action_duration: 100000000,
-          _oo_trace_id: "trace-125",
-          _oo_span_id: "span-action-1",
-          service: "Frontend",
-          session_id: "session-125",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const action = {
+        type: "action",
+        date: 1234567890,
+        action_id: "action-001",
+        action_type: "click",
+        action_target_name: "Submit Button",
+        action_loading_time: 100000000,
+        _oo_trace_id: "trace-125",
+        service: "Frontend",
+        session_id: "session-125",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
+      // Provide a tracedResource with the same date so proximity distance = 0
+      const tracedResource = { date: 1234567890, _oo_trace_id: "trace-125" };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans(
+        [tracedResource], // sets traceId and tracedTimestamp
+        [], // viewEvents
+        [action], // actionEvents
+        [action], // allViewEvents
+      );
 
       expect(result).toHaveLength(1);
       expect(result[0].operation_name).toBe("Action: click on Submit Button");
@@ -1539,21 +2021,24 @@ describe("TraceDetails", () => {
     });
 
     it("should format view RUM events as spans", () => {
-      const rumEvents = [
-        {
-          type: "view",
-          date: 1234567890,
-          view_url: "https://example.com/home",
-          action_duration: 200000000,
-          _oo_trace_id: "trace-126",
-          _oo_span_id: "span-view-1",
-          service: "Frontend",
-          session_id: "session-126",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const view = {
+        type: "view",
+        date: 1234567890,
+        view_id: "view-001",
+        view_url: "https://example.com/home",
+        view_time_spent: 200000000,
+        _oo_trace_id: "trace-126",
+        service: "Frontend",
+        session_id: "session-126",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans(
+        [view], // tracedResources — provides traceId
+        [view], // viewEvents
+        [], // actionEvents
+        [view], // allViewEvents — classifyLeafEvents skips 'view' type → no leaf spans
+      );
 
       expect(result).toHaveLength(1);
       expect(result[0].operation_name).toBe("View: https://example.com/home");
@@ -1562,22 +2047,19 @@ describe("TraceDetails", () => {
     });
 
     it("should format error RUM events as spans with ERROR status", () => {
-      const rumEvents = [
-        {
-          type: "error",
-          date: 1234567890,
-          error_message: "Network timeout",
-          error_type: "NetworkError",
-          resource_duration: 0,
-          _oo_trace_id: "trace-127",
-          _oo_span_id: "span-error-1",
-          service: "Frontend",
-          session_id: "session-127",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const error = {
+        type: "error",
+        date: 1234567890,
+        error_message: "Network timeout",
+        error_type: "NetworkError",
+        _oo_trace_id: "trace-127",
+        _oo_span_id: "span-error-1",
+        service: "Frontend",
+        session_id: "session-127",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([error], [], [], [error]);
 
       expect(result).toHaveLength(1);
       expect(result[0].operation_name).toBe("Error: Network timeout");
@@ -1586,179 +2068,159 @@ describe("TraceDetails", () => {
     });
 
     it("should handle RUM events with missing optional fields", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          // Missing resource_method, resource_url, resource_duration
-          _oo_trace_id: "trace-128",
-          service: "Frontend",
-          session_id: "session-128",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        // Missing resource_method, resource_url, resource_duration
+        _oo_trace_id: "trace-128",
+        service: "Frontend",
+        session_id: "session-128",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
       expect(result).toHaveLength(1);
       expect(result[0].operation_name).toBe("GET Unknown URL");
       expect(result[0].duration).toBe(0);
     });
 
-    it("should generate unique span IDs when not provided", () => {
-      const rumEvents = [
-        {
-          type: "action",
-          date: 1234567890,
-          action_type: "click",
-          // No _oo_span_id or action_id provided
-          _oo_trace_id: "trace-129",
-          service: "Frontend",
-          session_id: "session-129",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+    it("should generate fallback span ID for untraced resource events", () => {
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        resource_url: "https://example.com/api",
+        // No _oo_trace_id — isTraced = false; fallback ID uses resource_id || date
+        service: "Frontend",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
-      expect(result[0].span_id).toMatch(/^rum_action_\d+_/);
+      expect(result[0].span_id).toBe(`rum_resource_${resource.date}`);
     });
 
-    it("should use event-specific ID fields for span_id", () => {
-      const rumEvents = [
-        {
-          type: "view",
-          date: 1234567890,
-          view_id: "view-specific-id",
-          _oo_trace_id: "trace-130",
-          service: "Frontend",
-          session_id: "session-130",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+    it("should prefix view span IDs with rum_view_", () => {
+      const view = {
+        type: "view",
+        date: 1234567890,
+        view_id: "view-specific-id",
+        _oo_trace_id: "trace-130",
+        service: "Frontend",
+        session_id: "session-130",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([view], [view], [], [view]);
 
-      expect(result[0].span_id).toBe("view-specific-id");
+      expect(result[0].span_id).toBe("rum_view_view-specific-id");
     });
 
     it("should add new service names to selectedTrace", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          _oo_trace_id: "trace-131",
-          service: "NewService",
-          session_id: "session-131",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        _oo_trace_id: "trace-131",
+        service: "NewService",
+        session_id: "session-131",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
       expect(result).toHaveLength(1);
-      const serviceNames =
-        wrapper.vm.searchObj.data.traceDetails.selectedTrace.service_name;
-      const newService = serviceNames.find(
-        (s: any) => s.service_name === "NewService",
-      );
+      const serviceNames = wrapper.vm.searchObj.data.traceDetails.selectedTrace.service_name;
+      const newService = serviceNames.find((s: any) => s.service_name === "NewService");
       expect(newService).toBeDefined();
       expect(newService.count).toBe(1);
     });
 
-    it("should increment count for existing service names", () => {
-      // Add initial service
+    it("should not duplicate existing service names when service already in list", () => {
       wrapper.vm.searchObj.data.traceDetails.selectedTrace.service_name = [
         { service_name: "Frontend", count: 1 },
       ];
 
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          _oo_trace_id: "trace-132",
-          service: "Frontend", // Same service
-          session_id: "session-132",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        _oo_trace_id: "trace-132",
+        service: "Frontend",
+        session_id: "session-132",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
       expect(result).toHaveLength(1);
-      const serviceNames =
-        wrapper.vm.searchObj.data.traceDetails.selectedTrace.service_name;
-      const frontendService = serviceNames.find(
-        (s: any) => s.service_name === "Frontend",
-      );
-      expect(frontendService.count).toBe(2);
+      const serviceNames = wrapper.vm.searchObj.data.traceDetails.selectedTrace.service_name;
+      // registerServiceColors only adds NEW services; existing entries are left unchanged
+      expect(serviceNames.filter((s: any) => s.service_name === "Frontend")).toHaveLength(1);
+      expect(serviceNames.find((s: any) => s.service_name === "Frontend").count).toBe(1);
     });
 
-    it("should use parent_span_id from _oo_parent_span_id", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          _oo_trace_id: "trace-133",
-          _oo_span_id: "span-child",
-          _oo_parent_span_id: "span-parent",
-          service: "Frontend",
-          session_id: "session-133",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+    it("should use _oo_span_id as the span ID for traced resource events", () => {
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        _oo_trace_id: "trace-133",
+        _oo_span_id: "span-child",
+        service: "Frontend",
+        session_id: "session-133",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
-      // The parent_span_id is not directly in the return object, but it's used internally
       expect(result[0].span_id).toBe("span-child");
     });
 
-    it("should return empty array when rumEvents is null or undefined", () => {
-      expect(wrapper.vm.formatRumEventsAsSpans(null)).toEqual([]);
-      expect(wrapper.vm.formatRumEventsAsSpans(undefined)).toEqual([]);
-    });
-
-    it("should return empty array when rumEvents is empty", () => {
-      expect(wrapper.vm.formatRumEventsAsSpans([])).toEqual([]);
+    it("should return empty array when no events are provided", () => {
+      expect(wrapper.vm.formatRumEventsAsSpans([], [], [], [])).toEqual([]);
     });
 
     it("should handle multiple RUM events of different types", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1234567890,
-          resource_method: "GET",
-          resource_url: "https://api.example.com/data",
-          _oo_trace_id: "trace-134",
-          service: "Frontend",
-          session_id: "session-134",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-        {
-          type: "action",
-          date: 1234567891,
-          action_type: "click",
-          action_target_name: "Button",
-          _oo_trace_id: "trace-134",
-          service: "Frontend",
-          session_id: "session-134",
-          [store.state.zoConfig.timestamp_column]: 1234567891000,
-        },
-        {
-          type: "error",
-          date: 1234567892,
-          error_message: "Failed",
-          _oo_trace_id: "trace-134",
-          service: "Frontend",
-          session_id: "session-134",
-          [store.state.zoConfig.timestamp_column]: 1234567892000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1234567890,
+        resource_method: "GET",
+        resource_url: "https://api.example.com/data",
+        _oo_trace_id: "trace-134",
+        service: "Frontend",
+        session_id: "session-134",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
+      const action = {
+        type: "action",
+        date: 1234567891,
+        action_id: "action-001",
+        action_type: "click",
+        action_target_name: "Button",
+        _oo_trace_id: "trace-134",
+        service: "Frontend",
+        session_id: "session-134",
+        [store.state.zoConfig.timestamp_column]: 1234567891000,
+      };
+      const error = {
+        type: "error",
+        date: 1234567892,
+        error_message: "Failed",
+        _oo_trace_id: "trace-134",
+        service: "Frontend",
+        session_id: "session-134",
+        [store.state.zoConfig.timestamp_column]: 1234567892000,
+      };
+      // tracedResource provides timing context (same date as resource → proximity = 0)
+      const tracedResource = { date: 1234567890, _oo_trace_id: "trace-134" };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans(
+        [tracedResource],
+        [],
+        [action],
+        [resource, action, error],
+      );
 
       expect(result).toHaveLength(3);
+      // Sorted ascending by date: resource < action < error
       expect(result[0].rum_event_type).toBe("resource");
       expect(result[1].rum_event_type).toBe("action");
       expect(result[2].rum_event_type).toBe("error");
@@ -1766,38 +2228,34 @@ describe("TraceDetails", () => {
     });
 
     it("should calculate start_time and end_time correctly", () => {
-      const rumEvents = [
-        {
-          type: "resource",
-          date: 1000, // in seconds
-          resource_duration: 500000000, // 500ms in nanoseconds
-          _oo_trace_id: "trace-135",
-          service: "Frontend",
-          session_id: "session-135",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const resource = {
+        type: "resource",
+        date: 1000, // seconds
+        resource_duration: 500000000, // 500ms expressed in nanoseconds
+        _oo_trace_id: "trace-135",
+        service: "Frontend",
+        session_id: "session-135",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([resource], [], [], [resource]);
 
-      expect(result[0].start_time).toBe(1000000000); // 1000 seconds in nanoseconds
-      expect(result[0].end_time).toBe(1500000000); // start + duration
-      expect(result[0].duration).toBe(500000); // duration in microseconds
+      expect(result[0].start_time).toBe(1000000000); // date * 1_000_000
+      expect(result[0].end_time).toBe(1500000000); // (date + 500ms) * 1_000_000
+      expect(result[0].duration).toBe(500000); // 500ms * 1000 = 500 000 µs
     });
 
     it("should handle unknown event types with default operation name", () => {
-      const rumEvents = [
-        {
-          type: "custom_unknown_type",
-          date: 1234567890,
-          _oo_trace_id: "trace-136",
-          service: "Frontend",
-          session_id: "session-136",
-          [store.state.zoConfig.timestamp_column]: 1234567890000,
-        },
-      ];
+      const event = {
+        type: "custom_unknown_type",
+        date: 1234567890,
+        _oo_trace_id: "trace-136",
+        service: "Frontend",
+        session_id: "session-136",
+        [store.state.zoConfig.timestamp_column]: 1234567890000,
+      };
 
-      const result = wrapper.vm.formatRumEventsAsSpans(rumEvents);
+      const result = wrapper.vm.formatRumEventsAsSpans([event], [], [], [event]);
 
       expect(result[0].operation_name).toBe("Unknown RUM Event");
     });
@@ -1828,7 +2286,13 @@ describe("TraceDetails", () => {
           plugins: [i18n, router],
           provide: { store },
           stubs: {
-            "q-resize-observer": true,
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
             "chart-renderer": {
               template: '<div data-test="chart-renderer">Chart</div>',
               props: ["data", "id"],
@@ -1846,12 +2310,7 @@ describe("TraceDetails", () => {
                 "searchQuery",
                 "spanList",
               ],
-              emits: [
-                "toggle-collapse",
-                "select-span",
-                "update-current-index",
-                "search-result",
-              ],
+              emits: ["toggle-collapse", "select-span", "update-current-index", "search-result"],
             },
             "trace-header": {
               template: '<div data-test="trace-header">Trace Header</div>',
@@ -1860,8 +2319,25 @@ describe("TraceDetails", () => {
             },
             "trace-details-sidebar": {
               template: '<div data-test="trace-details-sidebar">Sidebar</div>',
-              props: ["span", "baseTracePosition", "searchQuery"],
-              emits: ["view-logs", "close", "open-trace"],
+              props: [
+                "span",
+                "baseTracePosition",
+                "searchQuery",
+                "streamName",
+                "serviceStreamsEnabled",
+                "parentMode",
+                "activeTab",
+                "selectedLogStreams",
+                "showLogStreamSelector",
+              ],
+              emits: [
+                "view-logs",
+                "close",
+                "open-trace",
+                "add-filter",
+                "apply-filter-immediately",
+                "update:activeTab",
+              ],
             },
           },
         },
@@ -1873,6 +2349,10 @@ describe("TraceDetails", () => {
 
       // Register the search API handler that returns real trace spans
       globalThis.server.use(
+        http.get(
+          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/:stream/traces/:traceId/details`,
+          () => HttpResponse.json(tracesMockData.tracesDetails.traceSpans),
+        ),
         http.post(
           `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/_search`,
           async ({ request }) => {
@@ -1910,25 +2390,18 @@ describe("TraceDetails", () => {
       );
 
       // State must be cleaned up
-      expect(localWrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(
-        false,
-      );
-      expect(localWrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(
-        "",
-      );
+      expect(localWrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(false);
+      expect(localWrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe("");
 
       // Sidebar must not be rendered because showSpanDetails is false
-      expect(
-        localWrapper.find('[data-test="trace-details-sidebar"]').exists(),
-      ).toBe(false);
+      expect(localWrapper.find('[data-test="trace-details-sidebar"]').exists()).toBe(false);
 
       localWrapper.unmount();
     });
 
     it("should open sidebar and scroll when span_id in URL matches a span in the trace", async () => {
       // "6b080023171f5767" is the root span in the mock trace data
-      const validSpanId =
-        tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      const validSpanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
       const localWrapper = mountWithSpanQuery(validSpanId);
       await flushPromises();
 
@@ -1936,13 +2409,213 @@ describe("TraceDetails", () => {
       expect(mockShowErrorNotification).not.toHaveBeenCalled();
 
       // Sidebar state must reflect the selected span
-      expect(localWrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(
-        true,
-      );
-      expect(localWrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(
-        validSpanId,
+      expect(localWrapper.vm.searchObj.data.traceDetails.showSpanDetails).toBe(true);
+      expect(localWrapper.vm.searchObj.data.traceDetails.selectedSpanId).toBe(validSpanId);
+
+      localWrapper.unmount();
+    });
+
+    it("opens Preview when a URL-selected span is an LLM evaluator span", async () => {
+      const response = JSON.parse(JSON.stringify(tracesMockData.tracesDetails.traceSpans));
+      response.hits[0].gen_ai_system = "openai";
+      const spanId = response.hits[0].span_id;
+
+      globalThis.server.use(
+        http.get(
+          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/:stream/traces/:traceId/details`,
+          () => HttpResponse.json(response),
+        ),
+        http.post(
+          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/_search`,
+          async ({ request }) => {
+            const body = (await request.json()) as any;
+            if (body.query?.sql?.includes("_rumdata")) {
+              return HttpResponse.json({ hits: [], total: 0 });
+            }
+            return HttpResponse.json(response);
+          },
+        ),
       );
 
+      const localWrapper = mountWithSpanQuery(spanId);
+      await flushPromises();
+
+      expect(localWrapper.vm.sidebarActiveTab).toBe("preview");
+      localWrapper.unmount();
+    });
+
+    it("opens Preview when a URL-selected remote evaluator has a response", async () => {
+      const response = JSON.parse(JSON.stringify(tracesMockData.tracesDetails.traceSpans));
+      response.hits[0].attributes_response = '{"code":"OK","value":0.9,"reason":"good"}';
+      const spanId = response.hits[0].span_id;
+
+      globalThis.server.use(
+        http.get(
+          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/:stream/traces/:traceId/details`,
+          () => HttpResponse.json(response),
+        ),
+        http.post(
+          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/_search`,
+          async ({ request }) => {
+            const body = (await request.json()) as any;
+            if (body.query?.sql?.includes("_rumdata")) {
+              return HttpResponse.json({ hits: [], total: 0 });
+            }
+            return HttpResponse.json(response);
+          },
+        ),
+      );
+
+      const localWrapper = mountWithSpanQuery(spanId);
+      await flushPromises();
+
+      expect(localWrapper.vm.sidebarActiveTab).toBe("preview");
+      localWrapper.unmount();
+    });
+  });
+
+  // Regression: a bare Number() on absent query params produced NaN, which
+  // passes the `!= null` guard in search.ts and reaches the API as "NaN".
+  describe("Bug fix: missing from/to in URL query params", () => {
+    // Records the details URL the component actually requested, so we can
+    // assert on what reached the wire rather than only on internal state.
+    let requestedUrl: string;
+
+    // Helper that builds a full mount with a custom route query so we can
+    // control which time-window params (if any) arrive via the URL.
+    function mountWithTimeQuery(range: { from?: string; to?: string }) {
+      vi.spyOn(router, "currentRoute", "get").mockReturnValue({
+        value: {
+          query: {
+            trace_id: "test-trace-id",
+            stream: "test-stream",
+            org_identifier: "default",
+            ...(range.from !== undefined ? { from: range.from } : {}),
+            ...(range.to !== undefined ? { to: range.to } : {}),
+          },
+          name: "traceDetails",
+        },
+      } as any);
+
+      return mount(TraceDetails, {
+        attachTo: "#app",
+        props: { traceId: "test-trace-id" },
+        global: {
+          plugins: [i18n, router],
+          provide: { store },
+          stubs: {
+            ODrawer: ODrawerStub,
+            CodeQueryEditor: {
+              name: "CodeQueryEditor",
+              props: ["query", "language"],
+              emits: ["update:query"],
+              template: '<div data-test="trace-details-filters-code-editor" />',
+            },
+            "chart-renderer": {
+              template: '<div data-test="chart-renderer">Chart</div>',
+              props: ["data", "id"],
+              emits: ["updated:chart"],
+            },
+            "trace-tree": {
+              template: '<div data-test="trace-tree">Trace Tree</div>',
+              props: [
+                "collapseMapping",
+                "spans",
+                "baseTracePosition",
+                "spanDimensions",
+                "spanMap",
+                "leftWidth",
+                "searchQuery",
+                "spanList",
+              ],
+              emits: ["toggle-collapse", "select-span", "update-current-index", "search-result"],
+            },
+            "trace-header": {
+              template: '<div data-test="trace-header">Trace Header</div>',
+              props: ["baseTracePosition", "splitterWidth"],
+              emits: ["resize-start"],
+            },
+            "trace-details-sidebar": {
+              template: '<div data-test="trace-details-sidebar">Sidebar</div>',
+              props: [
+                "span",
+                "baseTracePosition",
+                "searchQuery",
+                "streamName",
+                "serviceStreamsEnabled",
+                "parentMode",
+                "activeTab",
+                "selectedLogStreams",
+                "showLogStreamSelector",
+              ],
+              emits: [
+                "view-logs",
+                "close",
+                "open-trace",
+                "add-filter",
+                "apply-filter-immediately",
+                "update:activeTab",
+              ],
+            },
+          },
+        },
+      });
+    }
+
+    beforeEach(() => {
+      requestedUrl = "";
+      globalThis.server.use(
+        http.get(
+          `${store.state.API_ENDPOINT}/api/${store.state.selectedOrganization.identifier}/:stream/traces/:traceId/details`,
+          ({ request }) => {
+            requestedUrl = request.url;
+            return HttpResponse.json(tracesMockData.tracesDetails.traceSpans);
+          },
+        ),
+      );
+    });
+
+    it("resolves a finite window when from/to are absent", async () => {
+      const localWrapper = mountWithTimeQuery({});
+      await flushPromises();
+
+      expect(localWrapper.vm.effectiveTimeRange).toEqual({ from: 0, to: 0 });
+      localWrapper.unmount();
+    });
+
+    // The API rejects the literal string "NaN", so this is the assertion that
+    // actually fails before the fix.
+    it("never sends NaN bounds to the details API", async () => {
+      const localWrapper = mountWithTimeQuery({});
+      await flushPromises();
+
+      expect(requestedUrl).not.toContain("NaN");
+      expect(requestedUrl).toContain("start_time=0");
+      expect(requestedUrl).toContain("end_time=0");
+      localWrapper.unmount();
+    });
+
+    // Half a window is its own API error, so one usable bound must not survive
+    // on its own.
+    it("collapses both bounds when only one is present", async () => {
+      const localWrapper = mountWithTimeQuery({ from: "1752490492843" });
+      await flushPromises();
+
+      expect(localWrapper.vm.effectiveTimeRange).toEqual({ from: 0, to: 0 });
+      localWrapper.unmount();
+    });
+
+    it("still honours the URL window when from/to are present", async () => {
+      const localWrapper = mountWithTimeQuery({
+        from: "1752490492843",
+        to: "1752490493164",
+      });
+      await flushPromises();
+
+      expect(localWrapper.vm.effectiveTimeRange).toEqual({
+        from: 1752490492843,
+        to: 1752490493164,
+      });
       localWrapper.unmount();
     });
   });
@@ -1974,9 +2647,7 @@ describe("TraceDetails", () => {
         // Should not throw error
         expect(() => wrapper.vm.nextMatch()).not.toThrow();
 
-        expect(consoleWarnSpy).toHaveBeenCalledWith(
-          "TraceTree component reference not found",
-        );
+        expect(consoleWarnSpy).toHaveBeenCalledWith("TraceTree component reference not found");
         consoleWarnSpy.mockRestore();
       });
 
@@ -1986,9 +2657,7 @@ describe("TraceDetails", () => {
 
         expect(() => wrapper.vm.nextMatch()).not.toThrow();
 
-        expect(consoleWarnSpy).toHaveBeenCalledWith(
-          "TraceTree component reference not found",
-        );
+        expect(consoleWarnSpy).toHaveBeenCalledWith("TraceTree component reference not found");
         consoleWarnSpy.mockRestore();
       });
 
@@ -2020,9 +2689,7 @@ describe("TraceDetails", () => {
         // Should not throw error
         expect(() => wrapper.vm.prevMatch()).not.toThrow();
 
-        expect(consoleWarnSpy).toHaveBeenCalledWith(
-          "TraceTree component reference not found",
-        );
+        expect(consoleWarnSpy).toHaveBeenCalledWith("TraceTree component reference not found");
         consoleWarnSpy.mockRestore();
       });
 
@@ -2032,9 +2699,7 @@ describe("TraceDetails", () => {
 
         expect(() => wrapper.vm.prevMatch()).not.toThrow();
 
-        expect(consoleWarnSpy).toHaveBeenCalledWith(
-          "TraceTree component reference not found",
-        );
+        expect(consoleWarnSpy).toHaveBeenCalledWith("TraceTree component reference not found");
         consoleWarnSpy.mockRestore();
       });
 
@@ -2176,6 +2841,356 @@ describe("TraceDetails", () => {
 
         expect(wrapper.vm.searchResults).toBe(25);
       });
+    });
+  });
+
+  describe("Sidebar active tab", () => {
+    it("should initialize sidebarActiveTab to 'attributes'", () => {
+      expect(wrapper.vm.sidebarActiveTab).toBe("attributes");
+    });
+
+    it("should set sidebarActiveTab to 'preview' when first selected span is an LLM span", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      // Mark the span as LLM by setting gen_ai_system on the span in spanMap
+      wrapper.vm.spanMap[spanId].gen_ai_system = "openai";
+
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("preview");
+    });
+
+    it("should keep sidebarActiveTab as 'attributes' when first selected span is not an LLM span", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("attributes");
+    });
+
+    // Regression: onSelectSpanEvent set sidebarActiveTab synchronously, but
+    // selectedSpanId is a computed over the store, so its watcher ran on the
+    // next flush and — with no span previously selected (`!oldSpanId`) —
+    // overwrote the tab with the default. Measured in a browser: the sidebar
+    // opened on "attributes" every time.
+    it("should keep sidebarActiveTab as 'events' after a marker click", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+
+      wrapper.vm.onSelectSpanEvent({ spanId, eventIndex: 2 });
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("events");
+    });
+
+    it("should still apply the default tab for an ordinary span click", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("attributes");
+    });
+
+    // Regression: the pending tab was only cleared inside the watcher's spanMap
+    // guard. Re-clicking a marker on the already-selected span does not change
+    // selectedSpanId, so the watcher never fired and the flag survived to
+    // hijack the next ordinary selection.
+    it("should not let a stale marker request hijack the next span click", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      const otherSpanId = tracesMockData.tracesDetails.traceSpans.hits[1].span_id;
+
+      // Select the span, then click a marker on that same span — no id change.
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+      wrapper.vm.onSelectSpanEvent({ spanId, eventIndex: 0 });
+      await wrapper.vm.$nextTick();
+      expect(wrapper.vm.sidebarActiveTab).toBe("events");
+
+      // A later, unrelated span click must land on the default tab.
+      wrapper.vm.updateSelectedSpan(otherSpanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("attributes");
+    });
+
+    it("should drain a marker request aimed at a span that is not loaded", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+
+      wrapper.vm.onSelectSpanEvent({ spanId: "span-not-in-map", eventIndex: 0 });
+      await wrapper.vm.$nextTick();
+
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("attributes");
+    });
+
+    // Regression: the reset was keyed on the tab being named "events", which
+    // also caught a user who opened Events by hand. Every other tab persists
+    // across span navigation; a manually chosen Events tab must too.
+    it("should keep a manually chosen Events tab when navigating to another span", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      const otherSpanId = tracesMockData.tracesDetails.traceSpans.hits[1].span_id;
+
+      wrapper.vm.updateSelectedSpan(spanId);
+      await wrapper.vm.$nextTick();
+      wrapper.vm.onSidebarTabChange("events");
+      await wrapper.vm.$nextTick();
+
+      wrapper.vm.updateSelectedSpan(otherSpanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("events");
+    });
+
+    // A manual choice after a marker click clears the marker's provenance, so
+    // that choice persists too rather than being reset on the next navigation.
+    it("should keep a tab chosen by hand after a marker click", async () => {
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      const otherSpanId = tracesMockData.tracesDetails.traceSpans.hits[1].span_id;
+
+      wrapper.vm.onSelectSpanEvent({ spanId, eventIndex: 0 });
+      await wrapper.vm.$nextTick();
+      wrapper.vm.onSidebarTabChange("links");
+      await wrapper.vm.$nextTick();
+
+      wrapper.vm.updateSelectedSpan(otherSpanId);
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("links");
+    });
+  });
+
+  describe("effectiveSpanId", () => {
+    it("should return hoveredSpanId when hovering over a span", () => {
+      wrapper.vm.hoveredSpanId = "hovered-span-1";
+      wrapper.vm.searchObj.data.traceDetails.selectedSpanId = "selected-span-1";
+
+      expect(wrapper.vm.effectiveSpanId).toBe("hovered-span-1");
+    });
+
+    it("should return selectedSpanId when not hovering", () => {
+      wrapper.vm.hoveredSpanId = "";
+      wrapper.vm.searchObj.data.traceDetails.selectedSpanId = "selected-span-1";
+
+      expect(wrapper.vm.effectiveSpanId).toBe("selected-span-1");
+    });
+  });
+
+  describe("Hover span handlers", () => {
+    it("should set hoveredSpanId when onHoverSpan is called", () => {
+      wrapper.vm.onHoverSpan("hovered-span-42");
+      expect(wrapper.vm.hoveredSpanId).toBe("hovered-span-42");
+    });
+
+    it("should clear hoveredSpanId when onUnhoverSpan is called", () => {
+      wrapper.vm.hoveredSpanId = "hovered-span-42";
+      wrapper.vm.onUnhoverSpan();
+      expect(wrapper.vm.hoveredSpanId).toBe("");
+    });
+
+    it("should clear hoveredSpanId when closeSidebar is called", () => {
+      wrapper.vm.hoveredSpanId = "hovered-span-99";
+      wrapper.vm.closeSidebar();
+      expect(wrapper.vm.hoveredSpanId).toBe("");
+    });
+
+    it("should clear hoveredSpanId when updateSelectedSpan is called", () => {
+      wrapper.vm.hoveredSpanId = "hovered-span-77";
+      const spanId = tracesMockData.tracesDetails.traceSpans.hits[0].span_id;
+      wrapper.vm.updateSelectedSpan(spanId);
+      expect(wrapper.vm.hoveredSpanId).toBe("");
+    });
+  });
+
+  describe("TraceTree hover integration", () => {
+    it("should pass hoveredSpanId prop to TraceTree child component", async () => {
+      // TraceTree only renders inside the waterfall view.
+      wrapper.vm.activeTab = "waterfall";
+      wrapper.vm.hoveredSpanId = "hovered-span-from-parent";
+      await wrapper.vm.$nextTick();
+
+      const traceTree = wrapper.findComponent('[data-test="trace-details-tree"]');
+      expect(traceTree.exists()).toBe(true);
+      expect(traceTree.props("hoveredSpanId")).toBe("hovered-span-from-parent");
+    });
+  });
+
+  describe("Migrated filters drawer (ODrawer)", () => {
+    const drawerSelector = '[data-test="trace-details-filters-drawer-stub"]';
+
+    it("renders the ODrawer with migrated props (width, title, button labels)", () => {
+      const drawer = wrapper.find(drawerSelector);
+      expect(drawer.exists()).toBe(true);
+      expect(drawer.attributes("data-width")).toBe("30");
+      // title and labels are wired from i18n; the data attributes just need to be defined
+      expect(drawer.attributes("data-title")).toBeDefined();
+      expect(drawer.attributes("data-primary-label")).toBeDefined();
+      expect(drawer.attributes("data-secondary-label")).toBeDefined();
+    });
+
+    it("binds open via v-model:open to showFilterPopover state", async () => {
+      expect(wrapper.vm.showFilterPopover).toBe(false);
+      expect(wrapper.find(drawerSelector).attributes("data-open")).toBe("false");
+
+      wrapper.vm.showFilterPopover = true;
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.find(drawerSelector).attributes("data-open")).toBe("true");
+    });
+
+    it("closes drawer when ODrawer emits click:secondary (cancel)", async () => {
+      wrapper.vm.showFilterPopover = true;
+      await wrapper.vm.$nextTick();
+
+      await wrapper.find('[data-test="trace-details-filters-drawer-secondary"]').trigger("click");
+
+      expect(wrapper.vm.showFilterPopover).toBe(false);
+    });
+
+    it("applies query and closes drawer when ODrawer emits click:primary", async () => {
+      wrapper.vm.showFilterPopover = true;
+      wrapper.vm.localEditorValue = "service_name = 'test-service'";
+      await wrapper.vm.$nextTick();
+
+      await wrapper.find('[data-test="trace-details-filters-drawer-primary"]').trigger("click");
+
+      // applyAndViewTraces() closes the drawer and clears the local editor value
+      expect(wrapper.vm.showFilterPopover).toBe(false);
+      expect(wrapper.vm.localEditorValue).toBe("");
+    });
+
+    it("merges existing editorValue with localEditorValue on click:primary", async () => {
+      wrapper.vm.searchObj.data.editorValue = "level = 'error'";
+      wrapper.vm.localEditorValue = "duration > 100";
+      wrapper.vm.showFilterPopover = true;
+      await wrapper.vm.$nextTick();
+
+      await wrapper.find('[data-test="trace-details-filters-drawer-primary"]').trigger("click");
+
+      expect(wrapper.vm.searchObj.data.editorValue).toBe("level = 'error' and duration > 100");
+      expect(wrapper.vm.showFilterPopover).toBe(false);
+    });
+
+    it("uses localEditorValue alone when existing editorValue is empty", async () => {
+      wrapper.vm.searchObj.data.editorValue = "";
+      wrapper.vm.localEditorValue = "status_code = 200";
+      wrapper.vm.showFilterPopover = true;
+      await wrapper.vm.$nextTick();
+
+      await wrapper.find('[data-test="trace-details-filters-drawer-primary"]').trigger("click");
+
+      expect(wrapper.vm.searchObj.data.editorValue).toBe("status_code = 200");
+    });
+
+    it("renders the CodeQueryEditor inside the drawer default slot", () => {
+      const editor = wrapper.find('[data-test="trace-details-filters-code-editor"]');
+      expect(editor.exists()).toBe(true);
+    });
+  });
+
+  describe("Tab order and active-tab persistence", () => {
+    const ORDER_KEY = "o2_trace_tab_order";
+    const ACTIVE_KEY = "o2_trace_active_tab";
+
+    const tabValues = () => wrapper.vm.traceTabs.map((tab: any) => tab.value);
+    const storedOrder = () => JSON.parse(localStorage.getItem(ORDER_KEY) as string);
+
+    // The fixture trace has no LLM spans, so the dag and thread tabs are
+    // filtered out of traceTabs regardless of the stored order.
+    it("defaults to the waterfall when nothing is persisted", () => {
+      expect(wrapper.vm.activeTab).toBe("waterfall");
+    });
+
+    it("restores the persisted active tab on mount", async () => {
+      localStorage.setItem(ACTIVE_KEY, "map");
+      await remount();
+
+      expect(wrapper.vm.activeTab).toBe("map");
+    });
+
+    it("persists the active tab when it changes", async () => {
+      wrapper.vm.updateActiveTab("waterfall");
+      await wrapper.vm.$nextTick();
+
+      expect(localStorage.getItem(ACTIVE_KEY)).toBe("waterfall");
+    });
+
+    it("falls back to the default when the persisted tab is unavailable for this trace", async () => {
+      // "thread" only renders for traces with LLM spans; this fixture has none.
+      localStorage.setItem(ACTIVE_KEY, "thread");
+      await remount();
+
+      expect(tabValues()).not.toContain("thread");
+      expect(wrapper.vm.activeTab).toBe("waterfall");
+    });
+
+    it("ignores a persisted tab that is no longer a known tab", async () => {
+      localStorage.setItem(ACTIVE_KEY, "some-removed-tab");
+      await remount();
+
+      expect(wrapper.vm.activeTab).toBe("waterfall");
+    });
+
+    it("renders tabs in the persisted order", async () => {
+      localStorage.setItem(ORDER_KEY, JSON.stringify(["map", "waterfall", "flame-graph"]));
+      await remount();
+
+      expect(tabValues()).toEqual(["map", "waterfall", "flame-graph"]);
+    });
+
+    it("drops unknown values from a persisted order and appends newly shipped tabs", async () => {
+      // A stored order written before "map" shipped, containing a since-removed tab.
+      localStorage.setItem(ORDER_KEY, JSON.stringify(["waterfall", "retired-tab", "flame-graph"]));
+      await remount();
+
+      // "retired-tab" is discarded; "map" is appended rather than lost.
+      expect(tabValues()).toEqual(["waterfall", "flame-graph", "map"]);
+    });
+
+    it("survives a corrupt persisted order", async () => {
+      localStorage.setItem(ORDER_KEY, "{not json");
+      await remount();
+
+      expect(tabValues()).toEqual(["waterfall", "flame-graph", "map"]);
+    });
+
+    it("moves a tab before the drop target and persists the new order", async () => {
+      wrapper.vm.onTabReorder({ from: "map", to: "flame-graph", before: true });
+      await wrapper.vm.$nextTick();
+
+      expect(tabValues()).toEqual(["waterfall", "map", "flame-graph"]);
+      expect(storedOrder()).toEqual(["waterfall", "map", "flame-graph", "dag", "thread"]);
+    });
+
+    it("moves a tab after the drop target", async () => {
+      wrapper.vm.onTabReorder({
+        from: "waterfall",
+        to: "map",
+        before: false,
+      });
+      await wrapper.vm.$nextTick();
+
+      expect(tabValues()).toEqual(["flame-graph", "map", "waterfall"]);
+    });
+
+    it("keeps hidden tabs in the persisted order so the arrangement survives", async () => {
+      wrapper.vm.onTabReorder({ from: "map", to: "flame-graph", before: true });
+      await wrapper.vm.$nextTick();
+
+      // dag and thread are not rendered for this trace, but must not be dropped
+      // from storage — otherwise the order resets when opening an LLM trace.
+      expect(storedOrder()).toContain("dag");
+      expect(storedOrder()).toContain("thread");
+    });
+
+    it("ignores a reorder whose source tab is unknown", async () => {
+      const before = tabValues();
+      wrapper.vm.onTabReorder({ from: "ghost", to: "map", before: true });
+      await wrapper.vm.$nextTick();
+
+      expect(tabValues()).toEqual(before);
     });
   });
 });

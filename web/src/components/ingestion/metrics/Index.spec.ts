@@ -1,11 +1,8 @@
-import { mount } from "@vue/test-utils";
+import { mount, flushPromises } from "@vue/test-utils";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import IngestMetrics from "@/components/ingestion/metrics/Index.vue";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
-
-installQuasar();
 
 // Mock services
 vi.mock("@/services/segment_analytics", () => ({
@@ -26,6 +23,11 @@ vi.mock("../../../aws-exports", () => ({
   },
 }));
 
+// Mock clipboard utility
+vi.mock("@/utils/clipboard", () => ({
+  copyToClipboard: vi.fn().mockResolvedValue(true),
+}));
+
 // Mock router
 const mockRouter = {
   currentRoute: {
@@ -39,21 +41,8 @@ const mockRouter = {
 
 vi.mock("vue-router", () => ({
   useRouter: () => mockRouter,
+  useRoute: () => mockRouter.currentRoute.value,
 }));
-
-// Mock Quasar
-const mockQuasar = {
-  notify: vi.fn(),
-};
-
-vi.mock("quasar", async (importOriginal) => {
-  const actual = await importOriginal();
-  return {
-    ...actual,
-    useQuasar: () => mockQuasar,
-    copyToClipboard: vi.fn(),
-  };
-});
 
 // Helper to build mount options
 function buildMountOptions() {
@@ -67,12 +56,11 @@ function buildMountOptions() {
         store,
       },
       stubs: {
-        "q-splitter": {
-          template:
-            '<div><slot name="before"></slot><slot name="after"></slot></div>',
+        OSplitter: {
+          template: '<div><slot name="before"></slot><slot name="after"></slot></div>',
         },
-        "q-tabs": true,
-        "q-route-tab": true,
+        OTabs: true,
+        ORouteTab: true,
         "router-view": true,
       },
     },
@@ -108,10 +96,6 @@ describe("IngestMetrics Component", () => {
 
     it("should have the correct component name", () => {
       expect(wrapper.vm.$options.name).toBe("IngestMetrics");
-    });
-
-    it("should initialise splitterModel to 250", () => {
-      expect(wrapper.vm.splitterModel).toBe(250);
     });
 
     it("should expose currentUserEmail from the store", () => {
@@ -150,12 +134,11 @@ describe("IngestMetrics Component", () => {
           plugins: [i18n],
           provide: { store },
           stubs: {
-            "q-splitter": {
-              template:
-                '<div><slot name="before"></slot><slot name="after"></slot></div>',
+            OSplitter: {
+              template: '<div><slot name="before"></slot><slot name="after"></slot></div>',
             },
-            "q-tabs": true,
-            "q-route-tab": true,
+            OTabs: true,
+            ORouteTab: true,
             "router-view": true,
           },
         },
@@ -205,6 +188,42 @@ describe("IngestMetrics Component", () => {
           org_identifier: store.state.selectedOrganization.identifier,
         },
       });
+    });
+
+    it("should push with org_identifier query when route is 'vmagent'", () => {
+      mockRouter.currentRoute.value.name = "vmagent";
+      const tw = mount(IngestMetrics, buildMountOptions());
+      expect(mockRouter.push).toHaveBeenCalledWith({
+        name: "vmagent",
+        query: {
+          org_identifier: store.state.selectedOrganization.identifier,
+        },
+      });
+      tw.unmount();
+    });
+
+    it("should push with org_identifier query when route is 'nightingale'", () => {
+      mockRouter.currentRoute.value.name = "nightingale";
+      const tw = mount(IngestMetrics, buildMountOptions());
+      expect(mockRouter.push).toHaveBeenCalledWith({
+        name: "nightingale",
+        query: {
+          org_identifier: store.state.selectedOrganization.identifier,
+        },
+      });
+      tw.unmount();
+    });
+
+    it("should push with org_identifier query when route is 'categraf'", () => {
+      mockRouter.currentRoute.value.name = "categraf";
+      const tw = mount(IngestMetrics, buildMountOptions());
+      expect(mockRouter.push).toHaveBeenCalledWith({
+        name: "categraf",
+        query: {
+          org_identifier: store.state.selectedOrganization.identifier,
+        },
+      });
+      tw.unmount();
     });
 
     it("should push with org_identifier query when route is 'otelCollector'", () => {
@@ -298,55 +317,55 @@ describe("IngestMetrics Component", () => {
   // copyToClipboardFn
   // ─────────────────────────────────────────────────────────────────────────
   describe("copyToClipboardFn", () => {
-    it("should call copyToClipboard with content.innerText", async () => {
-      const { copyToClipboard } = await import("quasar");
-      vi.mocked(copyToClipboard).mockResolvedValue();
+    it("should call copyToClipboard with content.innerText and options", async () => {
+      const { copyToClipboard } = await import("@/utils/clipboard");
 
       const mockContent = { innerText: "prometheus config snippet" };
-      await wrapper.vm.copyToClipboardFn(mockContent);
+      wrapper.vm.copyToClipboardFn(mockContent);
 
       expect(copyToClipboard).toHaveBeenCalledWith(
         "prometheus config snippet",
+        expect.any(Function),
+        {
+          successMessage: "Content Copied Successfully!",
+          errorMessage: "Error while copy content.",
+          timeout: 5000,
+        },
       );
     });
 
-    it("should show positive notify on successful copy", async () => {
-      const { copyToClipboard } = await import("quasar");
-      vi.mocked(copyToClipboard).mockResolvedValue();
+    it("should pass correct success options when copying", async () => {
+      const { copyToClipboard } = await import("@/utils/clipboard");
 
-      await wrapper.vm.copyToClipboardFn({ innerText: "some text" });
-      await new Promise((r) => setTimeout(r, 0));
+      wrapper.vm.copyToClipboardFn({ innerText: "some text" });
 
-      expect(mockQuasar.notify).toHaveBeenCalledWith({
-        type: "positive",
-        message: "Content Copied Successfully!",
+      expect(copyToClipboard).toHaveBeenCalledWith("some text", expect.any(Function), {
+        successMessage: "Content Copied Successfully!",
+        errorMessage: "Error while copy content.",
         timeout: 5000,
       });
     });
 
-    it("should show negative notify on copy failure", async () => {
-      const { copyToClipboard } = await import("quasar");
-      vi.mocked(copyToClipboard).mockRejectedValueOnce(
-        new Error("clipboard denied"),
-      );
+    it("should pass correct error options when copy may fail", async () => {
+      const { copyToClipboard } = await import("@/utils/clipboard");
 
       wrapper.vm.copyToClipboardFn({ innerText: "fail text" });
-      await new Promise((r) => setTimeout(r, 0));
 
-      expect(mockQuasar.notify).toHaveBeenCalledWith({
-        type: "negative",
-        message: "Error while copy content.",
+      expect(copyToClipboard).toHaveBeenCalledWith("fail text", expect.any(Function), {
+        successMessage: "Content Copied Successfully!",
+        errorMessage: "Error while copy content.",
         timeout: 5000,
       });
     });
 
-    it("should track segment analytics with correct payload on copy", async () => {
-      const { copyToClipboard } = await import("quasar");
-      vi.mocked(copyToClipboard).mockResolvedValue();
+    it("should track segment analytics on successful copy", async () => {
+      const { copyToClipboard } = await import("@/utils/clipboard");
+      vi.mocked(copyToClipboard).mockResolvedValueOnce(true);
       const segment = await import("@/services/segment_analytics");
 
       mockRouter.currentRoute.value.name = "otelCollector";
-      await wrapper.vm.copyToClipboardFn({ innerText: "otel snippet" });
+      wrapper.vm.copyToClipboardFn({ innerText: "otel snippet" });
+      await flushPromises();
 
       expect(segment.default.track).toHaveBeenCalledWith("Button Click", {
         button: "Copy to Clipboard",
@@ -357,38 +376,52 @@ describe("IngestMetrics Component", () => {
       });
     });
 
-    it("should track segment analytics even when copy fails", async () => {
-      const { copyToClipboard } = await import("quasar");
+    it("should NOT track segment analytics when copy fails", async () => {
+      const { copyToClipboard } = await import("@/utils/clipboard");
       vi.mocked(copyToClipboard).mockRejectedValueOnce(new Error("fail"));
       const segment = await import("@/services/segment_analytics");
 
       mockRouter.currentRoute.value.name = "telegraf";
       wrapper.vm.copyToClipboardFn({ innerText: "telegraf snippet" });
-      await new Promise((r) => setTimeout(r, 0));
+      await flushPromises();
 
-      expect(segment.default.track).toHaveBeenCalledWith("Button Click", {
-        button: "Copy to Clipboard",
-        ingestion: "telegraf",
-        user_org: store.state.selectedOrganization.identifier,
-        user_id: store.state.userInfo.email,
-        page: "Ingestion",
-      });
+      expect(segment.default.track).not.toHaveBeenCalled();
+    });
+
+    it("should NOT track segment analytics when copy resolves false", async () => {
+      const { copyToClipboard } = await import("@/utils/clipboard");
+      vi.mocked(copyToClipboard).mockResolvedValueOnce(false);
+      const segment = await import("@/services/segment_analytics");
+
+      mockRouter.currentRoute.value.name = "prometheus";
+      wrapper.vm.copyToClipboardFn({ innerText: "some snippet" });
+      await flushPromises();
+
+      expect(segment.default.track).not.toHaveBeenCalled();
     });
 
     it("should handle empty innerText gracefully", async () => {
-      const { copyToClipboard } = await import("quasar");
-      vi.mocked(copyToClipboard).mockResolvedValue();
+      const { copyToClipboard } = await import("@/utils/clipboard");
 
-      await wrapper.vm.copyToClipboardFn({ innerText: "" });
-      expect(copyToClipboard).toHaveBeenCalledWith("");
+      wrapper.vm.copyToClipboardFn({ innerText: "" });
+
+      expect(copyToClipboard).toHaveBeenCalledWith("", expect.any(Function), {
+        successMessage: "Content Copied Successfully!",
+        errorMessage: "Error while copy content.",
+        timeout: 5000,
+      });
     });
 
     it("should handle undefined innerText gracefully", async () => {
-      const { copyToClipboard } = await import("quasar");
-      vi.mocked(copyToClipboard).mockResolvedValue();
+      const { copyToClipboard } = await import("@/utils/clipboard");
 
-      await wrapper.vm.copyToClipboardFn({});
-      expect(copyToClipboard).toHaveBeenCalledWith(undefined);
+      wrapper.vm.copyToClipboardFn({});
+
+      expect(copyToClipboard).toHaveBeenCalledWith(undefined, expect.any(Function), {
+        successMessage: "Content Copied Successfully!",
+        errorMessage: "Error while copy content.",
+        timeout: 5000,
+      });
     });
   });
 
@@ -429,9 +462,7 @@ describe("IngestMetrics Component", () => {
 
     it("should expose store state.selectedOrganization", () => {
       expect(wrapper.vm.store.state.selectedOrganization).toBeDefined();
-      expect(
-        wrapper.vm.store.state.selectedOrganization.identifier,
-      ).toBeDefined();
+      expect(wrapper.vm.store.state.selectedOrganization.identifier).toBeDefined();
     });
   });
 
@@ -439,13 +470,6 @@ describe("IngestMetrics Component", () => {
   // Reactive Data
   // ─────────────────────────────────────────────────────────────────────────
   describe("Reactive Data", () => {
-    it("should allow splitterModel to be updated reactively", async () => {
-      expect(wrapper.vm.splitterModel).toBe(250);
-      wrapper.vm.splitterModel = 400;
-      await wrapper.vm.$nextTick();
-      expect(wrapper.vm.splitterModel).toBe(400);
-    });
-
     it("should allow ingestiontabs to be updated reactively", async () => {
       wrapper.vm.ingestiontabs = "prometheus";
       await wrapper.vm.$nextTick();

@@ -1,13 +1,13 @@
 const { test, expect } = require('../utils/enhanced-baseFixtures.js');
+const fs = require('fs');
 const logData = require("../../fixtures/log.json");
 const PageManager = require('../../pages/page-manager.js');
 const testLogger = require('../utils/test-logger.js');
-const { getOrgIdentifier } = require('../utils/cloud-auth.js');
+const { getOrgIdentifier, isCloudEnvironment } = require('../utils/cloud-auth.js');
 
 // Test timeout constants (in milliseconds)
 const FIVE_MINUTES_MS = 300000;
 const ALERT_REGISTRATION_WAIT_MS = 30000; // Wait for alert to fully register and become active
-const UI_STABILIZATION_WAIT_MS = 2000;
 const ALERT_TRIGGER_TIMEOUT_MS = 90000; // Real-time alerts need time to process and fire
 
 test.describe("Alerts Import/Export", () => {
@@ -76,40 +76,75 @@ test.describe("Alerts Import/Export", () => {
     const value = 'bangalore';    // Value that triggers the alert condition
 
     await pm.alertsPage.navigateToFolder(folderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     const alertName = await pm.alertsPage.createAlert(triggerStreamName, column, value, validationInfra.destinationName, sharedRandomValue);
     await pm.alertsPage.verifyAlertCreated(alertName);
     testLogger.info('Successfully created alert', { alertName });
 
-    // Wait for alert to register in the system before triggering
-    await page.waitForTimeout(ALERT_REGISTRATION_WAIT_MS);
+    // Wait for alert to register in the system before triggering — poll the alerts
+    // list endpoint until our alert appears with status active. Replaces fixed 30s wait.
+    // Uses v2 API which is the current endpoint; getOrgIdentifier() handles both cloud and self-hosted.
+    const orgId = getOrgIdentifier() || process.env.ORGNAME || 'default';
+    await expect.poll(
+      async () => {
+        const resp = await page.request.get(
+          `${process.env.ZO_BASE_URL || 'http://localhost:5080'}/api/v2/${orgId}/alerts`,
+          { failOnStatusCode: false }
+        ).catch(() => null);
+        if (!resp || !resp.ok()) return false;
+        const body = await resp.json().catch(() => null);
+        const list = Array.isArray(body?.list) ? body.list : (Array.isArray(body?.alerts) ? body.alerts : (Array.isArray(body) ? body : []));
+        return list.some(a => (a?.name === alertName) || (a?.alert?.name === alertName));
+      },
+      { intervals: [2000, 3000, 5000, 5000, 5000, 5000, 5000], timeout: ALERT_REGISTRATION_WAIT_MS }
+    ).toBe(true);
 
-    // Trigger and validate alert fires (self-referential destination approach)
-    const triggerResult = await pm.alertsPage.verifyAlertTrigger(
-      pm,
-      alertName,
-      triggerStreamName,
-      column,
-      value,
-      ALERT_TRIGGER_TIMEOUT_MS,
-      validationInfra.streamName
-    );
-    expect(triggerResult.found, `Alert ${alertName} should fire and appear in validation stream`).toBe(true);
-    testLogger.info('Alert trigger validation PASSED', { alertName, triggerResult });
+    // Trigger and validate alert fires (self-referential destination approach).
+    // On cloud the SSRF guard blocks self-referencing destinations, so the validation
+    // destination points at an external sink there and this round-trip check cannot
+    // work — skip it and keep the import/export coverage below.
+    if (!isCloudEnvironment()) {
+      const triggerResult = await pm.alertsPage.verifyAlertTrigger(
+        pm,
+        alertName,
+        triggerStreamName,
+        column,
+        value,
+        ALERT_TRIGGER_TIMEOUT_MS,
+        validationInfra.streamName
+      );
+      expect(triggerResult.found, `Alert ${alertName} should fire and appear in validation stream`).toBe(true);
+      testLogger.info('Alert trigger validation PASSED', { alertName, triggerResult });
+    } else {
+      testLogger.info('Skipping trigger round-trip validation on cloud (SSRF guard blocks self-referencing destination)');
+    }
 
     await pm.commonActions.navigateToAlerts();
     await pm.alertsPage.navigateToFolder(folderName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
 
     const download = await pm.alertsPage.exportAlerts();
     const downloadPath = `./alerts-${new Date().toISOString().split('T')[0]}-${triggerStreamName}.json`;
     await download.saveAs(downloadPath);
 
+    // Explicit export assertion — the one that runs on BOTH cloud and non-cloud.
+    // On cloud the trigger round-trip above is skipped, so without this the test
+    // would carry no in-body assertion; verify the exported file is present, is
+    // valid JSON, and actually contains the alert we just exported.
+    const exportedRaw = fs.readFileSync(downloadPath, 'utf8');
+    expect(exportedRaw.length, 'Exported alerts file should not be empty').toBeGreaterThan(0);
+    const exportedJson = JSON.parse(exportedRaw);
+    expect(
+      JSON.stringify(exportedJson).includes(alertName),
+      `Exported alerts file should contain alert ${alertName}`
+    ).toBe(true);
+    testLogger.info('Alert export artifact validated', { alertName, downloadPath });
+
     // Delete the original alert before importing to avoid duplicate ID/name conflicts.
     // The import API (POST /api/v2/{org}/alerts) creates a new alert — if the same
     // alert ID or name already exists, the API rejects it.
     await pm.alertsPage.deleteAlertByRow(alertName);
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
     testLogger.info('Deleted original alert before import round-trip test', { alertName });
 
     await pm.alertsPage.importInvalidFile('../test-data/invalid-alert.json');
@@ -217,7 +252,7 @@ test.describe("Alerts Import/Export", () => {
 
     // Cleanup templates
     await pm.alertTemplatesPage.navigateToTemplates();
-    await page.waitForTimeout(UI_STABILIZATION_WAIT_MS);
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
 
     await pm.alertTemplatesPage.deleteTemplateAndVerify(webhookTemplateName);
     await pm.alertTemplatesPage.deleteTemplateAndVerify(emailTemplateName);

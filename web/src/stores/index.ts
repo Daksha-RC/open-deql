@@ -13,15 +13,16 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import type { I18nText } from "@/types/i18n";
+import type { TraceTimeRange } from "@/ts/interfaces/traces/traceTimeRange.types";
+
 import { createStore } from "vuex";
-import {
-  useLocalOrganization,
-  useLocalCurrentUser,
-  useLocalTimezone,
-} from "../utils/zincutils";
+import { useLocalOrganization, useLocalCurrentUser, useLocalTimezone } from "../utils/zincutils";
 import streams from "./streams";
 import logs from "./logs";
 import incidents from "./incidents";
+import { getDefaultTheme } from "@/constants/themes";
+import { purgeAllQueries } from "@/composables/query/queryClient";
 
 const pos = window.location.pathname.indexOf("/web/");
 
@@ -37,6 +38,9 @@ const API_ENDPOINT = import.meta.env.VITE_OPENOBSERVE_ENDPOINT
 
 const organizationObj = {
   organizationPasscode: "",
+  organizationPasscodeUser: "",
+  // distinct from an empty passcode, which renders as a valid-looking but dead credential
+  organizationPasscodeForbidden: false,
   allDashboardList: {},
   allDashboardData: {},
   allAlertsListByFolderId: {},
@@ -46,9 +50,17 @@ const organizationObj = {
   rumToken: {
     rum_token: "",
   },
+  // Which traces stream contains a given (canonical 32-char) trace id, and the
+  // range it ran in when the time index knew — see useCorrelatedTracesStream.
+  // knownStreams is the org-level fact ("streams that have ever contained a
+  // correlated trace") that keeps steady-state resolution at one point lookup.
+  // Lives here so resetOrganizationData wipes it on org switch.
+  correlatedTracesStreams: {
+    byTraceId: {} as Record<string, { stream: string; range?: TraceTimeRange }>,
+    knownStreams: [] as string[],
+  },
   quotaThresholdMsg: "",
   functions: [],
-  actions: [],
   streams: {},
   folders: [],
   foldersByType: [],
@@ -63,7 +75,16 @@ const organizationObj = {
   isDataIngested: false,
   regexPatterns: [],
   regexPatternPrompt: "",
-  regexPatternTestValue: ""
+  regexPatternTestValue: "",
+  orgTokens: [] as Array<{
+    name: string;
+    token: string;
+    description: I18nText;
+    is_default: boolean;
+    enabled: boolean;
+    created_by: string;
+    created_at: number;
+  }>,
 };
 
 export default createStore({
@@ -77,7 +98,7 @@ export default createStore({
     organizations: [],
     currentuser: useLocalCurrentUser() ? useLocalCurrentUser() : {},
     searchCollapsibleSection: 20,
-    theme: "",
+    theme: localStorage.getItem("theme") === "dark" ? "dark" : "light",
     printMode: false,
     organizationData: JSON.parse(JSON.stringify(organizationObj)),
     zoConfig: <{ [key: string]: any }>{},
@@ -98,21 +119,34 @@ export default createStore({
     isAiChatEnabled: false,
     isAiChatExpanded: false,
     isWebinarBannerVisible: false,
-    currentChatTimestamp: null,
+    currentChatTimestamp: null as number | null,
     chatUpdated: false,
-    // Default theme colors (Default Blue theme)
-    // These are the application's default colors used as fallback when no custom colors are set
-    // Centralized here so they can be updated in one place instead of duplicating across components
+    // Default theme colors — derived from the default theme (O2 Signature) in the
+    // theme registry so there is a single source of truth. Used as the fallback
+    // by chart consumers that read colors directly. Changing the default theme's
+    // colors in `@/constants/themes` automatically updates these.
     defaultThemeColors: {
-      light: "#3F7994",  // Default light mode color (Blue)
-      dark: "#5B9FBE",   // Default dark mode color (Light Blue)
+      light: getDefaultTheme().light.themeColor,
+      dark: getDefaultTheme().dark.themeColor,
     },
     // GitHub dashboard gallery cache
     githubDashboardGallery: {
       dashboards: [],
-      lastFetched: null,
+      lastFetched: null as number | null,
       cacheExpiry: 10 * 60 * 1000, // 10 minutes in milliseconds
-      dashboardJsonCache: {}, // Cache for individual dashboard JSON content: { folderPath/fileName: jsonContent }
+      dashboardJsonCache: {} as Record<string, unknown>, // Cache for individual dashboard JSON content: { folderPath/fileName: jsonContent }
+    },
+    // Alert library cache (source: S3, see composables/useAlertLibrary.ts).
+    // This is the READ cache, not a write-through mirror: the composable reads
+    // it back, so a second component mounting after navigation is served from
+    // here rather than refetching 47 KB.
+    alertLibrary: {
+      manifest: null as unknown,
+      lastFetched: null as number | null,
+      cacheExpiry: 10 * 60 * 1000, // 10 minutes, matching the gallery above
+      // Whole alert files, keyed by the manifest's stable `<pack>/<name>` id —
+      // never by bare name, which is only unique within a pack.
+      fileCache: {} as Record<string, unknown>,
     },
     // Temporary theme colors for live preview in General Settings
     // These colors are stored here (instead of component state) so they persist
@@ -122,9 +156,9 @@ export default createStore({
     // - Cleared when user clicks "Save" (saved permanently to localStorage & backend)
     // - Prevents other watchers/observers from overriding the preview color
     tempThemeColors: {
-      light: null,  // Hex color string (e.g., "#FF0000") or null
-      dark: null,   // Hex color string (e.g., "#0000FF") or null
-    },
+      light: null, // Hex color string (e.g., "#FF0000") or null
+      dark: null, // Hex color string (e.g., "#0000FF") or null
+    } as Record<"light" | "dark", string | null>,
     // Share URL state for Safari-compatible clipboard copy
     // Polling mechanism checks this value and copies when available
     pendingShortURL: null,
@@ -171,11 +205,33 @@ export default createStore({
     setOrganizationPasscode(state, payload) {
       state.organizationData.organizationPasscode = payload;
     },
-    resetOrganizationData(state, payload) {
+    setOrganizationPasscodeUser(state, payload) {
+      state.organizationData.organizationPasscodeUser = payload;
+    },
+    setOrganizationPasscodeForbidden(state, payload) {
+      state.organizationData.organizationPasscodeForbidden = payload;
+    },
+    resetOrganizationData(state) {
       state.organizationData = JSON.parse(JSON.stringify(organizationObj));
     },
     setRUMToken(state, payload) {
       state.organizationData.rumToken = payload;
+    },
+    setCorrelatedTracesStream(
+      state,
+      payload: { traceId: string; stream: string; range?: TraceTimeRange },
+    ) {
+      const cache = state.organizationData.correlatedTracesStreams;
+      // Bounded: past the cap, clear and restart. knownStreams survives, so a
+      // re-resolution of any dropped id is a single point lookup — LRU would
+      // be bookkeeping for ~100KB of strings.
+      if (Object.keys(cache.byTraceId).length >= 1000) cache.byTraceId = {};
+      // The range is absent whenever the answer came from the probe fallback.
+      cache.byTraceId[payload.traceId] = { stream: payload.stream, range: payload.range };
+      if (!cache.knownStreams.includes(payload.stream)) cache.knownStreams.push(payload.stream);
+    },
+    setOrgTokens(state, payload) {
+      state.organizationData.orgTokens = payload;
     },
     // setAllCurrentDashboards(state, payload) {
     //   state.allCurrentDashboards = payload;
@@ -207,9 +263,6 @@ export default createStore({
     setFunctions(state, payload) {
       state.organizationData.functions = payload;
     },
-    setActions(state, payload) {
-      state.organizationData.actions = payload;
-    },
     setStreams(state, payload) {
       state.organizationData.streams[payload.name] = payload;
     },
@@ -232,7 +285,12 @@ export default createStore({
       state.organizationData.folders = payload;
     },
     setFoldersByType(state, payload) {
-      state.organizationData.foldersByType = payload;
+      // Merge, not replace: callers pass a single `{ [type]: folders }` entry,
+      // and replacing dropped every sibling type's cached list.
+      state.organizationData.foldersByType = {
+        ...state.organizationData.foldersByType,
+        ...payload,
+      };
     },
     appTheme(state, payload) {
       state.theme = payload;
@@ -297,7 +355,7 @@ export default createStore({
      * @param payload - { mode: 'light' | 'dark', color: '#hexcolor' }
      * Example: { mode: 'light', color: '#FF0000' }
      */
-    setTempThemeColor(state, payload) {
+    setTempThemeColor(state, payload: { mode: "light" | "dark"; color: string | null }) {
       state.tempThemeColors[payload.mode] = payload.color;
     },
     /**
@@ -325,6 +383,38 @@ export default createStore({
     },
     setAlertListFilters(state, payload) {
       state.alertListFilters = { ...state.alertListFilters, ...payload };
+    },
+    /**
+     * Cache the alert library manifest, stamping the time the TTL is measured
+     * from. Leaving lastFetched unset would make a warm cache look permanently
+     * stale and refetch on every render.
+     */
+    setAlertLibraryManifest(state, payload) {
+      state.alertLibrary.manifest = payload;
+      state.alertLibrary.lastFetched = Date.now();
+    },
+    /**
+     * Cache one alert file. Accumulates — opening a second drawer must not
+     * evict the first alert, since the gallery reopens drawers constantly
+     * while comparing alerts.
+     * @param payload - { id: '<pack>/<name>', file: alertJson }
+     */
+    setAlertLibraryFile(state, payload) {
+      state.alertLibrary.fileCache[payload.id] = payload.file;
+    },
+    /**
+     * Drop cached library data. Mutates IN PLACE and deliberately leaves
+     * `cacheExpiry` alone: that is configuration, not cached data, and
+     * reassigning the whole object would silently reset it.
+     *
+     * Not needed for org switching — the library is a global public catalog,
+     * identical for every org, and the org-specific half of a "Ready" verdict
+     * (the stream list) lives in useStreams and is recomputed at render.
+     */
+    clearAlertLibrary(state) {
+      state.alertLibrary.manifest = null;
+      state.alertLibrary.lastFetched = null;
+      state.alertLibrary.fileCache = {};
     },
     /**
      * Set GitHub dashboard gallery cache
@@ -355,6 +445,9 @@ export default createStore({
     },
     logout(context) {
       context.commit("logout");
+      // Nothing from the previous session may survive — including anything the
+      // query layer persisted to localStorage/IndexedDB.
+      purgeAllQueries();
     },
     endpoint(context, payload) {
       context.commit("endpoint", payload);
@@ -380,11 +473,20 @@ export default createStore({
     setOrganizationPasscode(context, payload) {
       context.commit("setOrganizationPasscode", payload);
     },
+    setOrganizationPasscodeUser(context, payload) {
+      context.commit("setOrganizationPasscodeUser", payload);
+    },
+    setOrganizationPasscodeForbidden(context, payload) {
+      context.commit("setOrganizationPasscodeForbidden", payload);
+    },
     resetOrganizationData(context, payload) {
       context.commit("resetOrganizationData", payload);
     },
     setRUMToken(context, payload) {
       context.commit("setRUMToken", payload);
+    },
+    setOrgTokens(context, payload) {
+      context.commit("setOrgTokens", payload);
     },
     // setAllCurrentDashboards(context, payload) {
     //   context.commit('setAllCurrentDashboards', payload);
@@ -421,9 +523,6 @@ export default createStore({
     },
     setFunctions(context, payload) {
       context.commit("setFunctions", payload);
-    },
-    setActions(context, payload) {
-      context.commit("setActions", payload);
     },
     setStreams(context, payload) {
       context.commit("setStreams", payload);
@@ -504,6 +603,6 @@ export default createStore({
   modules: {
     streams,
     logs,
-    incidents
+    incidents,
   },
 });

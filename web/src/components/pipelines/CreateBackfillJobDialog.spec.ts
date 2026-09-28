@@ -16,24 +16,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { nextTick } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
 
-installQuasar({ plugins: [Dialog, Notify] });
-
-vi.mock("quasar", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("quasar")>();
-  return {
-    ...actual,
-    useQuasar: vi.fn(() => ({
-      notify: vi.fn(),
-      dialog: vi.fn(() => ({ onOk: vi.fn(), onCancel: vi.fn() })),
-      dark: { isActive: false },
-    })),
-  };
-});
+vi.mock("@/lib/feedback/Toast/useToast", () => ({
+  toast: vi.fn(),
+}));
 
 vi.mock("@/services/backfill", () => ({
   default: {
@@ -45,6 +33,7 @@ vi.mock("@/components/DateTime.vue", () => ({
   default: {
     name: "DateTime",
     template: '<div data-test="time-range-picker" />',
+    props: ["defaultType", "defaultAbsoluteTime", "defaultRelativeTime"],
     emits: ["on:date-change"],
     methods: {
       resetTime: vi.fn(),
@@ -61,21 +50,130 @@ const DEFAULT_PROPS = {
   pipelineName: "Test Pipeline",
 };
 
+// A valid absolute time range (from < to, both > 0) in microseconds.
+const VALID_FROM = 1_700_000_000_000_000;
+const VALID_TO = 1_700_003_600_000_000;
+const validRange = () => ({ type: "absolute", from: VALID_FROM, to: VALID_TO });
+
+// Stub for ODrawer/ODialog: forwards props, exposes all named slots so the
+// inner template renders, and emits the same click:primary / click:secondary
+// / click:neutral / update:open events as the real components.
+const ODrawerStub = {
+  name: "ODrawer",
+  template: `
+    <div class="o-drawer-stub" :data-open="open" data-test="create-backfill-job-dialog">
+      <div class="o-drawer-stub__header">
+        <slot name="header" />
+        <slot name="header-left" />
+        <slot name="header-right" />
+      </div>
+      <div class="o-drawer-stub__body"><slot /></div>
+      <div class="o-drawer-stub__footer"><slot name="footer" /></div>
+      <button
+        type="button"
+        data-test="stub-secondary-btn"
+        @click="$emit('click:secondary')"
+      >{{ secondaryButtonLabel }}</button>
+      <button
+        type="button"
+        data-test="stub-primary-btn"
+        :disabled="primaryButtonDisabled || primaryButtonLoading"
+        @click="$emit('click:primary')"
+      >{{ primaryButtonLabel }}</button>
+    </div>
+  `,
+  props: [
+    "open",
+    "size",
+    "title",
+    "subTitle",
+    "persistent",
+    "showClose",
+    "width",
+    "formId",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+};
+
+const ODialogStub = {
+  name: "ODialog",
+  template: `
+    <div class="o-dialog-stub" :data-open="open" data-test="delete-confirmation-dialog">
+      <div class="o-dialog-stub__header"><slot name="header" /></div>
+      <div class="o-dialog-stub__body"><slot /></div>
+      <div class="o-dialog-stub__footer"><slot name="footer" /></div>
+      <button
+        type="button"
+        data-test="stub-dialog-secondary-btn"
+        @click="$emit('click:secondary')"
+      >{{ secondaryButtonLabel }}</button>
+      <button
+        type="button"
+        data-test="stub-dialog-primary-btn"
+        @click="$emit('click:primary')"
+      >{{ primaryButtonLabel }}</button>
+    </div>
+  `,
+  props: [
+    "open",
+    "size",
+    "title",
+    "subTitle",
+    "persistent",
+    "showClose",
+    "width",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+};
+
 function createWrapper(props: Record<string, any> = {}) {
   return mount(CreateBackfillJobDialog, {
     props: { ...DEFAULT_PROPS, ...props },
     global: {
       plugins: [i18n, store],
       stubs: {
-        QDialog: {
-          inheritAttrs: false,
-          template: '<div v-bind="$attrs"><slot /></div>',
-          props: ["modelValue"],
-        },
+        ODrawer: ODrawerStub,
+        ODialog: ODialogStub,
       },
     },
   });
 }
+
+// Form helpers — everything (timerange/chunk/delay/deleteBeforeBackfill) is
+// form-owned now. The footer Save submits via form-id; tests drive the form's
+// own handleSubmit() so the validate → @submit → save chain is awaited.
+const setField = (w: any, name: string, val: unknown) =>
+  (w.vm as any).form.setFieldValue(name, val);
+const formVals = (w: any) => (w.vm as any).form.state.values;
+const setRange = (w: any, range: unknown) => setField(w, "timerange", range);
+const submitForm = async (w: any) => {
+  await (w.vm as any).form.handleSubmit();
+  await flushPromises();
+};
 
 // --------------------------------------------------------------------------
 // Mount & basic structure
@@ -89,45 +187,60 @@ describe("CreateBackfillJobDialog – mount and structure", () => {
     expect(wrapper.exists()).toBe(true);
   });
 
-  it("renders data-test='create-backfill-job-dialog'", () => {
+  it("renders data-test='create-backfill-job-dialog' (ODrawer root)", () => {
     const wrapper = createWrapper();
-    expect(
-      wrapper.find('[data-test="create-backfill-job-dialog"]').exists()
-    ).toBe(true);
+    expect(wrapper.find('[data-test="create-backfill-job-dialog"]').exists()).toBe(true);
   });
 
-  it("renders data-test='dialog-title' containing the pipelineName", () => {
+  it("passes the pipeline name to the ODrawer header-right slot", () => {
     const wrapper = createWrapper({ pipelineName: "My Pipe" });
-    const title = wrapper.find('[data-test="dialog-title"]');
-    expect(title.exists()).toBe(true);
-    expect(title.text()).toContain("My Pipe");
+    const drawer = wrapper.findComponent(ODrawerStub);
+    expect(drawer.exists()).toBe(true);
+    // pipelineName is rendered in the header-right slot
+    expect(drawer.text()).toContain("My Pipe");
   });
 
-  it("renders data-test='close-dialog-btn'", () => {
+  it("forwards the static title 'Create Backfill Job for' to ODrawer", () => {
     const wrapper = createWrapper();
-    expect(wrapper.find('[data-test="close-dialog-btn"]').exists()).toBe(true);
+    const drawer = wrapper.findComponent(ODrawerStub);
+    expect(drawer.props("title")).toBe("Create Backfill Job for");
   });
 
-  it("renders data-test='cancel-btn'", () => {
+  it("forwards 'Cancel' as the secondary button label", () => {
     const wrapper = createWrapper();
-    expect(wrapper.find('[data-test="cancel-btn"]').exists()).toBe(true);
+    const drawer = wrapper.findComponent(ODrawerStub);
+    expect(drawer.props("secondaryButtonLabel")).toBe("Cancel");
   });
 
-  it("renders data-test='create-btn'", () => {
+  it("forwards 'Create Backfill Job' as the primary button label", () => {
     const wrapper = createWrapper();
-    expect(wrapper.find('[data-test="create-btn"]').exists()).toBe(true);
+    const drawer = wrapper.findComponent(ODrawerStub);
+    expect(drawer.props("primaryButtonLabel")).toBe("Create Backfill Job");
   });
 
-  it("renders data-test='advanced-options-section'", () => {
+  it("forwards width=47 to ODrawer", () => {
     const wrapper = createWrapper();
-    expect(
-      wrapper.find('[data-test="advanced-options-section"]').exists()
-    ).toBe(true);
+    const drawer = wrapper.findComponent(ODrawerStub);
+    expect(drawer.props("width")).toBe(47);
   });
 
-  it("renders data-test='time-range-picker'", () => {
+  it("renders data-test='advanced-options-section' inside the default slot", () => {
+    const wrapper = createWrapper();
+    expect(wrapper.find('[data-test="advanced-options-section"]').exists()).toBe(true);
+  });
+
+  it("renders data-test='time-range-picker' (DateTime) inside the default slot", () => {
     const wrapper = createWrapper();
     expect(wrapper.find('[data-test="time-range-picker"]').exists()).toBe(true);
+  });
+
+  it("binds the open prop on ODrawer from props.modelValue", async () => {
+    const wrapper = createWrapper({ modelValue: true });
+    const drawer = wrapper.findComponent(ODrawerStub);
+    expect(drawer.props("open")).toBe(true);
+
+    await wrapper.setProps({ modelValue: false });
+    expect(drawer.props("open")).toBe(false);
   });
 });
 
@@ -145,81 +258,63 @@ describe("CreateBackfillJobDialog – showAdvanced", () => {
 
   it("clicking the advanced section header toggles showAdvanced to true", async () => {
     const wrapper = createWrapper();
-    const header = wrapper.find(
-      '[data-test="advanced-options-section"] .section-header'
-    );
-    if (header.exists()) {
-      await header.trigger("click");
-      expect((wrapper.vm as any).showAdvanced).toBe(true);
-    } else {
-      // Directly set via vm to test the toggle logic
-      (wrapper.vm as any).showAdvanced = false;
-      await nextTick();
-      ;(wrapper.vm as any).showAdvanced = true;
-      await nextTick();
-      expect((wrapper.vm as any).showAdvanced).toBe(true);
-    }
+    const header = wrapper.find('[data-test="advanced-options-section"] .section-header');
+    expect(header.exists()).toBe(true);
+    await header.trigger("click");
+    expect((wrapper.vm as any).showAdvanced).toBe(true);
   });
 });
 
 // --------------------------------------------------------------------------
-// formData initial values
+// form defaults
 // --------------------------------------------------------------------------
 
-describe("CreateBackfillJobDialog – formData defaults", () => {
+describe("CreateBackfillJobDialog – form defaults", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("chunkPeriodMinutes defaults to 60 when scheduleFrequency is not provided", () => {
+  it("form chunkPeriodMinutes defaults to 60 when scheduleFrequency is not provided", () => {
     const wrapper = createWrapper();
-    expect((wrapper.vm as any).formData.chunkPeriodMinutes).toBe(60);
+    expect(formVals(wrapper).chunkPeriodMinutes).toBe(60);
   });
 
-  it("chunkPeriodMinutes defaults to scheduleFrequency when provided", () => {
+  it("form chunkPeriodMinutes defaults to scheduleFrequency when provided", () => {
     const wrapper = createWrapper({ scheduleFrequency: 30 });
-    expect((wrapper.vm as any).formData.chunkPeriodMinutes).toBe(30);
+    expect(formVals(wrapper).chunkPeriodMinutes).toBe(30);
   });
 
-  it("startTimeMicros initializes to 0", () => {
+  it("timerange initializes to an empty absolute range", () => {
     const wrapper = createWrapper();
-    expect((wrapper.vm as any).formData.startTimeMicros).toBe(0);
+    expect(formVals(wrapper).timerange).toEqual({
+      type: "absolute",
+      from: undefined,
+      to: undefined,
+    });
   });
 
-  it("endTimeMicros initializes to 0", () => {
+  it("form deleteBeforeBackfill initializes to false", () => {
     const wrapper = createWrapper();
-    expect((wrapper.vm as any).formData.endTimeMicros).toBe(0);
+    expect(formVals(wrapper).deleteBeforeBackfill).toBe(false);
   });
 
-  it("deleteBeforeBackfill initializes to false", () => {
+  it("form delayBetweenChunks initializes to null", () => {
     const wrapper = createWrapper();
-    expect((wrapper.vm as any).formData.deleteBeforeBackfill).toBe(false);
-  });
-
-  it("delayBetweenChunks initializes to null", () => {
-    const wrapper = createWrapper();
-    expect((wrapper.vm as any).formData.delayBetweenChunks).toBeNull();
+    expect(formVals(wrapper).delayBetweenChunks).toBeNull();
   });
 });
 
 // --------------------------------------------------------------------------
-// updateDateTime
+// timerange field
 // --------------------------------------------------------------------------
 
-describe("CreateBackfillJobDialog – updateDateTime", () => {
+describe("CreateBackfillJobDialog – timerange field", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("sets startTimeMicros and endTimeMicros from the value object", async () => {
+  it("setFieldValue('timerange', ...) updates the form value", async () => {
     const wrapper = createWrapper();
-    (wrapper.vm as any).updateDateTime({
-      startTime: 1_700_000_000_000_000,
-      endTime: 1_700_003_600_000_000,
-    });
+    setRange(wrapper, validRange());
     await nextTick();
-    expect((wrapper.vm as any).formData.startTimeMicros).toBe(
-      1_700_000_000_000_000
-    );
-    expect((wrapper.vm as any).formData.endTimeMicros).toBe(
-      1_700_003_600_000_000
-    );
+    expect(formVals(wrapper).timerange.from).toBe(VALID_FROM);
+    expect(formVals(wrapper).timerange.to).toBe(VALID_TO);
   });
 });
 
@@ -237,8 +332,7 @@ describe("CreateBackfillJobDialog – estimatedInfo computed", () => {
 
   it("returns null when start equals end", async () => {
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_000_000_000_000;
+    setRange(wrapper, { type: "absolute", from: VALID_FROM, to: VALID_FROM });
     await nextTick();
     expect((wrapper.vm as any).estimatedInfo).toBeNull();
   });
@@ -246,10 +340,9 @@ describe("CreateBackfillJobDialog – estimatedInfo computed", () => {
   it("returns an object with time and chunks for a valid time range", async () => {
     const wrapper = createWrapper();
     // 60-minute range, 60-minute chunk period → 1 chunk
-    const start = 1_700_000_000_000_000;
+    const start = VALID_FROM;
     const end = start + 60 * 60 * 1_000_000; // +60 minutes in microseconds
-    (wrapper.vm as any).formData.startTimeMicros = start;
-    (wrapper.vm as any).formData.endTimeMicros = end;
+    setRange(wrapper, { type: "absolute", from: start, to: end });
     await nextTick();
     const info = (wrapper.vm as any).estimatedInfo;
     expect(info).not.toBeNull();
@@ -261,70 +354,61 @@ describe("CreateBackfillJobDialog – estimatedInfo computed", () => {
   it("estimated chunks equals ceiling of diffMinutes / chunkPeriod", async () => {
     const wrapper = createWrapper({ scheduleFrequency: 30 });
     // 90-minute range, 30-minute chunk → 3 chunks
-    const start = 1_700_000_000_000_000;
+    const start = VALID_FROM;
     const end = start + 90 * 60 * 1_000_000;
-    (wrapper.vm as any).formData.startTimeMicros = start;
-    (wrapper.vm as any).formData.endTimeMicros = end;
+    setRange(wrapper, { type: "absolute", from: start, to: end });
     await nextTick();
     expect((wrapper.vm as any).estimatedInfo.chunks).toBe(3);
   });
 });
 
 // --------------------------------------------------------------------------
-// onSubmit validation
+// onSubmit validation – driven via the real OForm submit (schema-gated)
 // --------------------------------------------------------------------------
 
 describe("CreateBackfillJobDialog – onSubmit validation", () => {
-  let notifyMock: ReturnType<typeof vi.fn>;
-
-  beforeEach(async () => {
+  beforeEach(() => {
     vi.clearAllMocks();
-    notifyMock = vi.fn();
-    const quasar = await import("quasar");
-    vi.mocked(quasar.useQuasar).mockReturnValue({
-      notify: notifyMock,
-      dialog: vi.fn(() => ({ onOk: vi.fn(), onCancel: vi.fn() })),
-      dark: { isActive: false },
-    } as any);
   });
 
-  it("calls notify with 'negative' when startTimeMicros <= 0", async () => {
+  it("blocks submit + renders 'Please select a valid time range' when from <= 0", async () => {
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 0;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    await (wrapper.vm as any).onSubmit();
-    expect(notifyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "negative" })
-    );
+    setRange(wrapper, { type: "absolute", from: 0, to: VALID_TO });
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(false);
+    expect((wrapper.vm as any).timerangeError).toBe("Please select a valid time range");
+    expect(wrapper.text()).toContain("Please select a valid time range");
+    expect(backfillService.createBackfillJob).not.toHaveBeenCalled();
   });
 
-  it("calls notify with 'negative' when endTimeMicros <= 0", async () => {
+  it("blocks submit + renders 'Please select a valid time range' when to <= 0", async () => {
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 0;
-    await (wrapper.vm as any).onSubmit();
-    expect(notifyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "negative" })
-    );
+    setRange(wrapper, { type: "absolute", from: VALID_FROM, to: 0 });
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(false);
+    expect((wrapper.vm as any).timerangeError).toBe("Please select a valid time range");
+    expect(backfillService.createBackfillJob).not.toHaveBeenCalled();
   });
 
-  it("calls notify with 'negative' when startTime >= endTime", async () => {
+  it("blocks submit + renders 'Start time must be before end time' when from >= to", async () => {
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_003_600_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_000_000_000_000;
-    await (wrapper.vm as any).onSubmit();
-    expect(notifyMock).toHaveBeenCalledWith(
-      expect.objectContaining({ type: "negative" })
-    );
+    setRange(wrapper, { type: "absolute", from: VALID_TO, to: VALID_FROM });
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(false);
+    expect((wrapper.vm as any).timerangeError).toBe("Start time must be before end time");
+    expect(wrapper.text()).toContain("Start time must be before end time");
+    expect(backfillService.createBackfillJob).not.toHaveBeenCalled();
   });
 
-  it("sets showDeleteConfirmation=true when deleteBeforeBackfill is true and time range is valid", async () => {
+  it("opens the delete confirmation ODialog when deleteBeforeBackfill is true and time range is valid", async () => {
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    (wrapper.vm as any).formData.deleteBeforeBackfill = true;
-    await (wrapper.vm as any).onSubmit();
+    setRange(wrapper, validRange());
+    setField(wrapper, "deleteBeforeBackfill", true);
+    await submitForm(wrapper);
     expect((wrapper.vm as any).showDeleteConfirmation).toBe(true);
+    // ODialog stub receives open=true
+    const dialog = wrapper.findComponent(ODialogStub);
+    expect(dialog.props("open")).toBe(true);
   });
 
   it("calls createBackfillJob directly when deleteBeforeBackfill is false and time range is valid", async () => {
@@ -333,17 +417,113 @@ describe("CreateBackfillJobDialog – onSubmit validation", () => {
       message: "created",
     });
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    (wrapper.vm as any).formData.deleteBeforeBackfill = false;
-    await (wrapper.vm as any).onSubmit();
-    await flushPromises();
+    setRange(wrapper, validRange());
+    setField(wrapper, "deleteBeforeBackfill", false);
+    await submitForm(wrapper);
+    expect(backfillService.createBackfillJob).toHaveBeenCalled();
+  });
+
+  it("blocks submit (no save) when chunkPeriodMinutes is out of range", async () => {
+    const wrapper = createWrapper();
+    setRange(wrapper, validRange());
+    setField(wrapper, "chunkPeriodMinutes", 5000);
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(false);
+    expect(backfillService.createBackfillJob).not.toHaveBeenCalled();
+  });
+
+  it("blocks submit when delayBetweenChunks is out of range", async () => {
+    const wrapper = createWrapper();
+    setRange(wrapper, validRange());
+    setField(wrapper, "delayBetweenChunks", 99999);
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(false);
+    expect(backfillService.createBackfillJob).not.toHaveBeenCalled();
+  });
+
+  // Numeric semantics match main: only null/undefined skip the range check. 0
+  // coerces into the [min,max] check and FAILS (main did `Number(v) < min`, and
+  // `0 < 1` is true), so submit is blocked. Asserted through the REAL schema.
+  it("blocks submit when chunkPeriodMinutes and delayBetweenChunks are 0", async () => {
+    const wrapper = createWrapper();
+    setRange(wrapper, validRange());
+    setField(wrapper, "chunkPeriodMinutes", 0);
+    setField(wrapper, "delayBetweenChunks", 0);
+    setField(wrapper, "deleteBeforeBackfill", false);
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(false);
+    expect(backfillService.createBackfillJob).not.toHaveBeenCalled();
+  });
+
+  it("saves at the inclusive numeric bounds (chunk=1440, delay=3600)", async () => {
+    const wrapper = createWrapper();
+    setRange(wrapper, validRange());
+    setField(wrapper, "chunkPeriodMinutes", 1440);
+    setField(wrapper, "delayBetweenChunks", 3600);
+    setField(wrapper, "deleteBeforeBackfill", false);
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).form.state.isValid).toBe(true);
     expect(backfillService.createBackfillJob).toHaveBeenCalled();
   });
 });
 
 // --------------------------------------------------------------------------
-// confirmDelete
+// Confirmation dialog (ODialog) interactions
+// --------------------------------------------------------------------------
+
+describe("CreateBackfillJobDialog – delete-confirmation ODialog", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("forwards 'Confirm Data Deletion' as the ODialog title", () => {
+    const wrapper = createWrapper();
+    const dialog = wrapper.findComponent(ODialogStub);
+    expect(dialog.props("title")).toBe("Confirm Data Deletion");
+  });
+
+  it("uses size='sm' and persistent on the confirmation ODialog", () => {
+    const wrapper = createWrapper();
+    const dialog = wrapper.findComponent(ODialogStub);
+    expect(dialog.props("size")).toBe("sm");
+    // persistent is passed as an attribute without an explicit value, which
+    // Vue coerces to "" — treat any non-falsy value as enabled.
+    expect(dialog.props("persistent")).toBeDefined();
+    expect(dialog.props("persistent")).not.toBeNull();
+  });
+
+  it("uses 'destructive' variant for the confirmation primary button", () => {
+    const wrapper = createWrapper();
+    const dialog = wrapper.findComponent(ODialogStub);
+    expect(dialog.props("primaryButtonVariant")).toBe("destructive");
+  });
+
+  it("closes the confirmation ODialog when click:secondary is emitted", async () => {
+    const wrapper = createWrapper();
+    (wrapper.vm as any).showDeleteConfirmation = true;
+    await nextTick();
+    await wrapper.findComponent(ODialogStub).vm.$emit("click:secondary");
+    expect((wrapper.vm as any).showDeleteConfirmation).toBe(false);
+  });
+
+  it("calls confirmDelete (createBackfillJob + closes dialog) on click:primary", async () => {
+    vi.mocked(backfillService.createBackfillJob).mockResolvedValue({
+      job_id: "new-job-id",
+      message: "created",
+    });
+    const wrapper = createWrapper();
+    // Submit with delete enabled → stashes the validated value + opens dialog.
+    setRange(wrapper, validRange());
+    setField(wrapper, "deleteBeforeBackfill", true);
+    await submitForm(wrapper);
+    expect((wrapper.vm as any).showDeleteConfirmation).toBe(true);
+    await wrapper.findComponent(ODialogStub).vm.$emit("click:primary");
+    await flushPromises();
+    expect((wrapper.vm as any).showDeleteConfirmation).toBe(false);
+    expect(backfillService.createBackfillJob).toHaveBeenCalled();
+  });
+});
+
+// --------------------------------------------------------------------------
+// confirmDelete (direct VM call)
 // --------------------------------------------------------------------------
 
 describe("CreateBackfillJobDialog – confirmDelete", () => {
@@ -355,9 +535,10 @@ describe("CreateBackfillJobDialog – confirmDelete", () => {
       message: "created",
     });
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    (wrapper.vm as any).showDeleteConfirmation = true;
+    // Submit with delete enabled to stash the pending validated value.
+    setRange(wrapper, validRange());
+    setField(wrapper, "deleteBeforeBackfill", true);
+    await submitForm(wrapper);
     await (wrapper.vm as any).confirmDelete();
     await flushPromises();
     expect((wrapper.vm as any).showDeleteConfirmation).toBe(false);
@@ -366,7 +547,7 @@ describe("CreateBackfillJobDialog – confirmDelete", () => {
 });
 
 // --------------------------------------------------------------------------
-// createBackfillJobRequest
+// createBackfillJobRequest (via real submit)
 // --------------------------------------------------------------------------
 
 describe("CreateBackfillJobDialog – createBackfillJobRequest", () => {
@@ -378,22 +559,56 @@ describe("CreateBackfillJobDialog – createBackfillJobRequest", () => {
       message: "created",
     });
     const wrapper = createWrapper({ pipelineId: "pipe-99" });
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    (wrapper.vm as any).formData.deleteBeforeBackfill = false;
-    await (wrapper.vm as any).createBackfillJobRequest();
-    await flushPromises();
+    setRange(wrapper, validRange());
+    setField(wrapper, "deleteBeforeBackfill", false);
+    await submitForm(wrapper);
     expect(backfillService.createBackfillJob).toHaveBeenCalledWith(
       expect.objectContaining({
         org_id: "default",
         pipeline_id: "pipe-99",
         data: expect.objectContaining({
-          start_time: 1_700_000_000_000_000,
-          end_time: 1_700_003_600_000_000,
+          start_time: VALID_FROM,
+          end_time: VALID_TO,
           delete_before_backfill: false,
         }),
-      })
+      }),
     );
+  });
+
+  it("sends chunk_period_minutes / delay as numbers (not strings) when typed via OInput", async () => {
+    vi.mocked(backfillService.createBackfillJob).mockResolvedValue({
+      job_id: "new-job-id",
+      message: "created",
+    });
+    const wrapper = createWrapper();
+    // OForm-owned state (no more `formData`): seed the range via the form and
+    // keep delete_before_backfill off so submit goes straight to createBackfillJobRequest.
+    setRange(wrapper, validRange());
+    setField(wrapper, "deleteBeforeBackfill", false);
+
+    // Drive the real OInput. OFormInput binds OInput without a `.number` modifier,
+    // so a type="number" field stores the RAW STRING; the number coercion happens
+    // in createBackfillJobRequest (Number(...)) when building the payload.
+    await wrapper.find('[data-test="chunk-period-input-field"]').setValue("120");
+    await wrapper.find('[data-test="delay-between-chunks-input-field"]').setValue("15");
+    await nextTick();
+
+    // Form state holds the emitted strings (documents the coercion boundary).
+    expect(formVals(wrapper).chunkPeriodMinutes).toBe("120");
+    expect(formVals(wrapper).delayBetweenChunks).toBe("15");
+
+    // Submit through the real form so onSubmit -> createBackfillJobRequest(value) runs.
+    await submitForm(wrapper);
+    await flushPromises();
+
+    const payload = vi.mocked(backfillService.createBackfillJob).mock.calls[0][0].data as Record<
+      string,
+      unknown
+    >;
+    expect(payload.chunk_period_minutes).toBe(120);
+    expect(payload.delay_between_chunks_secs).toBe(15);
+    expect(typeof payload.chunk_period_minutes).toBe("number");
+    expect(typeof payload.delay_between_chunks_secs).toBe("number");
   });
 
   it("emits 'success' with job_id on successful creation", async () => {
@@ -402,10 +617,8 @@ describe("CreateBackfillJobDialog – createBackfillJobRequest", () => {
       message: "created",
     });
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    await (wrapper.vm as any).createBackfillJobRequest();
-    await flushPromises();
+    setRange(wrapper, validRange());
+    await submitForm(wrapper);
     expect(wrapper.emitted("success")).toBeTruthy();
     expect(wrapper.emitted("success")![0]).toEqual(["new-job-id"]);
   });
@@ -415,56 +628,48 @@ describe("CreateBackfillJobDialog – createBackfillJobRequest", () => {
       response: { data: { message: "Something went wrong" } },
     });
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    await (wrapper.vm as any).createBackfillJobRequest();
-    await flushPromises();
+    setRange(wrapper, validRange());
+    await submitForm(wrapper);
     expect((wrapper.vm as any).errorMessage).toBe("Something went wrong");
   });
 
-  it("sets loading to false after request completes (success)", async () => {
-    vi.mocked(backfillService.createBackfillJob).mockResolvedValue({
-      job_id: "new-job-id",
-      message: "created",
-    });
-    const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    await (wrapper.vm as any).createBackfillJobRequest();
-    await flushPromises();
-    expect((wrapper.vm as any).loading).toBe(false);
-  });
-
-  it("sets loading to false after request completes (failure)", async () => {
-    vi.mocked(backfillService.createBackfillJob).mockRejectedValue(
-      new Error("network error")
+  it("keeps the form submitting (form-driven spinner) while a request is in flight", async () => {
+    let resolveFn: (val: any) => void = () => {};
+    vi.mocked(backfillService.createBackfillJob).mockImplementation(
+      () =>
+        new Promise((res) => {
+          resolveFn = res;
+        }),
     );
     const wrapper = createWrapper();
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
-    await (wrapper.vm as any).createBackfillJobRequest();
-    await flushPromises();
-    expect((wrapper.vm as any).loading).toBe(false);
+    setRange(wrapper, validRange());
+    // The awaited onSubmit keeps the form's isSubmitting (which the form-id
+    // bridge mirrors onto the ODrawer footer spinner) true for the whole save.
+    (wrapper.vm as any).form.handleSubmit();
+    // The schema validates asynchronously — wait for the save to actually fire.
+    await vi.waitFor(() => expect(backfillService.createBackfillJob).toHaveBeenCalled());
+    expect((wrapper.vm as any).form.state.isSubmitting).toBe(true);
+    resolveFn({ job_id: "new-job-id", message: "created" });
+    await vi.waitFor(() => expect((wrapper.vm as any).form.state.isSubmitting).toBe(false));
   });
 });
 
 // --------------------------------------------------------------------------
-// onCancel / resetForm
+// onCancel / resetForm – driven through ODrawer @click:secondary emit
 // --------------------------------------------------------------------------
 
 describe("CreateBackfillJobDialog – onCancel and resetForm", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("onCancel calls resetForm and emits update:modelValue=false", async () => {
+  it("ODrawer click:secondary triggers reset + emits update:modelValue=false", async () => {
     const wrapper = createWrapper({ modelValue: true });
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
+    setRange(wrapper, validRange());
     (wrapper.vm as any).showAdvanced = true;
     (wrapper.vm as any).errorMessage = "some error";
-    await (wrapper.vm as any).onCancel();
+    await wrapper.findComponent(ODrawerStub).vm.$emit("click:secondary");
     await nextTick();
-    expect((wrapper.vm as any).formData.startTimeMicros).toBe(0);
-    expect((wrapper.vm as any).formData.endTimeMicros).toBe(0);
+    expect(formVals(wrapper).timerange.from).toBeUndefined();
+    expect(formVals(wrapper).timerange.to).toBeUndefined();
     expect((wrapper.vm as any).showAdvanced).toBe(false);
     expect((wrapper.vm as any).errorMessage).toBe("");
     const emitted = wrapper.emitted("update:modelValue");
@@ -472,20 +677,19 @@ describe("CreateBackfillJobDialog – onCancel and resetForm", () => {
     expect(emitted![emitted!.length - 1]).toEqual([false]);
   });
 
-  it("resetForm resets formData to initial values", async () => {
+  it("resetForm resets timerange + form values to initial values", async () => {
     const wrapper = createWrapper({ scheduleFrequency: 45 });
-    (wrapper.vm as any).formData.startTimeMicros = 9_999_999;
-    (wrapper.vm as any).formData.endTimeMicros = 9_999_999;
-    (wrapper.vm as any).formData.chunkPeriodMinutes = 10;
-    (wrapper.vm as any).formData.deleteBeforeBackfill = true;
+    setRange(wrapper, validRange());
+    setField(wrapper, "chunkPeriodMinutes", 10);
+    setField(wrapper, "deleteBeforeBackfill", true);
     (wrapper.vm as any).showAdvanced = true;
     (wrapper.vm as any).errorMessage = "err";
     (wrapper.vm as any).resetForm();
     await nextTick();
-    expect((wrapper.vm as any).formData.startTimeMicros).toBe(0);
-    expect((wrapper.vm as any).formData.endTimeMicros).toBe(0);
-    expect((wrapper.vm as any).formData.chunkPeriodMinutes).toBe(45);
-    expect((wrapper.vm as any).formData.deleteBeforeBackfill).toBe(false);
+    expect(formVals(wrapper).timerange.from).toBeUndefined();
+    expect(formVals(wrapper).timerange.to).toBeUndefined();
+    expect(formVals(wrapper).chunkPeriodMinutes).toBe(45);
+    expect(formVals(wrapper).deleteBeforeBackfill).toBe(false);
     expect((wrapper.vm as any).showAdvanced).toBe(false);
     expect((wrapper.vm as any).errorMessage).toBe("");
   });
@@ -500,13 +704,28 @@ describe("CreateBackfillJobDialog – pipelineId watcher", () => {
 
   it("calls resetForm when pipelineId prop changes", async () => {
     const wrapper = createWrapper({ pipelineId: "pipe-1" });
-    (wrapper.vm as any).formData.startTimeMicros = 1_700_000_000_000_000;
-    (wrapper.vm as any).formData.endTimeMicros = 1_700_003_600_000_000;
+    setRange(wrapper, validRange());
     (wrapper.vm as any).showAdvanced = true;
     await wrapper.setProps({ pipelineId: "pipe-2" });
     await nextTick();
-    expect((wrapper.vm as any).formData.startTimeMicros).toBe(0);
-    expect((wrapper.vm as any).formData.endTimeMicros).toBe(0);
+    expect(formVals(wrapper).timerange.from).toBeUndefined();
+    expect(formVals(wrapper).timerange.to).toBeUndefined();
     expect((wrapper.vm as any).showAdvanced).toBe(false);
+  });
+});
+
+// --------------------------------------------------------------------------
+// v-model:open – update:modelValue propagation
+// --------------------------------------------------------------------------
+
+describe("CreateBackfillJobDialog – v-model bridging", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("emits update:modelValue when the ODrawer emits update:open=false", async () => {
+    const wrapper = createWrapper({ modelValue: true });
+    await wrapper.findComponent(ODrawerStub).vm.$emit("update:open", false);
+    const emitted = wrapper.emitted("update:modelValue");
+    expect(emitted).toBeTruthy();
+    expect(emitted![emitted!.length - 1]).toEqual([false]);
   });
 });

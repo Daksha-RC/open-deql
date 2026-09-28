@@ -89,6 +89,8 @@ export const DEFAULT_LOGS_CONFIG = {
   loadingCounter: false,
   loadingStream: false,
   loadingSavedView: false,
+  loadingProgressPercentage: 0,
+  loadingHistogramProgressPercentage: 0,
   shouldIgnoreWatcher: false,
   communicationMethod: "streaming" as const,
   config: {
@@ -103,6 +105,8 @@ export const DEFAULT_LOGS_CONFIG = {
   meta: {
     logsVisualizeToggle: "logs" as const,
     buildModeQueryEditorDisabled: false, // true when in build mode and customQuery is false
+    // One-shot hand-off of a saved view's builder chart to BuildQueryPage; not persisted.
+    savedBuildConfig: null as any,
     refreshInterval: 0 as number,
     refreshIntervalLabel: "Off",
     refreshHistogram: false,
@@ -111,17 +115,26 @@ export const DEFAULT_LOGS_CONFIG = {
     showHistogram: true,
     showPatterns: false,
     showDetailTab: false,
-    showTransformEditor: false, // by default function / actions editor should be hidden
+    showTransformEditor: false, // by default function editor should be hidden
     searchApplied: false,
-    toggleSourceWrap: useLocalWrapContent()
-      ? JSON.parse(useLocalWrapContent())
-      : false,
+    toggleSourceWrap: useLocalWrapContent() ? JSON.parse(useLocalWrapContent()) : false,
     histogramDirtyFlag: false,
     logsVisualizeDirtyFlag: false,
     sqlMode: false,
     sqlModeManualTrigger: false,
+    sqlModeEditTransition: false,
+    // True from when a URL / short-link restore sets the query until the
+    // (lazy-loaded) editor has actually applied it. Guards updateQueryValue()
+    // against the editor's transient empty emission during mount wiping the
+    // restored query. See SearchBar.updateQueryValue and useLogs.restoreUrlQueryParams.
+    pendingUrlQueryRestore: false,
     nlpMode: false,
     quickMode: false,
+    // True when the current selectedFields were chosen automatically by the FTS
+    // default-column logic (a system pick), not by the user. System picks are a
+    // display convenience and must NOT be persisted to logFilterField — only an
+    // explicit user pin/reorder/remove persists. Cleared by any user action.
+    isFtsDefaultColumn: false,
     queryEditorPlaceholderFlag: true,
     functionEditorPlaceholderFlag: true,
     resultGrid: {
@@ -146,7 +159,6 @@ export const DEFAULT_LOGS_CONFIG = {
     selectedTraceStream: "",
     showSearchScheduler: false,
     toggleFunction: false, // DEPRECATED use showTransformEditor instead
-    isActionsEnabled: false,
     resetPlotChart: false,
     clearCache: false,
     liveMode: localStorage.getItem("oo_toggle_auto_run") === "true",
@@ -160,6 +172,12 @@ export const DEFAULT_LOGS_CONFIG = {
     errorDetail: "",
     errorCode: 0,
     filterErrMsg: "",
+    sqlSyntaxErrorRanges: [] as Array<{
+      startLine: number;
+      endLine: number;
+      column?: number;
+      error: string;
+    }>,
     missingStreamMessage: "",
     additionalErrorMsg: "",
     savedViewFilterFields: "",
@@ -173,6 +191,7 @@ export const DEFAULT_LOGS_CONFIG = {
       selectedFields: [] as string[],
       filterField: "",
       addToFilter: "",
+      addToFilterMode: "replace" as "replace" | "append",
       removeFilterField: "",
       functions: [] as any[],
       streamType: "logs",
@@ -197,7 +216,6 @@ export const DEFAULT_LOGS_CONFIG = {
     histogramInterval: 0 as any,
     transforms: [] as any[],
     transformType: "function",
-    actions: [] as any[],
     selectedTransform: null as any,
     queryResults: [] as any[],
     sortedQueryResults: [] as any[],
@@ -209,6 +227,7 @@ export const DEFAULT_LOGS_CONFIG = {
       breakdownSeries: null,
       chartParams: {
         title: "",
+        titleParts: null,
         unparsed_x_data: [],
         timezone: "",
       },
@@ -249,7 +268,6 @@ export const DEFAULT_LOGS_CONFIG = {
     lastHistogramTraceId: "" as string,
     isOperationCancelled: false,
     searchRetriesCount: {} as { [key: string]: number },
-    actionId: null,
     crossLinks: { stream_links: [], org_links: [] },
     crossLinkQuery: "",
     highlightQuery: "",

@@ -14,22 +14,41 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import type { ChatMessage, ChatHistoryEntry } from "@/ts/interfaces/chat";
+import { raw, type TranslateFn } from "@/types/i18n";
+import { computeUserOrgKey } from "@/utils/userOrgKey";
 
 const DB_NAME = "o2ChatDB";
 const DB_VERSION = 2;
 const STORE_NAME = "chatHistory";
 const MAX_HISTORY_ITEMS = 100;
 
+// Opening a connection per call leaked one IDBDatabase per operation, so the
+// single connection is memoised and reused for the page's lifetime.
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 /**
  * Initialize IndexedDB for chat history storage.
  * Version 2 adds the userOrgKey index for per-user/org isolation.
  */
 const initDB = (): Promise<IDBDatabase> => {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+
+  dbPromise = new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
 
     request.onerror = () => reject(request.error);
-    request.onsuccess = () => resolve(request.result);
+    request.onsuccess = () => {
+      const db = request.result;
+      // A version change elsewhere closes this handle; drop it so the next call reopens.
+      db.onclose = () => {
+        dbPromise = null;
+      };
+      db.onversionchange = () => {
+        db.close();
+        dbPromise = null;
+      };
+      resolve(db);
+    };
     request.onupgradeneeded = (event: IDBVersionChangeEvent) => {
       const db = (event.target as IDBOpenDBRequest).result;
       const transaction = (event.target as IDBOpenDBRequest).transaction!;
@@ -52,35 +71,13 @@ const initDB = (): Promise<IDBDatabase> => {
       }
     };
   });
-};
 
-/**
- * Compute an opaque SHA-256 hash of "email:orgIdentifier".
- * Falls back to a synchronous djb2 hash in environments without crypto.subtle.
- * The result is cached after first computation.
- */
-const computeUserOrgKey = async (
-  userEmail: string,
-  orgIdentifier: string,
-): Promise<string> => {
-  const raw = `${userEmail}:${orgIdentifier}`;
+  // A failed open must not be cached, otherwise every later call rejects.
+  dbPromise.catch(() => {
+    dbPromise = null;
+  });
 
-  if (typeof crypto !== "undefined" && crypto.subtle) {
-    const buf = await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(raw),
-    );
-    return Array.from(new Uint8Array(buf))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("");
-  }
-
-  // Synchronous djb2 fallback (test environments without crypto.subtle)
-  let hash = 5381;
-  for (let i = 0; i < raw.length; i++) {
-    hash = (((hash << 5) + hash) ^ raw.charCodeAt(i)) >>> 0;
-  }
-  return hash.toString(36);
+  return dbPromise;
 };
 
 /**
@@ -96,10 +93,12 @@ const computeUserOrgKey = async (
  *   current value from the Vuex store, so org/user switches are reflected
  *   immediately without re-mounting the component.
  * @param getOrgIdentifier - Getter returning the current org identifier.
+ * @param t - Translator from the calling component's `useI18nTyped()`.
  */
 export function useChatHistory(
   getUserEmail: () => string,
   getOrgIdentifier: () => string,
+  t: TranslateFn,
 ) {
   // Cache the last computed hash alongside the raw input that produced it.
   // When the org or user changes the raw string changes, triggering a new hash.
@@ -145,7 +144,7 @@ export function useChatHistory(
           ? firstUserMessage.content.length > 40
             ? firstUserMessage.content.substring(0, 40) + "..."
             : firstUserMessage.content
-          : "New Chat");
+          : t("common.newChat"));
 
       // Strip Vue reactivity from messages
       const serializableMessages = messages.map((msg) => {
@@ -154,9 +153,7 @@ export function useChatHistory(
           content: msg.content,
         };
         if (msg.contentBlocks && msg.contentBlocks.length > 0) {
-          serialized.contentBlocks = JSON.parse(
-            JSON.stringify(msg.contentBlocks),
-          );
+          serialized.contentBlocks = JSON.parse(JSON.stringify(msg.contentBlocks));
         }
         if (msg.images && msg.images.length > 0) {
           serialized.images = JSON.parse(JSON.stringify(msg.images));
@@ -208,20 +205,16 @@ export function useChatHistory(
       const store = transaction.objectStore(STORE_NAME);
       const index = store.index("userOrgKey");
 
-      const history = await new Promise<ChatHistoryEntry[]>(
-        (resolve, reject) => {
-          const request = index.getAll(IDBKeyRange.only(userOrgKey));
-          request.onsuccess = () => {
-            const results = (request.result as ChatHistoryEntry[]).sort(
-              (a, b) =>
-                new Date(b.timestamp).getTime() -
-                new Date(a.timestamp).getTime(),
-            );
-            resolve(results);
-          };
-          request.onerror = () => reject(request.error);
-        },
-      );
+      const history = await new Promise<ChatHistoryEntry[]>((resolve, reject) => {
+        const request = index.getAll(IDBKeyRange.only(userOrgKey));
+        request.onsuccess = () => {
+          const results = (request.result as ChatHistoryEntry[]).sort(
+            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+          );
+          resolve(results);
+        };
+        request.onerror = () => reject(request.error);
+      });
 
       // Prune old entries beyond MAX_HISTORY_ITEMS (only for this user+org)
       if (history.length > MAX_HISTORY_ITEMS) {
@@ -264,10 +257,7 @@ export function useChatHistory(
         request.onsuccess = () => {
           const record = request.result as ChatHistoryEntry | undefined;
           // Verify ownership — reject records belonging to another user+org
-          if (
-            !record ||
-            (record.userOrgKey && record.userOrgKey !== userOrgKey)
-          ) {
+          if (!record || (record.userOrgKey && record.userOrgKey !== userOrgKey)) {
             resolve(null);
             return;
           }
@@ -301,10 +291,7 @@ export function useChatHistory(
         const getRequest = store.get(chatId);
         getRequest.onsuccess = () => {
           const record = getRequest.result as ChatHistoryEntry | undefined;
-          if (
-            !record ||
-            (record.userOrgKey && record.userOrgKey !== userOrgKey)
-          ) {
+          if (!record || (record.userOrgKey && record.userOrgKey !== userOrgKey)) {
             resolve(false);
             return;
           }
@@ -342,8 +329,7 @@ export function useChatHistory(
       return new Promise((resolve, reject) => {
         const request = index.openCursor(IDBKeyRange.only(userOrgKey));
         request.onsuccess = (event: Event) => {
-          const cursor = (event.target as IDBRequest)
-            .result as IDBCursorWithValue;
+          const cursor = (event.target as IDBRequest).result as IDBCursorWithValue;
           if (cursor) {
             cursor.delete();
             cursor.continue();
@@ -370,10 +356,7 @@ export function useChatHistory(
    * @param newTitle - The new title
    * @returns true if update succeeded
    */
-  const updateChatTitle = async (
-    chatId: number,
-    newTitle: string,
-  ): Promise<boolean> => {
+  const updateChatTitle = async (chatId: number, newTitle: string): Promise<boolean> => {
     try {
       const [db, userOrgKey] = await Promise.all([initDB(), getUserOrgKey()]);
       const transaction = db.transaction(STORE_NAME, "readwrite");
@@ -387,7 +370,7 @@ export function useChatHistory(
             resolve(false);
             return;
           }
-          chat.title = newTitle;
+          chat.title = raw(newTitle);
           const putRequest = store.put(chat);
           putRequest.onsuccess = () => resolve(true);
           putRequest.onerror = () => {
@@ -396,10 +379,7 @@ export function useChatHistory(
           };
         };
         getRequest.onerror = () => {
-          console.error(
-            "Error retrieving chat for title update:",
-            getRequest.error,
-          );
+          console.error("Error retrieving chat for title update:", getRequest.error);
           reject(getRequest.error);
         };
       });

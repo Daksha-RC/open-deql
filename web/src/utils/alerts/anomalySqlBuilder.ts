@@ -18,6 +18,38 @@ import {
   operatorNeedsValue,
 } from "@/utils/alerts/anomalyFilterOperators";
 
+// Exactly the backend DetectionFunction percentile variants; p75/p90 would be rejected on save.
+const percentileMap: Record<string, number> = {
+  p50: 0.5,
+  p95: 0.95,
+  p99: 0.99,
+};
+
+/**
+ * Converts a detection function name + field to the SQL expression for the
+ * histogram query. The percentile short-names the backend accepts (p50, p95,
+ * p99) are expanded to `approx_percentile_cont(field, percentile)`; any other
+ * name is wrapped verbatim. Regular alerts accept a wider percentile set and
+ * build their own SQL in alertQueryBuilder.ts.
+ */
+export const toDetectionFunctionSql = (rawFn: string, field: string): string => {
+  // API may return already-wrapped forms like "p90(duration)" or "avg(size)"
+  const match = rawFn.match(/^(\w+)\((.+)\)$/);
+  if (match) {
+    const fnName = match[1].toLowerCase();
+    const fnField = match[2];
+    return percentileMap[fnName]
+      ? `approx_percentile_cont(${fnField}, ${percentileMap[fnName]})`
+      : rawFn;
+  }
+  const fnLower = rawFn.toLowerCase();
+  if (percentileMap[fnLower]) {
+    return `approx_percentile_cont(${field || "*"}, ${percentileMap[fnLower]})`;
+  }
+  if (fnLower === "count") return "count(*)";
+  return `${rawFn}(${field || "*"})`;
+};
+
 /**
  * Builds the SQL query for an anomaly detection config, including seasonality
  * columns (hour, dow) that match the SQL Preview shown during config setup.
@@ -41,31 +73,16 @@ export const buildAnomalyPreviewSql = (config: any): string => {
     config.histogram_interval ||
     `${config.histogram_interval_value ?? 5}${config.histogram_interval_unit ?? "m"}`;
   const rawFn = config.detection_function || "count";
-  // The API may return "count(*)" or "avg(field)" (with parens already),
-  // while the form stores "count" + separate field. Handle both.
-  const fnAlreadyWrapped = rawFn.includes("(");
-  const fn = fnAlreadyWrapped
-    ? rawFn
-    : rawFn === "count"
-      ? "count(*)"
-      : `${rawFn}(${config.detection_function_field || "*"})`;
+  const fn = toDetectionFunctionSql(rawFn, config.detection_function_field || "*");
 
   const filterLines = (config.filters || [])
-    .filter(
-      (f: any) =>
-        f.field && (operatorNeedsValue(f.operator) ? f.value : true),
-    )
-    .map(
-      (f: any) =>
-        `  AND ${buildAnomalyFilterExpression(f.field, f.operator, f.value)}`,
-    );
+    .filter((f: any) => f.field && (operatorNeedsValue(f.operator) ? f.value : true))
+    .map((f: any) => `  AND ${buildAnomalyFilterExpression(f.field, f.operator, f.value)}`);
 
   const where = filterLines.length
     ? [
         "WHERE",
-        ...filterLines.map((l: string, i: number) =>
-          i === 0 ? l.replace(/^\s+AND /, "  ") : l,
-        ),
+        ...filterLines.map((l: string, i: number) => (i === 0 ? l.replace(/^\s+AND /, "  ") : l)),
       ].join("\n")
     : "";
 
@@ -76,8 +93,7 @@ export const buildAnomalyPreviewSql = (config: any): string => {
     autoSeasonality === "week"
       ? ",\n       date_part('hour', to_timestamp(_timestamp / 1000000)) AS hour,\n       date_part('dow', to_timestamp(_timestamp / 1000000)) AS dow"
       : ",\n       date_part('hour', to_timestamp(_timestamp / 1000000)) AS hour";
-  const seasonalGroup =
-    autoSeasonality === "week" ? ", hour, dow" : ", hour";
+  const seasonalGroup = autoSeasonality === "week" ? ", hour, dow" : ", hour";
 
   return [
     `SELECT histogram(_timestamp, '${interval}') AS time_bucket,`,

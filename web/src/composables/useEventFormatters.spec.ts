@@ -16,10 +16,8 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
 
 // All external dependencies must be mocked before importing the composable.
-vi.mock("quasar", () => ({
-  date: {
-    formatDate: vi.fn().mockReturnValue("Jan 01, 2024 00:00:00.000 +0000"),
-  },
+vi.mock("@/utils/date", () => ({
+  formatDate: vi.fn().mockReturnValue("Jan 01, 2024 00:00:00.000 +0000"),
 }));
 
 vi.mock("@/utils/zincutils", () => ({
@@ -27,7 +25,7 @@ vi.mock("@/utils/zincutils", () => ({
 }));
 
 import { useEventFormatters } from "./useEventFormatters";
-import { date } from "quasar";
+import { formatDate } from "@/utils/date";
 import { formatDuration } from "@/utils/zincutils";
 
 describe("useEventFormatters", () => {
@@ -47,15 +45,12 @@ describe("useEventFormatters", () => {
       expect(formatters.formatTimestamp(null as unknown as number)).toBe("N/A");
     });
 
-    it("calls date.formatDate with Math.floor of the timestamp", () => {
+    it("calls formatDate with Math.floor of the timestamp", () => {
       formatters.formatTimestamp(1704067200500.9);
-      expect(date.formatDate).toHaveBeenCalledWith(
-        1704067200500,
-        "MMM DD, YYYY HH:mm:ss.SSS Z"
-      );
+      expect(formatDate).toHaveBeenCalledWith(1704067200500, "MMM DD, YYYY HH:mm:ss.SSS Z");
     });
 
-    it("returns the formatted string from date.formatDate", () => {
+    it("returns the formatted string from formatDate", () => {
       const result = formatters.formatTimestamp(1704067200000);
       expect(result).toBe("Jan 01, 2024 00:00:00.000 +0000");
     });
@@ -81,20 +76,20 @@ describe("useEventFormatters", () => {
   });
 
   describe("getStatusIcon", () => {
-    it("returns 'help' for 0 (falsy)", () => {
-      expect(formatters.getStatusIcon(0)).toBe("help");
+    it("returns 'help-outline' for 0 (falsy)", () => {
+      expect(formatters.getStatusIcon(0)).toBe("help-outline");
     });
 
-    it("returns 'help' for null-like input", () => {
-      expect(formatters.getStatusIcon(null as unknown as number)).toBe("help");
+    it("returns 'help-outline' for null-like input", () => {
+      expect(formatters.getStatusIcon(null as unknown as number)).toBe("help-outline");
     });
 
-    it("returns 'check_circle' for status 200", () => {
-      expect(formatters.getStatusIcon(200)).toBe("check_circle");
+    it("returns 'check-circle' for status 200", () => {
+      expect(formatters.getStatusIcon(200)).toBe("check-circle");
     });
 
-    it("returns 'check_circle' for status 299 (boundary of 2xx)", () => {
-      expect(formatters.getStatusIcon(299)).toBe("check_circle");
+    it("returns 'check-circle' for status 299 (boundary of 2xx)", () => {
+      expect(formatters.getStatusIcon(299)).toBe("check-circle");
     });
 
     it("returns 'info' for status 301", () => {
@@ -122,37 +117,37 @@ describe("useEventFormatters", () => {
     });
   });
 
-  describe("getStatusColor", () => {
-    it("returns 'grey' for 0 (falsy)", () => {
-      expect(formatters.getStatusColor(0)).toBe("grey");
+  describe("getStatusColorClass", () => {
+    it("returns 'text-text-secondary' for 0 (falsy)", () => {
+      expect(formatters.getStatusColorClass(0)).toBe("text-text-secondary");
     });
 
-    it("returns 'grey' for null-like input", () => {
-      expect(formatters.getStatusColor(null as unknown as number)).toBe("grey");
+    it("returns 'text-text-secondary' for null-like input", () => {
+      expect(formatters.getStatusColorClass(null as unknown as number)).toBe("text-text-secondary");
     });
 
-    it("returns 'positive' for status 200", () => {
-      expect(formatters.getStatusColor(200)).toBe("positive");
+    it("returns positive color class for status 200", () => {
+      expect(formatters.getStatusColorClass(200)).toBe("text-[var(--color-status-positive)]");
     });
 
-    it("returns 'positive' for status 201", () => {
-      expect(formatters.getStatusColor(201)).toBe("positive");
+    it("returns positive color class for status 201", () => {
+      expect(formatters.getStatusColorClass(201)).toBe("text-[var(--color-status-positive)]");
     });
 
-    it("returns 'info' for status 301", () => {
-      expect(formatters.getStatusColor(301)).toBe("info");
+    it("returns info color class for status 301", () => {
+      expect(formatters.getStatusColorClass(301)).toBe("text-[var(--color-info)]");
     });
 
-    it("returns 'warning' for status 404", () => {
-      expect(formatters.getStatusColor(404)).toBe("warning");
+    it("returns warning color class for status 404", () => {
+      expect(formatters.getStatusColorClass(404)).toBe("text-[var(--color-warning)]");
     });
 
-    it("returns 'negative' for status 500", () => {
-      expect(formatters.getStatusColor(500)).toBe("negative");
+    it("returns negative color class for status 500", () => {
+      expect(formatters.getStatusColorClass(500)).toBe("text-[var(--color-status-negative)]");
     });
 
-    it("returns 'negative' for status 502", () => {
-      expect(formatters.getStatusColor(502)).toBe("negative");
+    it("returns negative color class for status 502", () => {
+      expect(formatters.getStatusColorClass(502)).toBe("text-[var(--color-status-negative)]");
     });
   });
 
@@ -192,36 +187,34 @@ describe("useEventFormatters", () => {
   describe("getEventTypeClass", () => {
     it("returns error CSS classes for type 'error'", () => {
       expect(formatters.getEventTypeClass("error")).toBe(
-        "tw:bg-red-100 tw:text-red-700 tw:border tw:border-solid tw:border-red-300"
+        "bg-error-100 text-error-700 border border-solid border-error-300",
       );
     });
 
     it("returns action CSS classes for type 'action'", () => {
       expect(formatters.getEventTypeClass("action")).toBe(
-        "tw:bg-blue-100 tw:text-blue-700 tw:border tw:border-solid tw:border-blue-300"
+        "bg-blue-100 text-blue-700 border border-solid border-blue-300",
       );
     });
 
     it("returns view CSS classes for type 'view'", () => {
       expect(formatters.getEventTypeClass("view")).toBe(
-        "tw:bg-green-100 tw:text-green-700 tw:border tw:border-solid tw:border-green-300"
+        "bg-success-100 text-success-700 border border-solid border-success-400",
       );
     });
 
     it("returns resource CSS classes for type 'resource'", () => {
       expect(formatters.getEventTypeClass("resource")).toBe(
-        "tw:bg-purple-100 tw:text-purple-700 tw:border tw:border-solid tw:border-purple-300"
+        "bg-purple-100 text-purple-700 border border-solid border-purple-400",
       );
     });
 
     it("returns default classes for an unknown type", () => {
-      expect(formatters.getEventTypeClass("unknown")).toBe(
-        "tw:bg-grey-100 tw:text-grey-700"
-      );
+      expect(formatters.getEventTypeClass("unknown")).toBe("bg-grey-100 text-grey-700");
     });
 
     it("returns default classes for an empty string type", () => {
-      expect(formatters.getEventTypeClass("")).toBe("tw:bg-grey-100 tw:text-grey-700");
+      expect(formatters.getEventTypeClass("")).toBe("bg-grey-100 text-grey-700");
     });
   });
 });

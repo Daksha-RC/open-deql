@@ -15,56 +15,66 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="q-ma-md aws-config-page">
-    <div class="tw:mb-4">
-      <h6 class="tw:text-lg tw:font-semibold tw:m-0 tw:mb-2 page-title">
-        AWS Integrations
-      </h6>
-      <p class="tw:text-sm tw:m-0 tw:mb-4 page-description">
-        Set up AWS monitoring in one click or configure individual services for granular control.
-      </p>
-
-      <q-tabs
-        v-model="activeTab"
-        dense
-        class="aws-tabs"
-        active-color="primary"
-        indicator-color="primary"
-        align="left"
+  <div class="m-3 mt-1">
+    <div class="mb-4">
+      <div
+        data-test="aws-config-page-title"
+        class="text-text-heading m-0 mb-1.5 text-2xl leading-tight font-semibold"
       >
-        <q-tab name="quick-setup" label="Quick Setup" data-test="aws-quick-setup-tab" />
-        <q-tab name="individual-services" label="Individual Services" data-test="aws-individual-services-tab" />
-      </q-tabs>
+        {{ t("ingestion.awsSetup.title") }}
+      </div>
+      <div data-test="aws-config-page-description" class="text-text-secondary m-0 mb-4 text-sm">
+        {{ t("ingestion.awsSetup.description") }}
+      </div>
+
+      <OTabs v-model="activeTab" dense class="aws-tabs" align="left">
+        <OTab
+          name="quick-setup"
+          :label="t('ingestion.awsSetup.quickSetup')"
+          data-test="aws-quick-setup-tab"
+        />
+        <OTab
+          name="individual-services"
+          :label="t('ingestion.awsSetup.individualServices')"
+          data-test="aws-individual-services-tab"
+        />
+      </OTabs>
     </div>
 
-    <q-separator class="tw:mb-6" />
+    <OSeparator class="mb-6" />
 
-    <q-tab-panels v-model="activeTab" animated>
-      <q-tab-panel name="quick-setup" class="tw:p-0">
+    <OTabPanels v-model="activeTab" animated>
+      <OTabPanel name="quick-setup">
         <AWSQuickSetup />
-      </q-tab-panel>
+      </OTabPanel>
 
-      <q-tab-panel name="individual-services" class="tw:p-0">
+      <OTabPanel name="individual-services">
         <AWSIndividualServices :initialSearch="searchQuery" />
-      </q-tab-panel>
-    </q-tab-panels>
+      </OTabPanel>
+    </OTabPanels>
 
-    <div class="tw:mt-8">
-      <div class="tw:mb-3">
-        <h6 class="tw:text-base tw:font-semibold tw:m-0 section-title">
-          Manual Configuration
-        </h6>
-        <p class="tw:text-sm tw:m-0 section-description">
-          Use these credentials for custom AWS integrations or manual setup.
-        </p>
+    <div class="mt-8">
+      <div class="mb-3">
+        <div class="text-text-heading m-0 text-base font-semibold">
+          {{ t("ingestion.awsSetup.manualTitle") }}
+        </div>
+        <div class="text-text-secondary m-0 text-sm">
+          {{ t("ingestion.awsSetup.manualDescription") }}
+        </div>
       </div>
-      <CopyContent :content="content" />
+      <CopyContent :content="raw(content)" />
     </div>
   </div>
 </template>
 
 <script lang="ts">
+import OTabs from "@/lib/navigation/Tabs/OTabs.vue";
+import OTab from "@/lib/navigation/Tabs/OTab.vue";
+import OTabPanels from "@/lib/navigation/Tabs/OTabPanels.vue";
+import OTabPanel from "@/lib/navigation/Tabs/OTabPanel.vue";
+import OSeparator from "@/lib/core/Separator/OSeparator.vue";
 import { defineComponent, ref, watch } from "vue";
+import { raw, useI18nTyped } from "@/types/i18n";
 import { useRoute } from "vue-router";
 import config from "../../../aws-exports";
 import { useStore } from "vuex";
@@ -88,30 +98,44 @@ export default defineComponent({
     },
   },
   components: {
+    OSeparator,
+    OTabs,
+    OTab,
+    OTabPanels,
+    OTabPanel,
     CopyContent,
     AWSQuickSetup,
     AWSIndividualServices,
   },
   setup(props) {
+    const { t } = useI18nTyped();
     const store = useStore();
     const route = useRoute();
 
     // If there's a search query, default to individual-services tab
-    const activeTab = ref(props.searchQuery || route.query.search ? "individual-services" : "quick-setup");
+    const activeTab = ref(
+      props.searchQuery || route.query.search ? "individual-services" : "quick-setup",
+    );
 
     // Watch for search query changes in route
-    watch(() => route.query.search, (newSearch) => {
-      if (newSearch) {
-        activeTab.value = "individual-services";
-      }
-    });
+    watch(
+      () => route.query.search,
+      (newSearch) => {
+        if (newSearch) {
+          activeTab.value = "individual-services";
+        }
+      },
+    );
 
     // Watch for searchQuery prop changes
-    watch(() => props.searchQuery, (newSearch) => {
-      if (newSearch) {
-        activeTab.value = "individual-services";
-      }
-    });
+    watch(
+      () => props.searchQuery,
+      (newSearch) => {
+        if (newSearch) {
+          activeTab.value = "individual-services";
+        }
+      },
+    );
     // TODO OK: Create interface for ENDPOINT
     const endpoint: any = ref({
       url: "",
@@ -132,6 +156,8 @@ export default defineComponent({
 Access Key: [BASIC_PASSCODE]`;
 
     return {
+      raw,
+      t,
       store,
       config,
       endpoint,
@@ -142,21 +168,3 @@ Access Key: [BASIC_PASSCODE]`;
   },
 });
 </script>
-
-<style scoped lang="scss">
-.aws-config-page {
-  .body--light & {
-    .page-description,
-    .section-description {
-      color: #666;
-    }
-  }
-
-  .body--dark & {
-    .page-description,
-    .section-description {
-      color: #b0b0b0;
-    }
-  }
-}
-</style>

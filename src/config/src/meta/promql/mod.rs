@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use arrow_schema::Schema;
 use hashbrown::HashMap;
 use proto::prometheus_rpc;
 use regex::Regex;
@@ -20,7 +21,10 @@ use serde::{Deserialize, Deserializer, Serialize};
 use strum::Display;
 use utoipa::ToSchema;
 
-use crate::{meta::search::SearchEventType, stats::MemorySize};
+use crate::{
+    meta::search::{SearchEventContext, SearchEventType},
+    stats::MemorySize,
+};
 
 /// Custom deserializer that accepts either a comma-separated string or a string array
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -65,7 +69,10 @@ where
 }
 
 pub mod grpc;
+pub mod index;
 pub mod value;
+
+pub use index::MetricsBlockScan;
 
 pub const NAME_LABEL: &str = "__name__";
 pub const TYPE_LABEL: &str = "__type__";
@@ -75,6 +82,52 @@ pub const BUCKET_LABEL: &str = "le";
 pub const QUANTILE_LABEL: &str = "quantile";
 pub const METADATA_LABEL: &str = "prom_metadata"; // for schema metadata key
 pub const EXEMPLARS_LABEL: &str = "exemplars";
+/// Suffix of the extra table that declares the `(__hash__, _timestamp)` file order.
+pub const HASH_SORTED_TABLE_SUFFIX: &str = "__hash_sorted";
+
+/// Columns that metrics ingestion may exclude when deriving [`HASH_LABEL`].
+///
+/// Values in these columns are therefore not guaranteed to be stable within a
+/// contiguous hash run. Consumers such as the metrics sidecar index must not
+/// use them to prune a run from a query; the final PromQL filter can still
+/// evaluate them against the data rows.
+pub const METRICS_HASH_EXCLUDED_LABELS: &[&str] = &[
+    VALUE_LABEL,
+    HASH_LABEL,
+    EXEMPLARS_LABEL,
+    // OTLP per-point metadata, not dimensions: a restart moves start_time and forks the series
+    "start_time",
+    "flag",
+    "is_monotonic",
+    "trace_id",
+    "span_id",
+    crate::TIMESTAMP_COL_NAME,
+    crate::INDEX_FIELD_NAME_FOR_ALL,
+];
+
+#[inline]
+pub fn is_metrics_hash_excluded_label(name: &str) -> bool {
+    METRICS_HASH_EXCLUDED_LABELS.contains(&name)
+}
+
+pub fn get_metadata_from_schema(schema: &Schema) -> Option<Metadata> {
+    let metadata = schema.metadata.get(METADATA_LABEL)?;
+    let mut metadata: Metadata = match crate::utils::json::from_str(metadata) {
+        Ok(metadata) => metadata,
+        Err(e) => {
+            log::warn!("failed to parse {METADATA_LABEL} from schema: {e}, input: {metadata}");
+            return None;
+        }
+    };
+
+    // Historical schemas can contain a JSON-quoted family name. Parse it as a JSON string when
+    // possible, otherwise preserve the already-clean value.
+    let family_name = metadata.metric_family_name.trim();
+    metadata.metric_family_name = crate::utils::json::from_str::<String>(family_name)
+        .unwrap_or_else(|_| family_name.to_string());
+
+    Some(metadata)
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Metric<'a> {
@@ -182,6 +235,8 @@ pub struct RequestQuery {
     pub time: Option<String>,
     /// Evaluation timeout.
     pub timeout: Option<String>,
+    #[serde(flatten)]
+    pub search_event_context: SearchEventContext,
 }
 
 /// Range query.
@@ -216,6 +271,8 @@ pub struct RequestRangeQuery {
         deserialize_with = "deserialize_string_or_vec"
     )]
     pub clusters: Vec<String>, // default query all clusters, local: only query local cluster
+    #[serde(flatten)]
+    pub search_event_context: SearchEventContext,
 }
 
 #[derive(Debug, Deserialize)]
@@ -697,6 +754,7 @@ mod tests {
             search_type: None,
             regions: vec![],
             clusters: vec![],
+            search_event_context: Default::default(),
         };
         let json = serde_json::to_value(&q).unwrap();
         let obj = json.as_object().unwrap();
@@ -718,6 +776,7 @@ mod tests {
             search_type: Some(SearchEventType::UI),
             regions: vec!["us-east".to_string()],
             clusters: vec!["c1".to_string()],
+            search_event_context: Default::default(),
         };
         let json = serde_json::to_value(&q).unwrap();
         let obj = json.as_object().unwrap();

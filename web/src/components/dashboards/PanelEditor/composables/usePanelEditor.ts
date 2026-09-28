@@ -31,6 +31,7 @@ import { checkIfConfigChangeRequiredApiCallOrNot } from "@/utils/dashboard/check
 import { processQueryMetadataErrors } from "@/utils/zincutils";
 import useCancelQuery from "@/composables/dashboard/useCancelQuery";
 import useNotifications from "@/composables/useNotifications";
+import type { TranslateFn } from "@/types/i18n";
 
 /**
  * Options for usePanelEditor composable
@@ -38,6 +39,7 @@ import useNotifications from "@/composables/useNotifications";
 export interface UsePanelEditorOptions {
   /** The page type - determines default behavior */
   pageType: PanelEditorPageType;
+  t: TranslateFn;
   /** Resolved configuration (after merging props with presets) */
   config: PanelEditorConfig;
   /** Dashboard panel data from useDashboardPanelData composable */
@@ -65,6 +67,7 @@ export interface UsePanelEditorOptions {
  * Handles all shared state and actions across dashboard, metrics, and logs pages.
  */
 export function usePanelEditor(options: UsePanelEditorOptions) {
+  const { t } = options;
   const {
     pageType,
     config,
@@ -120,6 +123,9 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
   /** Series limit warning message */
   const limitNumberOfSeriesWarningMessage: Ref<string> = ref("");
 
+  /** Sparkline-unavailable warning (e.g. JOIN queries — API code 20013) */
+  const sparklineWarning: Ref<string> = ref("");
+
   /** General error message */
   const errorMessage: Ref<string> = ref("");
 
@@ -147,18 +153,17 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
    */
   const injectedLoadingState = inject<any>("variablesAndPanelsDataLoadingState", null);
 
-  const variablesAndPanelsDataLoadingState = injectedLoadingState || reactive({
-    variablesData: {} as Record<string, boolean>,
-    panels: {} as Record<string, boolean>,
-    searchRequestTraceIds: {} as Record<string, string[]>,
-  });
+  const variablesAndPanelsDataLoadingState =
+    injectedLoadingState ||
+    reactive({
+      variablesData: {} as Record<string, boolean>,
+      panels: {} as Record<string, boolean>,
+      searchRequestTraceIds: {} as Record<string, string[]>,
+    });
 
   // Provide loading state for child components (either injected or newly created)
   // This ensures PanelSchemaRenderer can inject it
-  provide(
-    "variablesAndPanelsDataLoadingState",
-    variablesAndPanelsDataLoadingState,
-  );
+  provide("variablesAndPanelsDataLoadingState", variablesAndPanelsDataLoadingState);
 
   /** Computed array of search request trace IDs (for cancel functionality) */
   const searchRequestTraceIds: ComputedRef<string[]> = computed(() => {
@@ -169,7 +174,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
   });
 
   // ---- Cancel Query Support ----
-  const { traceIdRef, cancelQuery } = useCancelQuery();
+  const { traceIdRef, cancelQuery } = useCancelQuery(t);
 
   // ---- Hovered Series State (for chart interactions) ----
   const hoveredSeriesState = ref({
@@ -181,12 +186,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
     setHoveredSeriesName: function (name: string) {
       hoveredSeriesState.value.hoveredSeriesName = name ?? "";
     },
-    setIndex: function (
-      dataIndex: number,
-      seriesIndex: number,
-      panelId: any,
-      hoveredTime?: any,
-    ) {
+    setIndex: function (dataIndex: number, seriesIndex: number, panelId: any, hoveredTime?: any) {
       hoveredSeriesState.value.dataIndex = dataIndex ?? -1;
       hoveredSeriesState.value.seriesIndex = seriesIndex ?? -1;
       hoveredSeriesState.value.panelId = panelId ?? -1;
@@ -220,11 +220,18 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
       dashboardPanelData.data.queries[0].fields?.breakdown?.length === 0 &&
       dashboardPanelData.data.queries[0].fields.y.length === 0 &&
       dashboardPanelData.data.queries[0].fields.z.length === 0 &&
-      dashboardPanelData.data.queries[0].fields.filter.conditions.length ===
-        0 &&
+      dashboardPanelData.data.queries[0].fields.filter.conditions.length === 0 &&
       dashboardPanelData.data.queries.length === 1
     );
   };
+
+  const appliedSparklineEnabled = ref(false);
+  let sparklineBaselineCaptured = false;
+  const sparklinePendingApply = computed(
+    () =>
+      dashboardPanelData.data?.config?.sparkline?.enabled === true &&
+      !appliedSparklineEnabled.value,
+  );
 
   /**
    * Whether the chart is out of date (panel data differs from chart data)
@@ -266,6 +273,9 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
       variablesChanged = !isEqual(normalizedCurrent, normalizedRefreshed);
     }
 
+    // chartData not yet initialized — don't show "not up to date" banner
+    if (!chartData.value) return false;
+
     // Compare chart data with panel data
     const configChanged = !isEqual(
       JSON.parse(JSON.stringify(chartData.value ?? {})),
@@ -280,7 +290,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
       );
     }
 
-    return configNeedsApiCall || variablesChanged;
+    return configNeedsApiCall || variablesChanged || sparklinePendingApply.value;
   });
 
   /**
@@ -312,7 +322,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
    */
   const runQuery = (withoutCache = false): void => {
     try {
-      // Validate panel fields before running query (matches main branch AddPanel.vue behavior)
+      // Validate panel fields before running query.
       // Uses validatePanel from useDashboardPanelData which checks all field requirements
       if (validatePanel) {
         const errors = errorData.errors;
@@ -320,9 +330,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
         validatePanel(errors, true);
 
         if (errors.length) {
-          showErrorNotification(
-            "There are some errors, please fix them and try again",
-          );
+          showErrorNotification(t("toastMessages.composables.thereAreSomeErrorsPleaseFix"));
           // Do not return early — query still fires to allow partial results
         }
       }
@@ -337,6 +345,8 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
 
       // Copy the data object excluding the reactivity
       chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
+      // Applied — capture the sparkline state so the "pending" banner clears.
+      appliedSparklineEnabled.value = dashboardPanelData.data?.config?.sparkline?.enabled === true;
 
       // Refresh the date time picker if available
       if (dateTimePickerRef?.value) {
@@ -389,6 +399,10 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
     limitNumberOfSeriesWarningMessage.value = message;
   };
 
+  const handleSparklineWarningUpdate = (message: string): void => {
+    sparklineWarning.value = message;
+  };
+
   /**
    * Handle partial data update from PanelSchemaRenderer
    * @param value - Whether data is partial (loading was interrupted)
@@ -418,10 +432,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
    * @param metadata - Query metadata
    */
   const handleResultMetadataUpdate = (metadata: any): void => {
-    maxQueryRangeWarning.value = processQueryMetadataErrors(
-      metadata,
-      store.state.timezone,
-    );
+    maxQueryRangeWarning.value = processQueryMetadataErrors(metadata, store.state.timezone);
   };
 
   /**
@@ -475,89 +486,103 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
    * Update VRL function field list
    * @param fieldList - List of fields
    */
-  const updateVrlFunctionFieldList = (fieldList: any): void => {
-    // Extract all panelSchema alias
-    const aliasList: any[] = [];
-
-    // If auto sql
-    if (
-      dashboardPanelData.data.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ].customQuery === false
-    ) {
-      // Add x axis alias
-      dashboardPanelData?.data?.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ]?.fields?.x?.forEach((it: any) => {
-        if (!it.isDerived) {
-          aliasList.push(it.alias);
-        }
-      });
-
-      // Add breakdown alias
-      dashboardPanelData?.data?.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ]?.fields?.breakdown?.forEach((it: any) => {
-        if (!it.isDerived) {
-          aliasList.push(it.alias);
-        }
-      });
-
-      // Add y axis alias
-      dashboardPanelData?.data?.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ]?.fields?.y?.forEach((it: any) => {
-        if (!it.isDerived) {
-          aliasList.push(it.alias);
-        }
-      });
-
-      // Add z axis alias
-      dashboardPanelData?.data?.queries[
-        dashboardPanelData.layout.currentQueryIndex
-      ]?.fields?.z?.forEach((it: any) => {
-        if (!it.isDerived) {
-          aliasList.push(it.alias);
-        }
-      });
-
-      // Add special field aliases (latitude, longitude, weight, source, target, value, name, value_for_maps)
-      const specialFields = [
-        "latitude",
-        "longitude",
-        "weight",
-        "source",
-        "target",
-        "value",
-        "name",
-        "value_for_maps",
-      ];
-      specialFields.forEach((fieldName) => {
-        const field =
-          dashboardPanelData?.data?.queries[
-            dashboardPanelData.layout.currentQueryIndex
-          ]?.fields?.[fieldName];
-        if (field?.alias && !field?.isDerived) {
-          aliasList.push(field.alias);
-        }
-      });
+  /**
+   * Build alias list for a given query index (used to filter out non-VRL fields)
+   */
+  // Helper to get/init per-query field cache in meta
+  const getQueryFields = (queryIndex: number) => {
+    if (!dashboardPanelData.meta.queryFields[queryIndex]) {
+      dashboardPanelData.meta.queryFields[queryIndex] = {
+        customQueryFields: [],
+        vrlFunctionFieldList: [],
+      };
     }
+    return dashboardPanelData.meta.queryFields[queryIndex];
+  };
 
-    // Remove custom query fields from field list
-    dashboardPanelData.meta.stream.customQueryFields.forEach((it: any) => {
-      aliasList.push(it.name);
+  const collectFieldAliasesForQuery = (queryIndex: number): string[] => {
+    const aliases: string[] = [];
+    const query = dashboardPanelData.data.queries[queryIndex];
+    if (!query) return aliases;
+
+    ["x", "y", "z", "breakdown"].forEach((axis) => {
+      query?.fields?.[axis]?.forEach((it: any) => {
+        if (!it.isDerived && it.alias) aliases.push(it.alias);
+      });
     });
 
-    // Rest will be vrl function fields
-    const filteredFieldList = fieldList
+    const specialFields = [
+      "latitude",
+      "longitude",
+      "weight",
+      "source",
+      "target",
+      "value",
+      "name",
+      "value_for_maps",
+    ];
+    specialFields.forEach((fieldName) => {
+      const field = query?.fields?.[fieldName];
+      if (field?.alias && !field?.isDerived) aliases.push(field.alias);
+    });
+
+    return aliases;
+  };
+
+  const buildAliasListForQuery = (queryIndex: number): string[] => {
+    const query = dashboardPanelData.data.queries[queryIndex];
+    if (!query) return [];
+
+    const aliasList: string[] = [];
+    const queries = dashboardPanelData.data.queries ?? [];
+    queries.forEach((_q: any, idx: number) => {
+      aliasList.push(...collectFieldAliasesForQuery(idx));
+      const qf = dashboardPanelData.meta.queryFields[idx];
+      if (qf) {
+        qf.customQueryFields.forEach((it: any) => aliasList.push(it.name));
+      }
+    });
+
+    return aliasList;
+  };
+
+  const updateVrlFunctionFieldList = (fieldList: any): void => {
+    const currentQueryIndex = dashboardPanelData.layout.currentQueryIndex;
+
+    // New format: fieldList is string[][] (one array per query index)
+    if (Array.isArray(fieldList) && Array.isArray(fieldList[0])) {
+      const perQueryFields: string[][] = fieldList;
+
+      // Store each query's VRL field list in meta.queryFields
+      perQueryFields.forEach((fields: string[], queryIndex: number) => {
+        const query = dashboardPanelData.data.queries[queryIndex];
+        if (!query) return;
+        const aliasList = buildAliasListForQuery(queryIndex);
+        const filteredFieldList = fields
+          .filter(
+            (field: string) =>
+              !aliasList.some((alias: string) => alias.toLowerCase() === field.toLowerCase()),
+          )
+          .map((field: string) => ({ name: field, type: "Utf8" }));
+        getQueryFields(queryIndex).vrlFunctionFieldList = filteredFieldList;
+      });
+
+      // Sync active query's VRL fields to shared meta for the field selector UI
+      const activeQf = dashboardPanelData.meta.queryFields[currentQueryIndex];
+      dashboardPanelData.meta.stream.vrlFunctionFieldList = activeQf?.vrlFunctionFieldList ?? [];
+      return;
+    }
+
+    // Legacy format: fieldList is string[] (single query)
+    const aliasList = buildAliasListForQuery(currentQueryIndex);
+    const filteredFieldList = (fieldList as string[])
       .filter(
         (field: any) =>
-          !aliasList.some(
-            (alias: string) => alias.toLowerCase() === field.toLowerCase(),
-          ),
+          !aliasList.some((alias: string) => alias.toLowerCase() === field.toLowerCase()),
       )
       .map((field: any) => ({ name: field, type: "Utf8" }));
 
+    getQueryFields(currentQueryIndex).vrlFunctionFieldList = filteredFieldList;
     dashboardPanelData.meta.stream.vrlFunctionFieldList = filteredFieldList;
   };
 
@@ -606,6 +631,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
     errorMessage.value = "";
     maxQueryRangeWarning.value = "";
     limitNumberOfSeriesWarningMessage.value = "";
+    sparklineWarning.value = "";
   };
 
   /**
@@ -685,18 +711,26 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
         dashboardPanelData.layout.querySplitter = 41;
       } else {
         if (expandedSplitterHeight.value !== null) {
-          dashboardPanelData.layout.querySplitter =
-            expandedSplitterHeight.value;
+          dashboardPanelData.layout.querySplitter = expandedSplitterHeight.value;
         }
       }
     },
   );
 
+  // On query tab switch, restore the active query's VRL field list into the
+  // shared meta view from the per-query cache (meta.queryFields — the canonical
+  // source), so the Fields panel reflects the current query's VRL fields.
+  watch(
+    () => dashboardPanelData.layout.currentQueryIndex,
+    (idx) => {
+      dashboardPanelData.meta.stream.vrlFunctionFieldList =
+        dashboardPanelData.meta.queryFields?.[idx]?.vrlFunctionFieldList ?? [];
+    },
+  );
+
   // Watch loading state - update disable
   watch(variablesAndPanelsDataLoadingState, () => {
-    const panelsValues = Object.values(
-      variablesAndPanelsDataLoadingState.panels,
-    );
+    const panelsValues = Object.values(variablesAndPanelsDataLoadingState.panels);
     disable.value = panelsValues.some((item: any) => item === true);
   });
 
@@ -723,7 +757,6 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
   /**
    * Initialize chartData from dashboardPanelData.
    * Called by parent component (e.g., AddPanel) after loading panel data in onMounted.
-   * This replaces the watcher approach and follows main branch pattern.
    *
    * @param data - Optional data to initialize with. If not provided, uses dashboardPanelData.data
    */
@@ -735,6 +768,19 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
       chartData.value = {};
     }
 
+    // Re-sync the baseline after Vue flushes any load-time reactive updates to
+    // dashboardPanelData.data, so isOutDated doesn't falsely show "chart not up
+    // to date" on edit load.
+    nextTick(() => {
+      chartData.value = JSON.parse(JSON.stringify(dashboardPanelData.data));
+      // Capture the sparkline baseline only on the first (load) init; later inits
+      // fire on every config edit and must NOT clear the pending banner.
+      if (!sparklineBaselineCaptured) {
+        appliedSparklineEnabled.value =
+          dashboardPanelData.data?.config?.sparkline?.enabled === true;
+        sparklineBaselineCaptured = true;
+      }
+    });
   };
 
   // ============================================================================
@@ -753,6 +799,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
     shouldRefreshWithoutCache,
     maxQueryRangeWarning,
     limitNumberOfSeriesWarningMessage,
+    sparklineWarning,
     errorMessage,
     isPartialData,
     isPanelLoading,
@@ -777,6 +824,7 @@ export function usePanelEditor(options: UsePanelEditorOptions) {
     handleChartApiError,
     handleLastTriggeredAtUpdate,
     handleLimitNumberOfSeriesWarningMessage,
+    handleSparklineWarningUpdate,
     handleIsPartialDataUpdate,
     handleLoadingStateChange,
     handleIsCachedDataDifferWithCurrentTimeRangeUpdate,

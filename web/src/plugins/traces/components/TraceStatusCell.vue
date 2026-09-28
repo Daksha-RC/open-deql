@@ -15,27 +15,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div
+  <OTag
     data-test="trace-row-status-pill"
-    class="tw:rounded tw:py-[0.125rem] tw:px-[0.625rem] tw:inline-flex tw:items-center tw:w-fit"
-    :class="hasErrors ? 'o2-status-pill--error' : 'o2-status-pill--success'"
-  >
-    <span
-      class="q-mr-xs tw:inline-block tw:w-[0.4375rem] tw:h-[0.4375rem] tw:rounded-full tw:shrink-0 o2-status-pill__dot"
-    />
-    <span
-      class="tw:text-[0.7rem] tw:tracking-[0.03em] tw:leading-[1.0625rem] tw:uppercase tw:font-bold"
-    >
-      {{ label }}
-    </span>
-  </div>
+    type="spanStatus"
+    :value="hasErrors ? 'error' : 'success'"
+    :label="label"
+  />
 </template>
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped } from "@/types/i18n";
+import OTag from "@/lib/core/Badge/OTag.vue";
 
-const { t } = useI18n();
+const { t } = useI18nTyped();
 
 const props = defineProps<{
   item: Record<string, any>;
@@ -43,27 +36,12 @@ const props = defineProps<{
 
 const hasErrors = computed(() => (props.item.errors ?? 0) > 0);
 
+// A vue-i18n plural message, not `count + (count === 1 ? singular : plural)`:
+// the count's position in the phrase and which forms exist are the translator's
+// to decide (many languages have more than two).
 const label = computed(() =>
   hasErrors.value
-    ? `${props.item.errors} ${props.item.errors !== 1 ? t("traces.errors") : t("traces.error")}`
+    ? t("traces.errorCount", { n: props.item.errors }, props.item.errors)
     : t("traces.success"),
 );
 </script>
-
-<style scoped>
-.o2-status-pill--success {
-  color: var(--o2-status-success-text);
-  background: var(--o2-status-success-bg);
-}
-.o2-status-pill--success .o2-status-pill__dot {
-  background-color: var(--o2-status-success-text);
-}
-
-.o2-status-pill--error {
-  color: var(--o2-status-error-text);
-  background: var(--o2-status-error-bg);
-}
-.o2-status-pill--error .o2-status-pill__dot {
-  background-color: var(--o2-status-error-text);
-}
-</style>

@@ -4,7 +4,8 @@
  * and (where indicated) opens the config sidebar, ready for assertions.
  */
 
-import { setupTestDashboard } from "./dashCreation.js";
+import * as crypto from "crypto";
+import { setupTestDashboard, deleteDashboard } from "./dashCreation.js";
 import { ingestionForMaps } from "./dashIngestion.js";
 import testLogger from '../../utils/test-logger.js';
 
@@ -30,15 +31,58 @@ export async function reopenPanelConfig(page, pm) {
   // Wait for the add_panel page to fully load before interacting with the config sidebar
   await page.waitForURL(/\/add_panel/, { timeout: 15000 });
   await page.locator('[data-test="dashboard-sidebar"]').waitFor({ state: "visible", timeout: 15000 });
-  // Config panel may already be open (state preserved); only open if not already visible
-  const isConfigOpen = await page.locator('[data-test="dashboard-config-description"]').isVisible();
-  if (!isConfigOpen) {
+
+  // Ask whether the sidebar is COLLAPSED, which is the app's own condition:
+  // `panel-sidebar-header-collapsed` is rendered under v-if="!isOpen", and
+  // openConfigPanel() clicks exactly that element to expand the sidebar.
+  //
+  // The previous probe used `dashboard-config-description` as the "already open"
+  // signal, which cannot work: that field lives inside the General OCollapsible,
+  // and every section starts collapsed on mount (no section sets defaultExpanded).
+  // So an open sidebar with collapsed sections read as "closed", openConfigPanel()
+  // then waited for a collapsed-header element that does not exist while the
+  // sidebar is open, and the helper died on a selector timeout. The sidebar's own
+  // open flag lives in the shared dashboardPanelData.layout store while
+  // expandedSections is per-mount state, so the two genuinely can disagree.
+  const isCollapsed = await pm.dashboardPanelConfigs.configBtn
+    .isVisible()
+    .catch(() => false);
+
+  if (isCollapsed) {
+    // openConfigPanel() expands the sidebar and then expands all sections.
     await pm.dashboardPanelConfigs.openConfigPanel();
+  } else {
+    // Already open — the sections still need expanding, since config controls are
+    // inside collapsibles. expandAllConfigSections() is idempotent.
+    await pm.dashboardPanelConfigs.expandAllConfigSections();
   }
 }
 
+/**
+ * Cleanup for tests whose panel config can't be saved on this environment's backend
+ * (some `override_config` variants aren't accepted by every deployed backend build —
+ * an environment version-skew, not a product bug). Skips savePanel()/backToDashboardList()
+ * (which assume a successful save) and instead navigates straight to the dashboards
+ * list, discarding the unsaved add_panel edit, then deletes the test dashboard.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {string} dashboardName
+ */
+export async function discardAndCleanupTestDashboard(page, dashboardName) {
+  // Defensive: accept a native "leave site / discard changes" dialog if the app ever
+  // adds a beforeunload guard for unsaved panel edits. Not currently triggered (this
+  // app doesn't gate navigation on unsaved changes), but costs nothing to guard against.
+  page.once('dialog', (dialog) => dialog.accept());
+  await page.goto(
+    `${process.env["ZO_BASE_URL"]}/web/dashboards?org_identifier=${process.env["ORGNAME"]}`
+  );
+  await page.locator('[data-test="dashboard-search"]').waitFor({ state: "visible", timeout: 15000 });
+  await deleteDashboard(page, dashboardName);
+  testLogger.info('Discarded unsaved panel edit and cleaned up test dashboard', { dashboardName });
+}
+
 export const generateDashboardName = () =>
-  "Dashboard_" + Math.random().toString(36).slice(2, 11) + "_" + Date.now();
+  "Dashboard_" + crypto.randomBytes(6).toString("hex") + "_" + Date.now();
 
 // ---------------------------------------------------------------------------
 // Base panel builder — all other helpers delegate here
@@ -63,12 +107,18 @@ async function buildPanel(page, pm, dashboardName, {
   panelName = "Test Panel",
   yField = "kubernetes_container_hash",
   breakdownField = null,
+  xField = null,
 }) {
   await setupTestDashboard(page, pm, dashboardName);
   await pm.dashboardCreate.addPanel();
   await pm.chartTypeSelector.selectChartType(chartType);
   await pm.chartTypeSelector.selectStreamType("logs");
   await pm.chartTypeSelector.selectStream("e2e_automate");
+  if (xField) {
+    await pm.chartTypeSelector.searchAndAddField(xField, "x");
+  }
+  // remove the auto-seeded default y-axis before adding this panel's measure
+  await pm.chartTypeSelector.removeField("y_axis_1", "y");
   await pm.chartTypeSelector.searchAndAddField(yField, "y");
   if (breakdownField) {
     await pm.chartTypeSelector.searchAndAddField(breakdownField, "b");
@@ -147,6 +197,28 @@ export async function setupTablePanelWithConfig(page, pm, dashboardName, panelNa
   await buildPanel(page, pm, dashboardName, { chartType: "table", panelName });
   await pm.dashboardPanelConfigs.openConfigPanel();
   testLogger.info("Table panel with config ready", { dashboardName, panelName });
+}
+
+/**
+ * Table chart panel WITH a plain group-by dimension column (x-axis) plus a
+ * measure (y-axis). The dimension column is a non-aggregate field, which is
+ * what makes a cell drillable via the interactive-table "explore in logs"
+ * search icon. Config sidebar NOT opened. Leaves the panel APPLIED in the
+ * add_panel preview; caller decides whether to save + view the dashboard.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {object} pm
+ * @param {string} dashboardName
+ * @param {string} [panelName]
+ */
+export async function setupTablePanelWithDimension(page, pm, dashboardName, panelName = "Test Panel") {
+  await buildPanel(page, pm, dashboardName, {
+    chartType: "table",
+    panelName,
+    xField: "kubernetes_namespace_name",
+    yField: "kubernetes_container_hash",
+  });
+  testLogger.info("Table panel with drillable dimension ready", { dashboardName, panelName });
 }
 
 /**
@@ -262,15 +334,28 @@ export async function buildPromQLPanel(page, pm, dashboardName, {
   // Enter PromQL query in Monaco editor
   const queryEditor = page.locator('[data-test="dashboard-panel-query-editor"]');
   await queryEditor.waitFor({ state: "visible", timeout: 10000 });
-  const monacoEditor = queryEditor.getByRole('code');
+  // Monaco renders a div with role="code" — locate via CSS attribute selector (not getByRole)
+  const monacoEditor = queryEditor.locator('[role="code"]');
   await monacoEditor.click({ clickCount: 3 });
   await page.keyboard.press('Backspace');
   // Use insertText (paste-like) to avoid Monaco autocomplete interfering with
   // character-by-character typing, which can truncate/mangle the query
   await page.keyboard.insertText(query);
   await page.keyboard.press('Escape'); // dismiss any autocomplete
-  // Wait for Monaco debounce to sync editor content to Vue data model
-  await page.waitForTimeout(3000);
+  // Wait for Monaco's textarea to reflect the typed query
+  await page.waitForFunction(
+    (expectedQuery) => {
+      const textarea = document.querySelector('[data-test="dashboard-panel-query-editor"] textarea');
+      return Boolean(textarea && textarea.value.includes(expectedQuery));
+    },
+    query,
+    { timeout: 10000 }
+  );
+  // Monaco debounce is 500ms — the textarea updates instantly but the Vue data model
+  // (queries[0].query) only updates after the debounce fires. Without this wait,
+  // applyDashboardBtn is clicked before the debounce fires, causing runQuery→isValid
+  // to see an empty query and show an error toast that later trips savePanel's race.
+  await page.waitForTimeout(600);
 
   await pm.dashboardPanelActions.addPanelName(panelName);
   await pm.dashboardPanelActions.applyDashboardBtn();
@@ -286,6 +371,16 @@ export async function setupPromQLPanelWithConfig(page, pm, dashboardName, panelN
   await buildPromQLPanel(page, pm, dashboardName, { chartType: "line", panelName });
   await pm.dashboardPanelConfigs.openConfigPanel();
   testLogger.info("PromQL line panel with config ready", { dashboardName, panelName });
+}
+
+export async function setupPromQLMetricPanelWithConfig(page, pm, dashboardName, panelName = "Test Panel") {
+  await buildPromQLPanel(page, pm, dashboardName, {
+    chartType: "metric",
+    panelName,
+    query: "sum(cpu_usage)",
+  });
+  await pm.dashboardPanelConfigs.openConfigPanel();
+  testLogger.info("PromQL metric panel with config ready", { dashboardName, panelName });
 }
 
 /**
@@ -340,6 +435,132 @@ export async function setupPromQLMapsPanelWithConfig(page, pm, dashboardName, pa
   await buildPromQLPanel(page, pm, dashboardName, { chartType: "maps", panelName });
   await pm.dashboardPanelConfigs.openConfigPanel();
   testLogger.info("PromQL maps panel with config ready", { dashboardName, panelName });
+}
+
+/**
+ * Snapshot of what a panel actually put on screen, for assertion failure messages.
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<string>} one-line summary, safe to embed in an expect() message
+ */
+export async function describePanelRender(page) {
+  const snapshot = await page
+    .evaluate(() => {
+      const el = document.querySelector('[data-test="chart-renderer"]');
+      const applyBtn = document.querySelector('[data-test="dashboard-apply"]');
+      // Apply is disabled (non-enterprise) or swapped for Cancel (enterprise)
+      // for the whole query run, so this is the panel's own "still loading" flag.
+      const cancelBtn = document.querySelector('[data-test="dashboard-cancel"]');
+      return {
+        chartRenderer: !!el,
+        noData: !!document.querySelector('[data-test="no-data"]'),
+        panelError:
+          document.querySelector('[data-test="panel-schema-renderer-error-message"]')?.textContent?.trim() ?? null,
+        stillLoading: !!cancelBtn || (!!applyBtn && applyBtn.disabled === true),
+        applyPresent: !!applyBtn,
+        // The copy overlay is driven by the metric series' own _metricText, so
+        // it is a DOM-visible proxy for "the converter produced a real series".
+        // Present + empty SVG => the series exists and ECharts failed to draw it.
+        // Absent + empty SVG => no usable series was produced at all.
+        metricOverlay: !!document.querySelector('[data-test="dashboard-metric-copy-overlay"]'),
+        canvas: el ? el.querySelectorAll("canvas").length : 0,
+        svg: el ? el.querySelectorAll("svg").length : 0,
+        svgPaths: el ? el.querySelectorAll("svg path").length : 0,
+        svgTexts: el ? el.querySelectorAll("svg text").length : 0,
+        text: el ? (el.textContent ?? "").trim().slice(0, 120) : null,
+      };
+    })
+    .catch((e) => ({ evaluateFailed: e.message }));
+  return `panel render state: ${JSON.stringify(snapshot)}`;
+}
+
+/**
+ * The text nodes the metric panel drew, with their resolved fill colours.
+ *
+ * The metric value is an ECharts `renderItem` text on the SVG renderer, so its
+ * colour can land either as a `fill` attribute or as inline style depending on
+ * the ECharts build — getComputedStyle normalises both to "rgb(r, g, b)".
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {Promise<Array<{text: string, fill: string}>>}
+ */
+export async function getMetricTextFills(page) {
+  return page.evaluate(() => {
+    const root = document.querySelector('[data-test="chart-renderer"]');
+    if (!root) return [];
+    return Array.from(root.querySelectorAll("svg text")).map((el) => ({
+      text: (el.textContent ?? "").trim(),
+      fill: getComputedStyle(el).fill,
+    }));
+  });
+}
+
+/**
+ * "#b91c1c" → "rgb(185, 28, 28)" — the form getComputedStyle reports, so the
+ * swatch hex the test picked can be compared against what actually rendered.
+ * @param {string} hex
+ * @returns {string}
+ */
+export function hexToRgbString(hex) {
+  const h = hex.replace("#", "");
+  const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+  return `rgb(${(n >> 16) & 255}, ${(n >> 8) & 255}, ${n & 255})`;
+}
+
+/**
+ * Collects browser console errors/warnings for the rest of the test.
+ *
+ * ChartRenderer swallows a failing `setOption` with a bare `console.error`, so a
+ * chart that silently draws nothing leaves no trace in the DOM — only here.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @returns {{messages: string[], describe: () => string}}
+ */
+export function collectConsoleErrors(page) {
+  const messages = [];
+  // Keep enough of the text for a full stack: the frames after the first are
+  // what identify which option array ECharts choked on, and a short slice cuts
+  // them off exactly where they start being useful.
+  const CAP = 1200;
+  page.on("console", (msg) => {
+    if (msg.type() === "error" || msg.type() === "warning") {
+      messages.push(`[${msg.type()}] ${msg.text()}`.slice(0, CAP));
+    }
+  });
+  page.on("pageerror", (err) => {
+    messages.push(`[pageerror] ${err.message}\n${err.stack ?? ""}`.slice(0, CAP));
+  });
+  return {
+    messages,
+    describe: () => `console: ${JSON.stringify(messages.slice(-15))}`,
+  };
+}
+
+/**
+ * Waits until the panel has finished loading and settled on a final render.
+ * The metric assertions are only meaningful once streaming has completed —
+ * mid-stream the panel legitimately shows the previous chart or nothing at all.
+ *
+ * Returns whether it actually settled: a panel stuck loading forever is a real
+ * failure mode here, and swallowing the timeout would hide it.
+ *
+ * @param {import('@playwright/test').Page} page
+ * @param {object} pm - PageManager instance
+ * @returns {Promise<boolean>} true if the panel finished loading in time
+ */
+export async function waitForPanelRenderSettled(page, pm) {
+  // The Apply button is disabled (or swapped for Cancel) for the whole streaming
+  // run, so it covers every chunk — unlike waiting on the first query response,
+  // which returns while later chunks are still arriving.
+  const settled = await pm.dashboardPanelActions
+    .waitForChartToRender()
+    .then(() => true)
+    .catch((e) => {
+      testLogger.warn("waitForChartToRender:", e.message);
+      return false;
+    });
+  // One frame for the final setOption to reach the DOM.
+  await page.waitForTimeout(300);
+  return settled;
 }
 
 /**

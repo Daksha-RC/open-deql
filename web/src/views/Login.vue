@@ -15,20 +15,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <login v-if="user.email == '' && !showInvitations" />
+  <Login v-if="user.email == '' && !showInvitations" />
   <div v-if="showInvitations && config.isCloud == 'true'">
-    <div class="flex relative-position tw:px-3 tw:pt-2">
+    <div class="relative-position flex px-3 pt-2">
       <img
-        class="appLogo"
+        class="h-10 max-h-10 w-auto max-w-50 cursor-pointer"
         loading="lazy"
         :src="
-          store?.state?.theme == 'dark'
+          isDark
             ? getImageURL('images/common/openobserve_latest_dark_2.svg')
             : getImageURL('images/common/openobserve_latest_light_2.svg')
         "
       />
     </div>
-    <invitation-list
+    <InvitationList
       v-if="showInvitations"
       :user-email="user.email"
       @invitations-processed="handleInvitationsProcessed"
@@ -37,29 +37,31 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 </template>
 
 <script lang="ts">
+import { configQuery } from "@/services/config.queries";
+import { queryClient } from "@/composables/query/queryClient";
 import { defineComponent, onBeforeMount, ref } from "vue";
 import { useRouter } from "vue-router";
 import Login from "@/components/login/Login.vue";
 import InvitationList from "@/components/iam/users/InvitationList.vue";
 import config from "@/aws-exports";
-import configService from "@/services/config";
 import { useStore } from "vuex";
+import { useTheme } from "@/composables/useTheme";
 import {
   getUserInfo,
   getDecodedUserInfo,
   checkCallBackValues,
-} from "@/utils/zincutils";
-import usersService from "@/services/users";
-import organizationsService from "@/services/organizations";
-import {
   useLocalCurrentUser,
   useLocalOrganization,
   invalidateLoginData,
   useLocalUserInfo,
   getImageURL,
 } from "@/utils/zincutils";
-import { useQuasar } from "quasar";
+import usersService from "@/services/users";
+import organizationsService from "@/services/organizations";
 import { useReo } from "@/services/reodotdev_analytics";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { useI18nTyped } from "@/types/i18n";
+import { isSameOriginRedirect } from "@/utils/safeUrl";
 
 export default defineComponent({
   name: "LoginPage",
@@ -69,9 +71,10 @@ export default defineComponent({
   },
   setup() {
     const store = useStore();
+    const { t } = useI18nTyped();
+    const { isDark } = useTheme();
     let orgOptions = ref([{ label: Number, value: String }]);
     const selectedOrg = ref({});
-    const q = useQuasar();
     const router: any = useRouter();
     const showInvitations = ref(false);
     const { identify } = useReo();
@@ -82,10 +85,14 @@ export default defineComponent({
 
     onBeforeMount(async () => {
       if (!router?.currentRoute.value.hash) {
-        await configService
-          .get_config()
-          .then(async (res) => {
-            store.commit("setConfig", res.data);
+        await queryClient
+          .fetchQuery(configQuery())
+          .then(async (data: any) => {
+            // Never replace an already-loaded full config with the bootstrap
+            // subset (e.g. a logged-in user navigating to /login).
+            if (!store.state.zoConfig?.version) {
+              store.commit("setConfig", data);
+            }
           })
           .catch((err) => {
             console.error("Error while fetching config:", err);
@@ -107,10 +114,7 @@ export default defineComponent({
           const localOrg: any = useLocalOrganization();
           let tempDefaultOrg = {};
           let localOrgFlag = false;
-          if (
-            localOrg.value != null &&
-            localOrg.value.user_email !== store.state.userInfo.email
-          ) {
+          if (localOrg.value != null && localOrg.value.user_email !== store.state.userInfo.email) {
             localOrg.value = null;
             useLocalOrganization("");
           }
@@ -118,13 +122,7 @@ export default defineComponent({
           store.dispatch("setOrganizations", res.data.data);
 
           orgOptions.value = res.data.data.map(
-            (data: {
-              id: any;
-              name: any;
-              type: any;
-              identifier: any;
-              UserObj: any;
-            }) => {
+            (data: { id: any; name: any; type: any; identifier: any; UserObj: any }) => {
               let optiondata: any = {
                 label: data.name,
                 id: data.id,
@@ -146,9 +144,7 @@ export default defineComponent({
                 res.data.data.length == 1
               ) {
                 localOrgFlag = true;
-                selectedOrg.value = localOrg.value
-                  ? localOrg.value
-                  : optiondata;
+                selectedOrg.value = localOrg.value ? localOrg.value : optiondata;
                 useLocalOrganization(selectedOrg.value);
                 store.dispatch("setSelectedOrganization", selectedOrg.value);
               }
@@ -167,12 +163,11 @@ export default defineComponent({
             store.dispatch("setSelectedOrganization", tempDefaultOrg);
           }
           //here check if the config.Iscloud is true and the redirectURI is there any new_user_login == true
+          // skip the onboarding prompt for invited users, who get new_user_login == true too on their first login
           if (
             config.isCloud == "true" &&
-            checkCallBackValues(
-              router.currentRoute.value.hash,
-              "new_user_login",
-            ) == "true"
+            checkCallBackValues(router.currentRoute.value.hash, "new_user_login") == "true" &&
+            checkCallBackValues(router.currentRoute.value.hash, "pending_invites") != "true"
           ) {
             localStorage.setItem("isFirstTimeLogin", "true");
           }
@@ -224,7 +219,7 @@ export default defineComponent({
      * Helper to get cookie value by name
      */
     const getCookie = (name: string): string | null => {
-      const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+      const match = document.cookie.match(new RegExp("(^| )" + name + "=([^;]+)"));
       return match ? decodeURIComponent(match[2]) : null;
     };
 
@@ -239,7 +234,7 @@ export default defineComponent({
         router.push({ path: "/marketplace/aws/setup" });
         return;
       }
-       // Check for Azure Marketplace token - redirect to setup if present
+      // Check for Azure Marketplace token - redirect to setup if present
       const azureMarketplaceToken = window.sessionStorage.getItem("azure_marketplace_token");
       if (azureMarketplaceToken) {
         router.push({ path: "/marketplace/azure/register" });
@@ -248,11 +243,14 @@ export default defineComponent({
 
       const redirectURI = window.sessionStorage.getItem("redirectURI");
       window.sessionStorage.removeItem("redirectURI");
-      if (redirectURI != null && redirectURI != "") {
-        if (redirectURI.includes("http")) {
-          window.location.href = redirectURI;
-        } else {
+      // Same-origin only: `redirectURI` originates from the `?short_url=`
+      // query param, so an off-origin value here is a post-auth open redirect
+      // (see utils/common.ts redirectUser for the twin of this check).
+      if (redirectURI != null && redirectURI != "" && isSameOriginRedirect(redirectURI)) {
+        if (redirectURI.startsWith("/")) {
           router.push({ path: redirectURI });
+        } else {
+          window.location.href = redirectURI;
         }
       } else {
         router.push({ path: "/" });
@@ -272,8 +270,9 @@ export default defineComponent({
     };
 
     return {
-      q,
       store,
+      t,
+      isDark,
       config,
       router,
       redirectUser,
@@ -310,10 +309,15 @@ export default defineComponent({
      */
 
     if (this.$route.hash) {
-      configService
-        .get_config()
-        .then(async (res) => {
-          this.store.commit("setZoConfig", res.data);
+      queryClient
+        .fetchQuery(configQuery())
+        .then(async (data: any) => {
+          // "setZoConfig" never existed as a mutation, so this fetch stored
+          // nothing; commit through the real mutation, with the same
+          // don't-clobber-the-full-config guard as everywhere else.
+          if (!this.store.state.zoConfig?.version) {
+            this.store.commit("setConfig", data);
+          }
           const token = getUserInfo(this.$route.hash);
 
           if (token !== null && token.email != null) {
@@ -323,15 +327,11 @@ export default defineComponent({
             this.user.last_name = token.family_name ? token.family_name : "";
           }
           const sessionUserInfo = getDecodedUserInfo();
-          const d = new Date();
-          this.userInfo =
-            sessionUserInfo !== null
-              ? JSON.parse(sessionUserInfo as string)
-              : null;
+          this.userInfo = sessionUserInfo !== null ? JSON.parse(sessionUserInfo as string) : null;
 
           if (
             (this.userInfo !== null &&
-              this.userInfo.hasOwnProperty("pgdata")) ||
+              Object.prototype.hasOwnProperty.call(this.userInfo, "pgdata")) ||
             config.isEnterprise === "true"
           ) {
             this.store.dispatch("login", {
@@ -364,12 +364,13 @@ export default defineComponent({
           this.store.dispatch("setCurrentUser", res.data.data);
 
           if (res.data.data.id == 0) {
-            const dismiss = this.q.notify({
-              spinner: true,
-              message: "Please wait while creating new user...",
+            const dismiss = toast({
+              variant: "loading",
+              message: this.t("toastMessages.views.pleaseWaitWhileCreatingNewUser"),
+              timeout: 0,
             });
 
-            usersService.addNewUser(this.user).then((res) => {
+            usersService.addNewUser(this.user).then((_res) => {
               this.store.dispatch("login", {
                 loginState: true,
                 userInfo: this.userInfo,
@@ -390,9 +391,10 @@ export default defineComponent({
           }
         })
         .catch((error) => {
-          this.q.notify({
-            spinner: true,
-            message: "Error while verifying user...",
+          toast({
+            variant: "loading",
+            message: this.t("toastMessages.views.errorWhileVerifyingUser"),
+            timeout: 0,
           });
           if (error.status === 403) this.signout();
         });
@@ -400,23 +402,3 @@ export default defineComponent({
   },
 });
 </script>
-<style lang="scss" scoped>
-.appLogo {
-  width: auto;
-  max-width: 200px;
-  height: 40px;
-  max-height: 40px;
-  cursor: pointer;
-
-  &__mini {
-    margin-right: 0.25rem;
-    // margin-left: 0.25rem;
-    height: 30px;
-    width: 30px;
-  }
-}
-</style>
-
-<style lang="scss">
-@import "@/styles/app.scss";
-</style>

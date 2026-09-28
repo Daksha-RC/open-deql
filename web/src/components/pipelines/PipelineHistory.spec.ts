@@ -16,12 +16,8 @@
 import { mount, flushPromises } from "@vue/test-utils";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { nextTick } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
-
-installQuasar({ plugins: [Dialog, Notify] });
 
 // Must be hoisted before any imports that reference the mocked modules
 const mockRouterPush = vi.fn();
@@ -39,19 +35,27 @@ vi.mock("vue-router", async (importOriginal) => {
   };
 });
 
-vi.mock("@/services/pipelines", () => ({
-  default: {
-    getPipelines: vi.fn().mockResolvedValue({
-      data: {
-        list: [
-          { name: "Alpha Pipeline", pipeline_id: "pid-alpha" },
-          { name: "Beta Pipeline", pipeline_id: "pid-beta" },
-          { name: "Gamma Pipeline", pipeline_id: "pid-gamma" },
-        ],
-      },
-    }),
-  },
-}));
+vi.mock("@/services/pipelines", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      getPipelines: vi.fn().mockResolvedValue({
+        data: {
+          list: [
+            { name: "Alpha Pipeline", pipeline_id: "pid-alpha" },
+            { name: "Beta Pipeline", pipeline_id: "pid-beta" },
+            { name: "Gamma Pipeline", pipeline_id: "pid-gamma" },
+          ],
+        },
+      }),
+      // Delegates to the http mock so the existing (url, {params}) assertions
+      // keep working now that the component reads through the query layer.
+      getPipelineHistory: vi.fn((org: string, params: any) =>
+        mockHttpGet(`/api/${org}/pipelines/history`, { params }),
+      ),
+    },
+  });
+});
 
 const mockHttpGet = vi.fn().mockResolvedValue({
   data: {
@@ -61,7 +65,7 @@ const mockHttpGet = vi.fn().mockResolvedValue({
         timestamp: 1700000000000000,
         start_time: 1700000000000000,
         end_time: 1700003600000000,
-        status: "success",
+        status: "firing",
         is_realtime: false,
         is_silenced: false,
         retries: 0,
@@ -83,21 +87,122 @@ vi.mock("@/services/http", () => ({
 vi.mock("@/components/DateTime.vue", () => ({
   default: {
     template: '<div data-test="pipeline-history-date-picker" />',
-    props: [
-      "autoApply",
-      "defaultType",
-      "defaultAbsoluteTime",
-      "defaultRelativeTime",
-    ],
+    props: ["autoApply", "defaultType", "defaultAbsoluteTime", "defaultRelativeTime"],
     emits: ["on:date-change"],
     methods: {
       setCustomDate: vi.fn(),
     },
+    mounted() {
+      // Simulate DateTime's auto-fire on mount so PipelineHistory calls fetchPipelineHistory
+      this.$emit("on:date-change", {
+        startTime: 1700000000000000,
+        endTime: 1700003600000000,
+        relativeTimePeriod: "15m",
+      });
+    },
   },
 }));
 
+// Stub Teleport to render inline so teleported controls are accessible in tests
+vi.mock("vue", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue")>();
+  return {
+    ...actual,
+    Teleport: {
+      name: "Teleport",
+      props: ["to", "disabled"],
+      template: "<div><slot /></div>",
+    },
+  };
+});
+
 import pipelinesService from "@/services/pipelines";
 import PipelineHistory from "./PipelineHistory.vue";
+
+// Stub ODialog so tests are deterministic (no Portal/Reka teleport)
+// and so we can assert on the props the component forwards + emit
+// the click events the component listens to.
+const ODialogStub = {
+  name: "ODialog",
+  inheritAttrs: false,
+  props: [
+    "open",
+    "size",
+    "title",
+    "subTitle",
+    "persistent",
+    "showClose",
+    "width",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test="o-dialog-stub"
+      :data-open="String(open)"
+      :data-size="size"
+      :data-title="title"
+      :data-sub-title="subTitle"
+      :data-primary-label="primaryButtonLabel"
+    >
+      <slot name="header-left" />
+      <slot name="header" />
+      <slot />
+      <slot name="footer" />
+      <button
+        data-test="o-dialog-stub-primary"
+        @click="$emit('click:primary')"
+      >{{ primaryButtonLabel }}</button>
+      <button
+        data-test="o-dialog-stub-close"
+        @click="$emit('update:open', false)"
+      >close</button>
+    </div>
+  `,
+};
+
+// Stub OTable — renders slots for empty/bottom to keep tests functional
+const OTableStub = {
+  name: "OTable",
+  inheritAttrs: false,
+  props: [
+    "data",
+    "columns",
+    "rowKey",
+    "pagination",
+    "currentPage",
+    "pageSize",
+    "totalCount",
+    "pageSizeOptions",
+    "sorting",
+    "sortBy",
+    "sortOrder",
+    "loading",
+    "showGlobalFilter",
+    "dense",
+    "bordered",
+    "stickyHeader",
+    "maxHeight",
+  ],
+  emits: ["pagination-change", "sort-change"],
+  template: `
+    <div data-test="o2-table-stub">
+      <slot name="empty" />
+      <slot name="bottom" :total-rows="totalCount" />
+    </div>
+  `,
+};
 
 function createWrapper(props: Record<string, unknown> = {}) {
   return mount(PipelineHistory, {
@@ -105,11 +210,8 @@ function createWrapper(props: Record<string, unknown> = {}) {
     global: {
       plugins: [i18n, store],
       stubs: {
-        QTablePagination: {
-          template: '<div data-test="q-table-pagination-stub"></div>',
-          props: ["scope", "position", "resultTotal", "perPageOptions"],
-          emits: ["update:changeRecordPerPage"],
-        },
+        ODialog: ODialogStub,
+        OTable: OTableStub,
         NoData: {
           template: '<div data-test="no-data-stub">No Data</div>',
         },
@@ -130,7 +232,7 @@ describe("PipelineHistory", () => {
             timestamp: 1700000000000000,
             start_time: 1700000000000000,
             end_time: 1700003600000000,
-            status: "success",
+            status: "firing",
             is_realtime: false,
             is_silenced: false,
             retries: 0,
@@ -164,102 +266,52 @@ describe("PipelineHistory", () => {
     it("renders data-test='pipeline-history-page'", async () => {
       const wrapper = createWrapper();
       await flushPromises();
-      expect(
-        wrapper.find('[data-test="pipeline-history-page"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="pipeline-history-page"]').exists()).toBe(true);
     });
 
-    it("renders data-test='alert-history-back-btn'", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      expect(
-        wrapper.find('[data-test="alert-history-back-btn"]').exists(),
-      ).toBe(true);
+    it.skip("renders data-test='alert-history-back-btn'", async () => {
+      // The back button was removed in the layout redesign; navigation is now
+      // handled via the breadcrumb in the shell header, not inside the component.
     });
 
-    it("renders data-test='pipeline-history-title' with 'Pipeline History' translation", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      const title = wrapper.find('[data-test="pipeline-history-title"]');
-      expect(title.exists()).toBe(true);
-      expect(title.text()).toContain("Pipeline History");
+    it.skip("renders data-test='pipeline-history-title' with 'Pipeline History' translation", async () => {
+      // The page title was removed from the component body in the layout redesign;
+      // it is now displayed in the shell breadcrumb outside this component.
     });
 
     it("renders data-test='pipeline-history-date-picker'", async () => {
       const wrapper = createWrapper();
       await flushPromises();
-      expect(
-        wrapper.find('[data-test="pipeline-history-date-picker"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="pipeline-history-date-picker"]').exists()).toBe(true);
     });
 
     it("renders data-test='pipeline-history-search-select'", async () => {
       const wrapper = createWrapper();
       await flushPromises();
-      expect(
-        wrapper.find('[data-test="pipeline-history-search-select"]').exists(),
-      ).toBe(true);
-    });
-
-    it("renders data-test='pipeline-history-manual-search-btn'", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      expect(
-        wrapper
-          .find('[data-test="pipeline-history-manual-search-btn"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="pipeline-history-search-select"]').exists()).toBe(true);
     });
 
     it("renders data-test='pipeline-history-refresh-btn'", async () => {
       const wrapper = createWrapper();
       await flushPromises();
-      expect(
-        wrapper.find('[data-test="pipeline-history-refresh-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="pipeline-history-refresh-btn"]').exists()).toBe(true);
     });
 
     it("renders data-test='pipeline-history-table'", async () => {
       const wrapper = createWrapper();
       await flushPromises();
-      expect(
-        wrapper.find('[data-test="pipeline-history-table"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="pipeline-history-table"]').exists()).toBe(true);
     });
   });
 
   describe("navigation", () => {
-    it("goBack calls router.push with pipelines route and org identifier", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-
-      const vm = wrapper.vm as any;
-      vm.goBack();
-      await nextTick();
-
-      expect(mockRouterPush).toHaveBeenCalledWith({
-        name: "pipelines",
-        query: {
-          org_identifier: store.state.selectedOrganization.identifier,
-        },
-      });
+    it.skip("goBack calls router.push with pipelines route and org identifier", async () => {
+      // goBack is no longer exposed by the component (no defineExpose).
+      // Navigation is handled via the breadcrumb in the shell header.
     });
 
-    it("clicking back button triggers goBack / router.push", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-
-      await wrapper
-        .find('[data-test="alert-history-back-btn"]')
-        .trigger("click");
-      await nextTick();
-
-      expect(mockRouterPush).toHaveBeenCalledWith({
-        name: "pipelines",
-        query: {
-          org_identifier: store.state.selectedOrganization.identifier,
-        },
-      });
+    it.skip("clicking back button triggers goBack / router.push", async () => {
+      // The back button was removed in the layout redesign.
     });
   });
 
@@ -286,6 +338,7 @@ describe("PipelineHistory", () => {
       const vm = wrapper.vm as any;
       expect(vm.rows.length).toBe(1);
       expect(vm.rows[0].pipeline_name).toBe("Alpha Pipeline");
+      expect(vm.rows[0].status).toBe("firing");
     });
 
     it("updates pagination.rowsNumber from API response total", async () => {
@@ -293,65 +346,6 @@ describe("PipelineHistory", () => {
       await flushPromises();
       const vm = wrapper.vm as any;
       expect(vm.pagination.rowsNumber).toBe(1);
-    });
-  });
-
-  describe("filterPipelineOptions", () => {
-    it("filters pipeline options case-insensitively", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      const vm = wrapper.vm as any;
-
-      const updateFn = vi.fn((cb: () => void) => cb());
-      vm.filterPipelineOptions("alpha", updateFn);
-
-      expect(vm.filteredPipelineOptions).toHaveLength(1);
-      expect(vm.filteredPipelineOptions[0].label).toBe("Alpha Pipeline");
-    });
-
-    it("returns all options when filter value is empty string", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      const vm = wrapper.vm as any;
-
-      const updateFn = vi.fn((cb: () => void) => cb());
-      vm.filterPipelineOptions("", updateFn);
-
-      expect(vm.filteredPipelineOptions).toHaveLength(3);
-    });
-
-    it("filters options by partial match case-insensitively (uppercase input)", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      const vm = wrapper.vm as any;
-
-      const updateFn = vi.fn((cb: () => void) => cb());
-      vm.filterPipelineOptions("BETA", updateFn);
-
-      expect(vm.filteredPipelineOptions).toHaveLength(1);
-      expect(vm.filteredPipelineOptions[0].label).toBe("Beta Pipeline");
-    });
-
-    it("returns empty list when no pipelines match the filter", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      const vm = wrapper.vm as any;
-
-      const updateFn = vi.fn((cb: () => void) => cb());
-      vm.filterPipelineOptions("zzz-no-match", updateFn);
-
-      expect(vm.filteredPipelineOptions).toHaveLength(0);
-    });
-
-    it("calls the update callback function", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      const vm = wrapper.vm as any;
-
-      const updateFn = vi.fn((cb: () => void) => cb());
-      vm.filterPipelineOptions("alpha", updateFn);
-
-      expect(updateFn).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -365,7 +359,9 @@ describe("PipelineHistory", () => {
       });
 
       const vm = wrapper.vm as any;
-      vm.onPipelineSelected({ label: "Alpha Pipeline", value: "pid-alpha" });
+      // OSelect with valueKey="value" emits the primitive value string (the pipeline_id).
+      // Call onPipelineSelected with the primitive value as the component receives it.
+      vm.onPipelineSelected("pid-alpha");
       await flushPromises();
 
       expect(vm.searchQuery).toBe("pid-alpha");
@@ -378,23 +374,30 @@ describe("PipelineHistory", () => {
 
       const vm = wrapper.vm as any;
       vm.pagination.page = 3;
-      vm.onPipelineSelected({ label: "Alpha Pipeline", value: "pid-alpha" });
+      // OSelect emits the primitive value (pipeline_id string) when valueKey is set
+      vm.onPipelineSelected("pid-alpha");
       await nextTick();
 
       expect(vm.pagination.page).toBe(1);
     });
 
-    it("does not trigger fetch when selected value has no pipeline_id", async () => {
+    it("clears searchQuery and serves the unfiltered view from cache when null is selected", async () => {
       const wrapper = createWrapper();
       await flushPromises();
       vi.clearAllMocks();
+      mockHttpGet.mockResolvedValue({ data: { hits: [], total: 0 } });
 
       const vm = wrapper.vm as any;
+      // Selecting null (clearing the select) returns to the unfiltered view,
+      // which the mount fetch already cached — no second request.
       vm.onPipelineSelected(null);
       await flushPromises();
 
-      // http get should not have been called for history after null selection
+      // searchQuery is cleared to empty string
+      expect(vm.searchQuery).toBe("");
       expect(mockHttpGet).not.toHaveBeenCalled();
+      // The cached unfiltered rows repaint.
+      expect(vm.rows.length).toBe(1);
     });
   });
 
@@ -414,7 +417,7 @@ describe("PipelineHistory", () => {
       await nextTick();
 
       expect(vm.searchQuery).toBe("");
-      expect(vm.selectedPipeline).toBeNull();
+      expect(vm.selectedPipeline).toBeUndefined();
     });
   });
 
@@ -482,9 +485,10 @@ describe("PipelineHistory", () => {
       mockHttpGet.mockResolvedValue({ data: { hits: [], total: 0 } });
 
       const vm = wrapper.vm as any;
+      // A different window — the same one would (correctly) serve from cache.
       vm.updateDateTime({
-        startTime: 1700000000000000,
-        endTime: 1700003600000000,
+        startTime: 1700010000000000,
+        endTime: 1700013600000000,
         relativeTimePeriod: "",
       });
       await flushPromises();
@@ -549,54 +553,6 @@ describe("PipelineHistory", () => {
         expect(vm.formatDuration(3900000000)).toBe("1h 5m");
       });
     });
-
-    describe("getStatusColor", () => {
-      it("returns 'positive' for 'success'", async () => {
-        const wrapper = createWrapper();
-        await flushPromises();
-        const vm = wrapper.vm as any;
-        expect(vm.getStatusColor("success")).toBe("positive");
-      });
-
-      it("returns 'positive' for 'ok' and 'completed'", async () => {
-        const wrapper = createWrapper();
-        await flushPromises();
-        const vm = wrapper.vm as any;
-        expect(vm.getStatusColor("ok")).toBe("positive");
-        expect(vm.getStatusColor("completed")).toBe("positive");
-      });
-
-      it("returns 'negative' for 'error' and 'failed'", async () => {
-        const wrapper = createWrapper();
-        await flushPromises();
-        const vm = wrapper.vm as any;
-        expect(vm.getStatusColor("error")).toBe("negative");
-        expect(vm.getStatusColor("failed")).toBe("negative");
-      });
-
-      it("returns 'warning' for 'warning'", async () => {
-        const wrapper = createWrapper();
-        await flushPromises();
-        const vm = wrapper.vm as any;
-        expect(vm.getStatusColor("warning")).toBe("warning");
-      });
-
-      it("returns 'info' for 'pending' and 'running'", async () => {
-        const wrapper = createWrapper();
-        await flushPromises();
-        const vm = wrapper.vm as any;
-        expect(vm.getStatusColor("pending")).toBe("info");
-        expect(vm.getStatusColor("running")).toBe("info");
-      });
-
-      it("returns theme-based fallback for unknown status", async () => {
-        const wrapper = createWrapper();
-        await flushPromises();
-        const vm = wrapper.vm as any;
-        const color = vm.getStatusColor("some-unknown-status");
-        expect(["white", "black"]).toContain(color);
-      });
-    });
   });
 
   describe("filteredPipelineOptions initialization", () => {
@@ -621,9 +577,7 @@ describe("PipelineHistory", () => {
       const wrapper = createWrapper();
       await flushPromises();
       const vm = wrapper.vm as any;
-      const alphaOption = vm.filteredPipelineOptions.find(
-        (p: any) => p.value === "pid-alpha",
-      );
+      const alphaOption = vm.filteredPipelineOptions.find((p: any) => p.value === "pid-alpha");
       expect(alphaOption).toBeDefined();
       expect(alphaOption.label).toBe("Alpha Pipeline");
     });
@@ -633,7 +587,7 @@ describe("PipelineHistory", () => {
     it("selectedPipeline is null initially", () => {
       const wrapper = createWrapper();
       const vm = wrapper.vm as any;
-      expect(vm.selectedPipeline).toBeNull();
+      expect(vm.selectedPipeline).toBeUndefined();
     });
 
     it("pagination has correct default values", () => {
@@ -657,8 +611,9 @@ describe("PipelineHistory", () => {
       expect(vm.relativeTime).toBe("15m");
     });
 
-    it("loading is false initially", () => {
+    it("loading is false initially", async () => {
       const wrapper = createWrapper();
+      await flushPromises();
       const vm = wrapper.vm as any;
       expect(vm.loading).toBe(false);
     });
@@ -670,42 +625,7 @@ describe("PipelineHistory", () => {
     });
   });
 
-  describe("no-option slot content", () => {
-    it("filteredPipelineOptions is empty when no match, which triggers no-option slot", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-      // Quasar renders the no-option slot only when the dropdown is open and
-      // filteredPipelineOptions is empty. In jsdom the slot is not injected into
-      // the static DOM without dropdown focus. We verify the state condition
-      // that drives the no-option slot display.
-      const vm = wrapper.vm as any;
-      const updateFn = vi.fn((cb: () => void) => cb());
-      vm.filterPipelineOptions("zzz-no-match", updateFn);
-      await nextTick();
-      // Empty filtered options is the condition that causes Quasar to render
-      // the no-option slot with "No pipelines found"
-      expect(vm.filteredPipelineOptions).toHaveLength(0);
-    });
-  });
-
   describe("loading state", () => {
-    it("manual search button is disabled when loading is true", async () => {
-      const wrapper = createWrapper();
-      await flushPromises();
-
-      const vm = wrapper.vm as any;
-      vm.loading = true;
-      await nextTick();
-
-      const searchBtn = wrapper.find(
-        '[data-test="pipeline-history-manual-search-btn"]',
-      );
-      expect(
-        searchBtn.attributes("disabled") !== undefined ||
-          searchBtn.attributes("aria-disabled") === "true",
-      ).toBe(true);
-    });
-
     it("refresh button shows loading state when loading is true", async () => {
       const wrapper = createWrapper();
       await flushPromises();
@@ -714,9 +634,7 @@ describe("PipelineHistory", () => {
       vm.loading = true;
       await nextTick();
 
-      const refreshBtn = wrapper.find(
-        '[data-test="pipeline-history-refresh-btn"]',
-      );
+      const refreshBtn = wrapper.find('[data-test="pipeline-history-refresh-btn"]');
       expect(refreshBtn.exists()).toBe(true);
       // loading attribute or class reflects loading state
       expect(vm.loading).toBe(true);
@@ -730,12 +648,77 @@ describe("PipelineHistory", () => {
       vi.clearAllMocks();
       mockHttpGet.mockResolvedValue({ data: { hits: [], total: 0 } });
 
-      await wrapper
-        .find('[data-test="pipeline-history-refresh-btn"]')
-        .trigger("click");
+      await wrapper.find('[data-test="pipeline-history-refresh-btn"]').trigger("click");
       await flushPromises();
 
       expect(mockHttpGet).toHaveBeenCalled();
+    });
+  });
+
+  describe("OTable pagination and sort handlers", () => {
+    it("onPaginationChange updates pagination state and fetches history", async () => {
+      const wrapper = createWrapper();
+      await flushPromises();
+      vi.clearAllMocks();
+      mockHttpGet.mockResolvedValue({ data: { hits: [], total: 0 } });
+
+      const vm = wrapper.vm as any;
+      vm.onPaginationChange({ page: 3, size: 50 });
+      await flushPromises();
+
+      expect(vm.pagination.page).toBe(3);
+      expect(vm.pagination.rowsPerPage).toBe(50);
+      expect(mockHttpGet).toHaveBeenCalled();
+    });
+
+    it("onSortChange updates sort state, resets page to 1, and fetches history", async () => {
+      const wrapper = createWrapper();
+      await flushPromises();
+      vi.clearAllMocks();
+      mockHttpGet.mockResolvedValue({ data: { hits: [], total: 0 } });
+
+      const vm = wrapper.vm as any;
+      vm.pagination.page = 5;
+      vm.onSortChange({ column: "status", order: "asc" });
+      await flushPromises();
+
+      expect(vm.pagination.sortBy).toBe("status");
+      expect(vm.pagination.descending).toBe(false);
+      expect(vm.pagination.page).toBe(1);
+      expect(mockHttpGet).toHaveBeenCalled();
+    });
+  });
+
+  describe("Details ODialog", () => {
+    it("details dialog is closed initially", async () => {
+      const wrapper = createWrapper();
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      expect(vm.detailsDialog).toBe(false);
+    });
+  });
+
+  describe("Error ODialog", () => {
+    it("error dialog is closed initially", async () => {
+      const wrapper = createWrapper();
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      expect(vm.errorDialog).toBe(false);
+      expect(vm.errorMessage).toBeNull();
+    });
+
+    it("closeErrorDialog clears errorDialog and errorMessage", async () => {
+      const wrapper = createWrapper();
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.errorDialog = true;
+      vm.errorMessage = { pipeline_name: "x", error: "y" };
+
+      vm.closeErrorDialog();
+      await nextTick();
+
+      expect(vm.errorDialog).toBe(false);
+      expect(vm.errorMessage).toBeNull();
     });
   });
 });

@@ -25,6 +25,7 @@ export interface ServiceStreams {
   logs: string[];
   traces: string[];
   metrics: string[];
+  profiles: string[];
 }
 
 export interface ServiceMetadata {
@@ -42,18 +43,23 @@ export interface FieldAlias {
   display: string;
   fields: string[];
   group?: string;
+  is_workload_type?: boolean;
+  is_stable?: boolean;
 }
 
 export interface StreamInfo {
   stream_name: string;
   stream_type: string;
   filters?: Record<string, string>; // omitted by backend when empty (skip_serializing_if)
+  /** Identity dimensions the backend could not resolve on this stream's schema (query is wider than chips imply). */
+  dropped_dimensions?: string[];
 }
 
 export interface RelatedStreams {
   logs: StreamInfo[];
   traces: StreamInfo[];
   metrics: StreamInfo[];
+  profiles: StreamInfo[];
 }
 
 export interface CorrelationRequest {
@@ -69,6 +75,84 @@ export interface CorrelationResponse {
   related_streams: RelatedStreams;
   /** The identity set selected by best-coverage resolution, if available. */
   matched_set_id?: string;
+  /** Echo of the request's source stream (F27). */
+  source_stream?: string;
+  /** Echo of the request's source stream type (F27). */
+  source_type?: string;
+}
+
+/**
+ * Build chip dimensions from the actual per-stream filters returned by _correlate.
+ *
+ * Keys are raw field names (e.g. "k8s_namespace_name") so every chip maps
+ * directly to a real SQL WHERE condition. When multiple raw fields belong to
+ * the same semantic group (e.g. "k8s_namespace_name" and
+ * "service_k8s_namespace_name" both map to "k8s-namespace"), only the first
+ * field in the group's declaration order is kept — the same rule the backend
+ * uses to resolve filter fields — deduplicating same-concept chips.
+ *
+ * Falls back to `matched_dimensions` (semantic IDs) only when no stream has
+ * filters, preserving backward compatibility with older backends.
+ *
+ * @param correlationResponse  Response from the _correlate API
+ * @param semanticGroups       Org's field alias groups for dedup (optional)
+ */
+export function buildChipDimensionsFromFilters(
+  correlationResponse: CorrelationResponse,
+  semanticGroups: FieldAlias[] = [],
+): Record<string, string> {
+  const allStreams = [
+    ...correlationResponse.related_streams.logs,
+    ...correlationResponse.related_streams.traces,
+    ...correlationResponse.related_streams.metrics,
+    ...correlationResponse.related_streams.profiles,
+  ].filter((s) => s.filters && Object.keys(s.filters).length > 0);
+
+  if (allStreams.length === 0) {
+    return { ...correlationResponse.matched_dimensions };
+  }
+
+  // Collect all unique (field, value) pairs across all streams.
+  const valueMap = new Map<string, string>();
+  for (const stream of allStreams) {
+    for (const [key, value] of Object.entries(stream.filters!)) {
+      if (!value || value === "_o2_all_" || key.startsWith("_")) continue;
+      if (!valueMap.has(key)) valueMap.set(key, value);
+    }
+  }
+
+  // Build reverse lookup: raw field name → semantic group ID
+  const fieldToGroupId = new Map<string, string>();
+  for (const group of semanticGroups) {
+    for (const field of group.fields) {
+      if (!fieldToGroupId.has(field)) fieldToGroupId.set(field, group.id);
+    }
+  }
+
+  // For each semantic group, keep the first field in the group's declaration
+  // order that is present — the same rule the backend uses to pick filter
+  // fields (F30). Alphabetical picking could disagree with the backend and
+  // label a chip with a different alias than the one actually queried.
+  // Fields with no group are kept as-is (no dedup needed).
+  const groupWinner = new Map<string, string>(); // groupId → winning field name
+  for (const group of semanticGroups) {
+    const winner = group.fields.find((field) => valueMap.has(field));
+    if (winner) groupWinner.set(group.id, winner);
+  }
+
+  // First pass: per-group dedup — only keep the declaration-order winner per group.
+  const candidates: Array<[string, string]> = [];
+  for (const [key, value] of valueMap.entries()) {
+    const groupId = fieldToGroupId.get(key);
+    if (groupId && groupWinner.get(groupId) !== key) continue;
+    candidates.push([key, value]);
+  }
+
+  const result: Record<string, string> = {};
+  for (const [key, value] of candidates) {
+    result[key] = value;
+  }
+  return result;
 }
 
 export type CardinalityClass = "VeryLow" | "Low" | "Medium" | "High" | "VeryHigh";
@@ -123,7 +207,10 @@ export const getSemanticGroups = (org_identifier: string): Promise<{ data: Field
   return http().get(`/api/${org_identifier}/alerts/deduplication/semantic-groups`);
 };
 
-export const updateSemanticGroups = (org_identifier: string, groups: FieldAlias[]): Promise<any> => {
+export const updateSemanticGroups = (
+  org_identifier: string,
+  groups: FieldAlias[],
+): Promise<any> => {
   return http().put(`/api/${org_identifier}/alerts/deduplication/semantic-groups`, groups);
 };
 
@@ -141,7 +228,7 @@ export const updateSemanticGroups = (org_identifier: string, groups: FieldAlias[
  */
 export const correlate = (
   org_identifier: string,
-  request: CorrelationRequest
+  request: CorrelationRequest,
 ): Promise<{ data: CorrelationResponse }> => {
   return http().post(`/api/${org_identifier}/service_streams/_correlate`, request);
 };
@@ -158,11 +245,10 @@ export const correlate = (
  * @returns Dimension analytics summary
  */
 export const getDimensionAnalytics = (
-  org_identifier: string
+  org_identifier: string,
 ): Promise<{ data: DimensionAnalyticsSummary }> => {
   return http().get(`/api/${org_identifier}/service_streams/_analytics`);
 };
-
 
 /**
  * Get flat list of services
@@ -170,9 +256,7 @@ export const getDimensionAnalytics = (
  * @param orgIdentifier Organization ID
  * @returns Flat list of services
  */
-export const getServicesList = (
-  orgIdentifier: string
-): Promise<{ data: any }> => {
+export const getServicesList = (orgIdentifier: string): Promise<{ data: any }> => {
   return http().get(`/api/${orgIdentifier}/service_streams`);
 };
 
@@ -188,6 +272,12 @@ export interface IdentitySet {
 export interface ServiceIdentityConfig {
   sets: IdentitySet[];
   tracked_alias_ids: string[];
+  /**
+   * When true, correlation matches streams to services without requiring the
+   * `service` dimension. Streams sharing infrastructure attributes (e.g.
+   * k8s-namespace) correlate together even if some lack `service.name`.
+   */
+  service_optional?: boolean;
 }
 
 /**
@@ -199,7 +289,7 @@ export interface ServiceIdentityConfig {
  */
 export const saveIdentityConfig = (
   orgIdentifier: string,
-  config: ServiceIdentityConfig
+  config: ServiceIdentityConfig,
 ): Promise<{ data: any }> => {
   return http().put(`/api/${orgIdentifier}/service_streams/config/identity`, config);
 };
@@ -211,7 +301,7 @@ export const saveIdentityConfig = (
  * @returns Identity config
  */
 export const getIdentityConfig = (
-  orgIdentifier: string
+  orgIdentifier: string,
 ): Promise<{ data: ServiceIdentityConfig }> => {
   return http().get(`/api/${orgIdentifier}/service_streams/config/identity`);
 };
@@ -223,7 +313,7 @@ export const getIdentityConfig = (
  * @returns Reset result with deleted_count, message, and note
  */
 export const resetServices = (
-  org_identifier: string
+  org_identifier: string,
 ): Promise<{ data: { deleted_count: number; message: string; note: string } }> => {
   return http().delete(`/api/${org_identifier}/service_streams/_reset`);
 };

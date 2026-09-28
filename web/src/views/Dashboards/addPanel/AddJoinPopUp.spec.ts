@@ -1,8 +1,7 @@
 import { mount, flushPromises } from "@vue/test-utils";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import AddJoinPopUp from "@/views/Dashboards/addPanel/AddJoinPopUp.vue";
 import { createStore } from "vuex";
-import { Quasar } from "quasar";
 import { createI18n } from "vue-i18n";
 
 // Mock composables
@@ -63,14 +62,12 @@ describe("AddJoinPopUp", () => {
 
     wrapper = mount(AddJoinPopUp, {
       global: {
-        plugins: [Quasar, store, i18n],
+        plugins: [store, i18n],
         stubs: {
           LeftJoinSvg: true,
           LeftJoinTypeSvg: true,
-          LeftJoinLineSvg: true,
           RightJoinSvg: true,
           RightJoinTypeSvg: true,
-          RightJoinLineSvg: true,
           InnerJoinTypeSvg: true,
           StreamFieldSelect: true,
         },
@@ -95,11 +92,13 @@ describe("AddJoinPopUp", () => {
     });
   });
 
+  afterEach(() => {
+    wrapper?.unmount();
+    vi.clearAllMocks();
+  });
+
   it("renders correctly", () => {
-    expect(wrapper.find('[data-test="dashboard-join-pop-up"]').exists()).toBe(
-      true,
-    );
-    expect(wrapper.find(".join-header").exists()).toBe(true);
+    expect(wrapper.find('[data-test="dashboard-join-pop-up"]').exists()).toBe(true);
   });
 
   it("displays correct join type", () => {
@@ -114,10 +113,31 @@ describe("AddJoinPopUp", () => {
     expect(wrapper.props().modelValue.joinType).toBe("left");
   });
 
-  it("adds a new condition", async () => {
-    const addBtn = wrapper.find('[aria-label="panel.addClause"]');
-    await addBtn.trigger("click");
+  it("appends a clause when the bottom add clause button is clicked", async () => {
+    const addClauseBtn = wrapper.find('[data-test="dashboard-join-add-clause"]');
+    expect(addClauseBtn.exists()).toBe(true);
+
+    await addClauseBtn.trigger("click");
     expect(wrapper.props().modelValue.conditions.length).toBe(2);
+
+    // Appends after the last clause each time
+    await addClauseBtn.trigger("click");
+    expect(wrapper.props().modelValue.conditions.length).toBe(3);
+  });
+
+  it("marks the active join type button with aria-pressed", async () => {
+    const innerBtn = wrapper.find('[data-test="dashboard-join-type-inner"]');
+    const leftBtn = wrapper.find('[data-test="dashboard-join-type-left"]');
+    const rightBtn = wrapper.find('[data-test="dashboard-join-type-right"]');
+
+    expect(innerBtn.attributes("aria-pressed")).toBe("true");
+    expect(leftBtn.attributes("aria-pressed")).toBe("false");
+    expect(rightBtn.attributes("aria-pressed")).toBe("false");
+
+    await leftBtn.trigger("click");
+
+    expect(leftBtn.attributes("aria-pressed")).toBe("true");
+    expect(innerBtn.attributes("aria-pressed")).toBe("false");
   });
 
   it("removes a condition", async () => {
@@ -127,9 +147,7 @@ describe("AddJoinPopUp", () => {
     expect(wrapper.props().modelValue.conditions.length).toBe(2);
 
     // Then remove one
-    const removeBtn = wrapper.find(
-      '[data-test="dashboard-join-condition-remove-0"]',
-    );
+    const removeBtn = wrapper.find('[data-test="dashboard-join-condition-remove-0"]');
     await removeBtn.trigger("click");
     expect(wrapper.props().modelValue.conditions.length).toBe(1);
   });
@@ -143,14 +161,13 @@ describe("AddJoinPopUp", () => {
   });
 
   it("handles stream selection change", async () => {
-    const selectElement = wrapper.find(
-      '[data-test="dashboard-config-panel-join-to"]',
-    );
-    if (selectElement.exists()) {
-      // Test that changing stream updates modelValue
-      await selectElement.trigger("update:model-value", "stream2");
-      await wrapper.vm.$nextTick();
-    }
+    const selectElement = wrapper.find('[data-test="dashboard-config-panel-join-to"]');
+    expect(selectElement.exists()).toBe(true);
+
+    // Test that changing stream updates modelValue
+    await selectElement.trigger("update:model-value", "stream2");
+    await wrapper.vm.$nextTick();
+
     expect(wrapper.exists()).toBe(true);
   });
 
@@ -190,20 +207,21 @@ describe("AddJoinPopUp", () => {
     await wrapper.vm.$nextTick();
 
     const conditions = wrapper.props().modelValue.conditions;
-    if (conditions.length > 1) {
-      conditions[1].logicalOperator = "OR";
-      await wrapper.vm.$nextTick();
-      expect(conditions[1].logicalOperator).toBe("OR");
-    }
+    expect(conditions.length).toBe(2);
+
+    conditions[1].logicalOperator = "OR";
+    await wrapper.vm.$nextTick();
+    expect(conditions[1].logicalOperator).toBe("OR");
   });
 
   it("handles right join type", async () => {
     const rightJoinOption = wrapper.find('[aria-label="panel.rightJoin"]');
-    if (rightJoinOption.exists()) {
-      await rightJoinOption.trigger("click");
-      await wrapper.vm.$nextTick();
-    }
-    expect(wrapper.exists()).toBe(true);
+    expect(rightJoinOption.exists()).toBe(true);
+
+    await rightJoinOption.trigger("click");
+    await wrapper.vm.$nextTick();
+
+    expect(wrapper.props().modelValue.joinType).toBe("right");
   });
 
   it("computes join type label correctly", () => {
@@ -222,14 +240,12 @@ describe("AddJoinPopUp", () => {
     // Test with empty conditions
     const emptyWrapper = mount(AddJoinPopUp, {
       global: {
-        plugins: [Quasar, store, i18n],
+        plugins: [store, i18n],
         stubs: {
           LeftJoinSvg: true,
           LeftJoinTypeSvg: true,
-          LeftJoinLineSvg: true,
           RightJoinSvg: true,
           RightJoinTypeSvg: true,
-          RightJoinLineSvg: true,
           InnerJoinTypeSvg: true,
           StreamFieldSelect: true,
         },
@@ -252,14 +268,12 @@ describe("AddJoinPopUp", () => {
   it("handles multiple conditions", () => {
     const multiCondWrapper = mount(AddJoinPopUp, {
       global: {
-        plugins: [Quasar, store, i18n],
+        plugins: [store, i18n],
         stubs: {
           LeftJoinSvg: true,
           LeftJoinTypeSvg: true,
-          LeftJoinLineSvg: true,
           RightJoinSvg: true,
           RightJoinTypeSvg: true,
-          RightJoinLineSvg: true,
           InnerJoinTypeSvg: true,
           StreamFieldSelect: true,
         },
@@ -294,7 +308,6 @@ describe("AddJoinPopUp", () => {
 
   it("displays join summary", () => {
     // The component should show join summary
-    const summaryElement = wrapper.find(".join-preview");
     // Component may or may not show preview based on conditions
     expect(wrapper.exists()).toBe(true);
   });
@@ -320,19 +333,17 @@ describe("AddJoinPopUp", () => {
   it("handles join type transition from left to right", async () => {
     // Start with left join
     const leftJoin = wrapper.find('[aria-label="panel.leftJoin"]');
-    if (leftJoin.exists()) {
-      await leftJoin.trigger("click");
-      await wrapper.vm.$nextTick();
-    }
+    expect(leftJoin.exists()).toBe(true);
+    await leftJoin.trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.props().modelValue.joinType).toBe("left");
 
     // Then change to right join
     const rightJoin = wrapper.find('[aria-label="panel.rightJoin"]');
-    if (rightJoin.exists()) {
-      await rightJoin.trigger("click");
-      await wrapper.vm.$nextTick();
-    }
-
-    expect(wrapper.exists()).toBe(true);
+    expect(rightJoin.exists()).toBe(true);
+    await rightJoin.trigger("click");
+    await wrapper.vm.$nextTick();
+    expect(wrapper.props().modelValue.joinType).toBe("right");
   });
 
   it("handles complex field selection scenarios", async () => {
@@ -379,9 +390,7 @@ describe("AddJoinPopUp", () => {
     wrapper.vm.handleAddCondition(2);
     await wrapper.vm.$nextTick();
 
-    expect(wrapper.props().modelValue.conditions.length).toBeGreaterThan(
-      initialLength,
-    );
+    expect(wrapper.props().modelValue.conditions.length).toBeGreaterThan(initialLength);
   });
 
   it("verifies main stream prop is used correctly", () => {

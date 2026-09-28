@@ -1,9 +1,6 @@
-import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
+import { describe, expect, it, vi, afterEach } from "vitest";
 import { mount } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import AlertContextMenu from "./AlertContextMenu.vue";
-
-installQuasar();
 
 describe("AlertContextMenu Component", () => {
   let wrapper: any;
@@ -21,7 +18,7 @@ describe("AlertContextMenu Component", () => {
       attachTo: document.body,
       global: {
         stubs: {
-          teleport: { template: '<slot />' },
+          teleport: { template: "<slot />" },
         },
       },
     });
@@ -70,12 +67,16 @@ describe("AlertContextMenu Component", () => {
   describe("formattedValue Computed", () => {
     it("should format numeric value with max 2 decimal places", () => {
       wrapper = createWrapper({ value: 1234567.891 });
-      expect(wrapper.vm.formattedValue).toBe((1234567.891).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+      expect(wrapper.vm.formattedValue).toBe(
+        (1234567.891).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      );
     });
 
     it("should format integer numeric value", () => {
       wrapper = createWrapper({ value: 42 });
-      expect(wrapper.vm.formattedValue).toBe((42).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+      expect(wrapper.vm.formattedValue).toBe(
+        (42).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      );
     });
 
     it("should return string value as-is", () => {
@@ -85,17 +86,23 @@ describe("AlertContextMenu Component", () => {
 
     it("should format 0 value correctly", () => {
       wrapper = createWrapper({ value: 0 });
-      expect(wrapper.vm.formattedValue).toBe((0).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+      expect(wrapper.vm.formattedValue).toBe(
+        (0).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      );
     });
 
     it("should format negative values correctly", () => {
       wrapper = createWrapper({ value: -99.555 });
-      expect(wrapper.vm.formattedValue).toBe((-99.555).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+      expect(wrapper.vm.formattedValue).toBe(
+        (-99.555).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      );
     });
 
     it("should format decimal values with up to 2 decimal places", () => {
       wrapper = createWrapper({ value: 3.14159 });
-      expect(wrapper.vm.formattedValue).toBe((3.14159).toLocaleString(undefined, { maximumFractionDigits: 2 }));
+      expect(wrapper.vm.formattedValue).toBe(
+        (3.14159).toLocaleString(undefined, { maximumFractionDigits: 2 }),
+      );
     });
   });
 
@@ -156,33 +163,26 @@ describe("AlertContextMenu Component", () => {
   });
 
   describe("Hover State", () => {
-    it("should initialize hoveredItem as null", () => {
-      wrapper = createWrapper();
-      expect(wrapper.vm.hoveredItem).toBeNull();
-    });
-
-    it("should update hoveredItem to above on mouseenter", async () => {
+    // Hover is now handled purely via CSS (hover:bg-*) rather than a
+    // JS-tracked hoveredItem state, so we assert the hover utility classes exist.
+    it("should apply hover background utility class to above menu item", () => {
       wrapper = createWrapper();
       const aboveItem = wrapper.find('[data-test="alert-context-menu-above"]');
-      await aboveItem.trigger("mouseenter");
-      expect(wrapper.vm.hoveredItem).toBe("above");
+      expect(aboveItem.exists()).toBe(true);
+      expect(aboveItem.classes()).toContain("hover:bg-dropdown-item-hover-bg");
     });
 
-    it("should update hoveredItem to below on mouseenter", async () => {
+    it("should apply hover background utility class to below menu item", () => {
       wrapper = createWrapper();
       const belowItem = wrapper.find('[data-test="alert-context-menu-below"]');
-      await belowItem.trigger("mouseenter");
-      expect(wrapper.vm.hoveredItem).toBe("below");
+      expect(belowItem.exists()).toBe(true);
+      expect(belowItem.classes()).toContain("hover:bg-dropdown-item-hover-bg");
     });
 
-    it("should reset hoveredItem to null on mouseleave", async () => {
+    it("should apply cursor-pointer class to menu items", () => {
       wrapper = createWrapper();
       const aboveItem = wrapper.find('[data-test="alert-context-menu-above"]');
-      await aboveItem.trigger("mouseenter");
-      expect(wrapper.vm.hoveredItem).toBe("above");
-
-      await aboveItem.trigger("mouseleave");
-      expect(wrapper.vm.hoveredItem).toBeNull();
+      expect(aboveItem.classes()).toContain("cursor-pointer");
     });
   });
 
@@ -249,10 +249,10 @@ describe("AlertContextMenu Component", () => {
   describe("Props Reactivity", () => {
     it("should react to visible prop changes", async () => {
       wrapper = createWrapper({ visible: false });
-      expect(wrapper.vm.hoveredItem).toBeNull();
+      expect(wrapper.find('[data-test="alert-context-menu"]').exists()).toBe(false);
 
       await wrapper.setProps({ visible: true });
-      expect(wrapper.exists()).toBe(true);
+      expect(wrapper.find('[data-test="alert-context-menu"]').exists()).toBe(true);
     });
 
     it("should react to x prop changes", async () => {

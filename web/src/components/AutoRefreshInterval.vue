@@ -15,163 +15,151 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div :class="isCompact ? '' : 'q-pl-sm float-left'">
+  <div class="flex items-center">
     <!-- Compact mode: Simple toggle button with dropdown menu -->
-    <q-btn
-      v-if="isCompact"
-      data-test="logs-search-bar-refresh-interval-btn"
-      flat
-      dense
-      no-caps
-      :class="[
-        'compact-refresh-btn',
-        isAnimating ? 'active-refresh-btn' : ''
-      ]"
-    >
-      <q-icon
-        name="update"
-        :class="[
-          isAnimating ? 'rotating-icon' : '',
-          isAnimating ? 'text-white' : ''
-        ]"
-        size="18px"
-      />
-      <q-tooltip class="tw:text-[12px]" :offset="[0, 2]">
-        {{ t('search.autoRefresh') }}: {{ selectedLabel }}
-      </q-tooltip>
-
-      <!-- Dropdown menu for interval selection -->
-      <q-menu content-style="z-index: 10001">
-        <div class="row">
-          <div class="col col-12 q-pa-sm" style="text-align: center; width: 300px">
-            <q-btn
+    <ODropdown v-if="isCompact" v-model:open="btnRefreshInterval" side="bottom" align="start">
+      <template #trigger>
+        <OButton
+          data-test="logs-search-bar-refresh-interval-btn"
+          size="icon-toolbar"
+          :variant="variant"
+          :active="isAnimating"
+        >
+          <OIcon
+            name="update"
+            :class="isAnimating ? 'auto-refresh-icon--spinning' : ''"
+            size="sm"
+          />
+          <OTooltip :content="t('search.autoRefreshWithValue', { value: selectedLabel })" />
+        </OButton>
+      </template>
+      <div class="w-75 p-2">
+        <div class="flex">
+          <div class="flex w-full flex-col p-2 text-center">
+            <OButton
               data-test="logs-search-off-refresh-interval"
-              no-caps
-              :flat="modelValue.toString() !== '0'"
-              size="md"
-              :class="
-                'no-border full-width ' +
-                (modelValue.toString() === '0' ? 'selected' : '')
+              :variant="modelValue.toString() === '0' ? 'primary' : 'ghost'"
+              size="sm"
+              :block="true"
+              @click="
+                () => {
+                  onItemClick({ label: t('common.off'), value: 0 });
+                  btnRefreshInterval = false;
+                }
               "
-              v-close-popup="true"
-              @click="onItemClick({ label: t('common.off'), value: 0 })"
             >
               {{ t("common.off") }}
-            </q-btn>
+            </OButton>
           </div>
         </div>
-        <q-separator />
-        <div v-for="(items, i) in refreshTimes" :key="'row_' + i" class="row">
+        <hr class="border-border-default my-0 border-0 border-t border-solid" />
+        <div v-for="(items, i) in refreshTimes" :key="'row_' + i" class="flex">
           <div
             v-for="(item, j) in items"
             :key="'col_' + i + '_' + j"
-            class="col col-4 q-pa-sm"
-            style="text-align: center"
+            class="flex w-1/3 flex-col p-2 text-center"
           >
-            <q-btn
+            <OButton
               :data-test="`logs-search-bar-refresh-time-${item.value}`"
-              no-caps
-              :flat="Number(modelValue) !== item.value"
-              size="md"
-              :class="[
-                'no-border ' +
-                  (Number(modelValue) === item.value ? 'selected' : ''),
-              ]"
-              @click="onItemClick(item)"
-              v-close-popup="true"
-              :disable="item.disabled"
+              :variant="Number(modelValue) === item.value ? 'primary' : 'ghost'"
+              size="sm"
+              @click="
+                () => {
+                  onItemClick(item);
+                  btnRefreshInterval = false;
+                }
+              "
+              :disabled="item.disabled"
             >
-              <q-tooltip
+              <OTooltip
                 v-if="item.disabled"
-                style="z-index: 10001; font-size: 14px"
-                anchor="center right"
-                self="center left"
-                max-width="300px"
-              >
-                {{ minRangeRestrictionMessageVal }}
-              </q-tooltip>
+                side="right"
+                align="center"
+                max-width="18.75rem"
+                :content="raw(minRangeRestrictionMessageVal)"
+              />
               {{ item.label }}
-            </q-btn>
+            </OButton>
           </div>
         </div>
-      </q-menu>
-    </q-btn>
+      </div>
+    </ODropdown>
 
     <!-- Full mode: Dropdown with label -->
-    <q-btn-dropdown
-      v-else
-      data-test="logs-search-bar-refresh-interval-btn-dropdown"
-      v-model="btnRefreshInterval"
-      no-caps
-      class="q-pa-xs element-box-shadow el-border"
-      content-style="z-index: 10001"
-    >
-      <template v-slot:label>
-        <div class="row items-center no-wrap">
-          <q-icon
-            left
-            name="update"
-            :class="[
-              isAnimating ? 'rotating-icon' : '',
-              isAnimating ? 'text-primary' : ''
-            ]"
-          />
-          <div class="text-center">{{ selectedLabel }}</div>
-        </div>
-      </template>
-      <div class="row">
-        <div class="col col-12 q-pa-sm" style="text-align: center; width: 300px">
-          <q-btn
-            data-test="logs-search-off-refresh-interval"
-            no-caps
-            :flat="modelValue.toString() !== '0'"
-            size="md"
-            :class="
-              'no-border full-width ' +
-              (modelValue.toString() === '0' ? 'selected' : '')
-            "
-            v-close-popup="true"
-            @click="onItemClick({ label: t('common.off'), value: 0 })"
-          >
-            {{ t("common.off") }}
-          </q-btn>
-        </div>
-      </div>
-      <q-separator />
-      <div v-for="(items, i) in refreshTimes" :key="'row_' + i" class="row">
-        <div
-          v-for="(item, j) in items"
-          :key="'col_' + i + '_' + j"
-          class="col col-4 q-pa-sm"
-          style="text-align: center"
+    <ODropdown v-else v-model:open="btnRefreshInterval" side="bottom" align="start">
+      <template #trigger>
+        <OButton
+          data-test="logs-search-bar-refresh-interval-btn-dropdown"
+          :variant="variant"
+          size="sm-toolbar"
         >
-          <q-btn
-            :data-test="`logs-search-bar-refresh-time-${item.value}`"
-            no-caps
-            :flat="Number(modelValue) !== item.value"
-            size="md"
-            :class="[
-              'no-border ' +
-                (Number(modelValue) === item.value ? 'selected' : ''),
-            ]"
-            @click="onItemClick(item)"
-            v-close-popup="true"
-            :disable="item.disabled"
-          >
-            <q-tooltip
-              v-if="item.disabled"
-              style="z-index: 10001; font-size: 14px"
-              anchor="center right"
-              self="center left"
-              max-width="300px"
+          <div class="flex flex-nowrap items-center">
+            <OIcon
+              left
+              name="update"
+              size="sm"
+              :class="[
+                isAnimating ? 'auto-refresh-icon--spinning' : '',
+                isAnimating ? 'text-primary' : '',
+                'me-0.5',
+              ]"
+            />
+            <div class="text-compact text-center leading-4">{{ selectedLabel }}</div>
+            <OIcon name="arrow-drop-down" size="sm" class="ms-0.5" />
+          </div>
+        </OButton>
+      </template>
+      <div class="w-75 p-2">
+        <div class="flex">
+          <div class="flex w-full flex-col p-2 text-center">
+            <OButton
+              data-test="logs-search-off-refresh-interval"
+              :variant="modelValue.toString() === '0' ? 'primary' : 'ghost'"
+              size="sm"
+              :block="true"
+              @click="
+                () => {
+                  onItemClick({ label: t('common.off'), value: 0 });
+                  btnRefreshInterval = false;
+                }
+              "
             >
-              {{ minRangeRestrictionMessageVal }}
-            </q-tooltip>
-            {{ item.label }}
-          </q-btn>
+              {{ t("common.off") }}
+            </OButton>
+          </div>
+        </div>
+        <ODropdownSeparator />
+        <div v-for="(items, i) in refreshTimes" :key="'row_' + i" class="flex">
+          <div
+            v-for="(item, j) in items"
+            :key="'col_' + i + '_' + j"
+            class="flex w-1/3 flex-col p-2 text-center"
+          >
+            <OButton
+              :data-test="`logs-search-bar-refresh-time-${item.value}`"
+              :variant="Number(modelValue) === item.value ? 'primary' : 'ghost'"
+              size="sm"
+              @click="
+                () => {
+                  onItemClick(item);
+                  btnRefreshInterval = false;
+                }
+              "
+              :disabled="item.disabled"
+            >
+              <OTooltip
+                v-if="item.disabled"
+                side="right"
+                align="center"
+                max-width="18.75rem"
+                :content="raw(minRangeRestrictionMessageVal)"
+              />
+              {{ item.label }}
+            </OButton>
+          </div>
         </div>
       </div>
-    </q-btn-dropdown>
+    </ODropdown>
   </div>
 </template>
 
@@ -184,14 +172,22 @@ import {
   onActivated,
   onDeactivated,
   onMounted,
+  onUnmounted,
+  type PropType,
 } from "vue";
-import { useI18n } from "vue-i18n";
+import { raw, useI18nTyped } from "@/types/i18n";
 import { useRouter } from "vue-router";
-import { useQuasar } from "quasar";
 import { generateDurationLabel } from "../utils/date";
+import OButton from "@/lib/core/Button/OButton.vue";
+import type { ButtonVariant } from "@/lib/core/Button/OButton.types";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownSeparator from "@/lib/overlay/Dropdown/ODropdownSeparator.vue";
 
 export default defineComponent({
   name: "AutoRefreshInterval",
+  components: { OButton, ODropdown, ODropdownSeparator, OTooltip, OIcon },
   props: {
     modelValue: {
       type: Number,
@@ -213,35 +209,40 @@ export default defineComponent({
       type: Boolean,
       default: false,
     },
+    variant: {
+      type: String as PropType<ButtonVariant>,
+      default: "outline",
+    },
   },
   emits: ["update:modelValue", "trigger"],
   setup(props: any, { emit }) {
     const router = useRouter();
-    const { t } = useI18n();
-    const $q = useQuasar();
+    const { t } = useI18nTyped();
 
     const btnRefreshInterval = ref(false);
     let intervalInstance = 0;
 
+    // The count lives inside each message ("{count} sec") rather than being
+    // prefixed to a translated unit — number/unit order is per-language.
     const refreshTimes = computed(() => [
       [
-        { label: `5 ${t("common.sec")}`, value: 5, disabled: false },
-        { label: `1 ${t("common.min")}`, value: 60, disabled: false },
-        { label: `1 ${t("common.hr")}`, value: 3600, disabled: false },
+        { label: t("common.secShort", { count: 5 }), value: 5, disabled: false },
+        { label: t("common.minShort", { count: 1 }), value: 60, disabled: false },
+        { label: t("common.hrShort", { count: 1 }), value: 3600, disabled: false },
       ],
       [
-        { label: `10 ${t("common.sec")}`, value: 10, disabled: false },
-        { label: `5 ${t("common.min")}`, value: 300, disabled: false },
-        { label: `2 ${t("common.hr")}`, value: 7200, disabled: false },
+        { label: t("common.secShort", { count: 10 }), value: 10, disabled: false },
+        { label: t("common.minShort", { count: 5 }), value: 300, disabled: false },
+        { label: t("common.hrShort", { count: 2 }), value: 7200, disabled: false },
       ],
       [
-        { label: `15 ${t("common.sec")}`, value: 15, disabled: false },
-        { label: `15 ${t("common.min")}`, value: 900, disabled: false },
-        { label: `1 ${t("common.day")}`, value: 86400, disabled: false },
+        { label: t("common.secShort", { count: 15 }), value: 15, disabled: false },
+        { label: t("common.minShort", { count: 15 }), value: 900, disabled: false },
+        { label: t("common.dayShort", { count: 1 }), value: 86400, disabled: false },
       ],
       [
-        { label: `30 ${t("common.sec")}`, value: 30, disabled: false },
-        { label: `30 ${t("common.min")}`, value: 1800, disabled: false },
+        { label: t("common.secShort", { count: 30 }), value: 30, disabled: false },
+        { label: t("common.minShort", { count: 30 }), value: 1800, disabled: false },
       ],
     ]);
 
@@ -344,7 +345,9 @@ export default defineComponent({
           item.disabled = isDisabled(item.value);
         });
       });
-      minRangeRestrictionMessageVal.value = t("common.minRefreshIntervalMessage", { interval: props.minRefreshInterval });
+      minRangeRestrictionMessageVal.value = t("common.minRefreshIntervalMessage", {
+        interval: props.minRefreshInterval,
+      });
     };
 
     onMounted(() => {
@@ -361,7 +364,12 @@ export default defineComponent({
       clearInterval(intervalInstance);
     });
 
+    onUnmounted(() => {
+      clearInterval(intervalInstance);
+    });
+
     return {
+      raw,
       t,
       router,
       btnRefreshInterval,
@@ -378,32 +386,17 @@ export default defineComponent({
 });
 </script>
 
-<style lang="scss" scoped>
-.refresh-interval-dropdown {
-  min-width: 36px;
-  height: 100%;
-  min-height: 30px;
-  line-height: 30px;
-  padding: 0px 5px;
-}
-
-.compact-refresh-btn {
-  min-width: 24px !important;
-  height: 28px !important;
-  padding: 2px 4px !important;
-  border: 1px solid var(--o2-border-color) !important;
-  border-radius: 4px !important;
-  transition: background-color 0.3s ease, border-color 0.3s ease;
-}
-
-.active-refresh-btn {
-  background-color: var(--q-primary) !important;
-  border-color: var(--q-primary) !important;
-}
-
-.active-refresh-btn:hover {
-  background-color: var(--q-primary) !important;
-  opacity: 0.9;
+<style scoped>
+/* keep(keyframes): the spinning refresh icon is used only by this component (both
+   the icon-only and the labelled dropdown trigger share this one class). The
+   `animation` is declared here rather than as a template `[animation:…]` utility
+   so Vue's scoped compiler renames the keyframe and this reference together.
+   The class lands on an OIcon root, which carries this component's scope id too.
+   `!important` is retained from the original `!`-prefixed utilities. */
+.auto-refresh-icon--spinning {
+  display: inline-block !important;
+  transform-origin: center center !important;
+  animation: rotate 2s linear infinite !important;
 }
 
 @keyframes rotate {
@@ -413,17 +406,5 @@ export default defineComponent({
   100% {
     transform: rotate(360deg);
   }
-}
-
-:deep(.rotating-icon) {
-  animation: rotate 2s linear infinite !important;
-  transform-origin: center center !important;
-  display: inline-block !important;
-}
-
-.rotating-icon {
-  animation: rotate 2s linear infinite !important;
-  transform-origin: center center !important;
-  display: inline-block !important;
 }
 </style>

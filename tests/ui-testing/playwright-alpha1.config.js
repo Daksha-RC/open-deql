@@ -39,26 +39,42 @@ if (!process.env.INGESTION_URL || process.env.INGESTION_URL.includes('localhost'
   testLogger.info(`INGESTION_URL set to ZO_BASE_URL: ${process.env.ZO_BASE_URL}`);
 }
 
-// Override ORGNAME with the correct org identifier from cloud-config.json
-// (written by global-setup-alpha1.js after Dex login)
-const fs = require('fs');
-const cloudConfigFile = path.join(__dirname, 'playwright-tests/utils/auth/cloud-config.json');
-try {
-  if (fs.existsSync(cloudConfigFile)) {
-    const cloudConfig = JSON.parse(fs.readFileSync(cloudConfigFile, 'utf-8'));
-    if (cloudConfig.orgIdentifier) {
-      process.env.ORGNAME = cloudConfig.orgIdentifier;
-      testLogger.info(`ORGNAME overridden from cloud-config: ${cloudConfig.orgIdentifier}`);
-    }
-  }
-} catch (e) {
-  testLogger.debug('cloud-config.json not yet available (will be created by global setup)');
-}
+// ORGNAME comes from .env. global-setup-alpha1.js performs a UI org-switch
+// post-login so the Pinia store binds API calls to this org, and writes
+// cloud-config.json with the matching passcode for ingestion.
+testLogger.info(`ORGNAME from .env: ${process.env.ORGNAME}`);
 
 /**
  * Alpha1 Cloud Playwright Configuration
  * Uses Dex "Continue with Email" login flow
  */
+
+// Shared browser context for the chromium project.
+const CHROME_USE = {
+  ...devices['Desktop Chrome'],
+  viewport: { width: 1500, height: 1024 },
+  permissions: ['clipboard-read', 'clipboard-write'],
+  // Reuse auth state from global setup (Dex email login). Filename is canonical;
+  // multi-user splitting happens at the CI layer (each shard downloads its own
+  // user's artifact into this path). See global-setup-alpha1.js AUTH_FILE.
+  storageState: path.join(__dirname, 'playwright-tests/utils/auth/user.json'),
+  // Chromium launch flags for the EKS (Kubernetes) runners. --disable-dev-shm-usage
+  // is the critical one: containers default to a 64MB /dev/shm, which Chromium
+  // exhausts under parallel load (5 workers) on long/heavy shards — the renderer
+  // then crashes and the pod hits memory pressure, surfacing as "runner lost
+  // communication" (OOMKill/eviction) with a frozen step + 404 logs. Routing shared
+  // memory to /tmp (disk) instead is the standard fix. The sandbox/gpu flags are the
+  // usual container-safe defaults (no user namespaces / no GPU on the runners).
+  launchOptions: {
+    args: [
+      '--disable-dev-shm-usage',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-gpu',
+    ],
+  },
+};
+
 module.exports = defineConfig({
   testDir: './playwright-tests',
   testMatch: ['**/*.spec.js'],
@@ -71,12 +87,20 @@ module.exports = defineConfig({
 
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  retries: process.env.CI ? 1 : 0,
+  // The heavy Alerts specs contend on the shared alpha org's slow list fetches under
+  // concurrent load. Rather than serialize them, they run fully in parallel and rely on
+  // (a) the page-object resilience (bounded retry loops + settle waits for slow stream/
+  // destination/template dropdown fetches) and (b) this suite-wide retry to absorb any
+  // residual contention flake. Only failing tests retry, so passing runs are unaffected.
+  retries: process.env.CI ? 2 : 0,
   workers: 3,
 
   reporter: process.env.CI
     ? [
         ['blob', { outputDir: 'blob-report' }],
+        // Prints a LOUD banner to stdout whenever a test is retried (blob writes nothing to
+        // the log, so retries are otherwise invisible in the CI output). Log-only, never fails.
+        ['./playwright-tests/utils/retry-banner-reporter.js'],
       ]
     : [
         ['html', { outputFolder: 'playwright-results/html-report', open: 'never' }],
@@ -92,7 +116,10 @@ module.exports = defineConfig({
     video: process.env.CI ? 'retain-on-failure' : 'off',
   },
 
-  timeout: process.env.CI ? 5 * 60 * 1000 : 3 * 60 * 1000,
+  // beforeEach pays navigateToBase plus the one-per-worker fixture ingestion against the
+  // shared cloud org, and the multi-panel specs legitimately run 2.4-3.0 min after that.
+  // A 3 min local cap left them timing out in setup rather than on any real assertion.
+  timeout: 5 * 60 * 1000,
 
   expect: {
     timeout: process.env.CI ? 30000 : 10000,
@@ -100,14 +127,9 @@ module.exports = defineConfig({
 
   projects: [
     {
+      // Single project — every test runs fully in parallel.
       name: 'chromium',
-      use: {
-        ...devices['Desktop Chrome'],
-        viewport: { width: 1500, height: 1024 },
-        permissions: ['clipboard-read', 'clipboard-write'],
-        // Reuse auth state from global setup (Dex email login)
-        storageState: path.join(__dirname, 'playwright-tests/utils/auth/user.json'),
-      },
+      use: CHROME_USE,
     },
   ],
 });

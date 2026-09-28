@@ -13,9 +13,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    fmt,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use arrow::array::RecordBatch;
@@ -23,13 +26,14 @@ use arrow_schema::SchemaRef;
 use config::{
     cluster::LOCAL_NODE,
     meta::{cluster::NodeInfo, search::ScanStats},
+    utils::record_batch_ext::RecordBatchExt,
 };
 use datafusion::{
     self,
     physical_plan::{
-        ExecutionPlan,
+        DisplayFormatType, ExecutionPlan,
         display::DisplayableExecutionPlan,
-        metrics::{self, ExecutionPlanMetricsSet, MetricBuilder},
+        metrics::{self, ExecutionPlanMetricsSet, MetricBuilder, MetricValue},
     },
 };
 use parking_lot::Mutex;
@@ -43,28 +47,53 @@ pub struct RemoteScanMetrics {
     pub decode_time: metrics::Time,
     /// output rows
     pub output_rows: metrics::Count,
+    /// number of RecordBatches received from the remote node
+    pub batches_received: metrics::Count,
+    /// total in-memory bytes of RecordBatches received; registered as
+    /// `MetricValue::OutputBytes` so DataFusion formats it with `human_readable_size`
+    /// (e.g. "1.5 GB") rather than `human_readable_count` ("1.57 B" = billion)
+    pub bytes_received: metrics::Count,
 }
 
 impl RemoteScanMetrics {
     pub fn new(input_partition: usize, metrics: &ExecutionPlanMetricsSet) -> Self {
-        // Time in nanos to execute child operator and fetch batches
         let fetch_time = MetricBuilder::new(metrics).subset_time("fetch_time", input_partition);
-
-        // Time in nanos to perform decoding
         let decode_time = MetricBuilder::new(metrics).subset_time("decode_time", input_partition);
-
-        // Output rows
         let output_rows = MetricBuilder::new(metrics).output_rows(input_partition);
+        let batches_received =
+            MetricBuilder::new(metrics).counter("batches_received", input_partition);
+
+        // Register as OutputBytes so the display uses human_readable_size (KB/MB/GB)
+        // instead of human_readable_count (K/M/B where B means billion).
+        let bytes_received = metrics::Count::new();
+        MetricBuilder::new(metrics)
+            .with_partition(input_partition)
+            .build(MetricValue::OutputBytes(bytes_received.clone()));
 
         Self {
             fetch_time,
             decode_time,
             output_rows,
+            batches_received,
+            bytes_received,
         }
     }
 
-    pub fn record_output(&self, n: usize) {
-        self.output_rows.add(n);
+    pub fn record_output(&self, batch: &RecordBatch) {
+        self.output_rows.add(batch.num_rows());
+        self.batches_received.add(1);
+        self.bytes_received.add(batch.size());
+    }
+
+    /// Average fetch time per batch in milliseconds, or 0 if no batches received.
+    pub fn avg_batch_time_ms(&self) -> u64 {
+        let batches = self.batches_received.value();
+        if batches == 0 {
+            return 0;
+        }
+        // fetch_time.value() is total nanoseconds (usize)
+        let total_ns = self.fetch_time.value() as u64;
+        total_ns / batches as u64 / 1_000_000
     }
 }
 
@@ -160,10 +189,14 @@ fn collect_metrics(metrics_info: &MetricsInfo) -> Vec<Metrics> {
     let plan = &metrics_info.plan;
     let is_super_cluster = metrics_info.is_super_cluster;
     let func = &metrics_info.func;
-    let plan_with_metrics = DisplayableExecutionPlan::with_metrics(plan.as_ref())
-        .set_show_statistics(false)
-        .indent(true)
-        .to_string();
+    let plan_with_metrics = if is_super_cluster {
+        format_leader_plan(plan.as_ref())
+    } else {
+        DisplayableExecutionPlan::with_metrics(plan.as_ref())
+            .set_show_statistics(false)
+            .indent(false)
+            .to_string()
+    };
     let stage = if func() {
         if is_super_cluster { 1 } else { 2 }
     } else {
@@ -177,13 +210,59 @@ fn collect_metrics(metrics_info: &MetricsInfo) -> Vec<Metrics> {
     }]
 }
 
+fn format_leader_plan(plan: &dyn ExecutionPlan) -> String {
+    let mut output = String::new();
+    write_plan(&mut output, plan, 0);
+    output
+}
+
+struct PlanDisplay<'a>(&'a dyn ExecutionPlan);
+
+impl fmt::Display for PlanDisplay<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt_as(DisplayFormatType::Default, f)
+    }
+}
+
+fn write_plan(output: &mut String, plan: &dyn ExecutionPlan, indent: usize) {
+    use fmt::Write;
+
+    write!(output, "{:indent$}", "", indent = indent * 2).expect("write to String");
+    write!(output, "{}", PlanDisplay(plan)).expect("write to String");
+
+    if let Some(metrics) = plan.metrics() {
+        let metrics = metrics
+            .aggregate_by_name()
+            .sorted_for_display()
+            .timestamps_removed();
+        write!(output, ", metrics=[{metrics}]").expect("write to String");
+    } else {
+        write!(output, ", metrics=[]").expect("write to String");
+    }
+    writeln!(output).expect("write to String");
+
+    if plan.name() == "RemoteScanExec" {
+        return;
+    }
+
+    for child in plan.children() {
+        write_plan(output, child.as_ref(), indent + 1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
     use arrow_schema::{DataType, Field, Schema};
     use config::meta::search::ScanStats;
-    use datafusion::physical_plan::empty::EmptyExec;
+    use datafusion::{
+        common::Result,
+        execution::{SendableRecordBatchStream, TaskContext},
+        physical_plan::{
+            DisplayAs, DisplayFormatType, ExecutionPlan, PlanProperties, empty::EmptyExec,
+        },
+    };
     use parking_lot::Mutex;
 
     use super::*;
@@ -202,12 +281,72 @@ mod tests {
             file_list_took: 50,
             aggs_cache_ratio: 80,
             peak_memory_usage: 1024000,
+            wait_in_queue: 0,
         }
     }
 
     fn create_test_execution_plan() -> Arc<dyn ExecutionPlan> {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]));
         Arc::new(EmptyExec::new(schema))
+    }
+
+    #[derive(Debug)]
+    struct NamedExec {
+        name: &'static str,
+        inner: Arc<dyn ExecutionPlan>,
+    }
+
+    impl DisplayAs for NamedExec {
+        fn fmt_as(&self, _t: DisplayFormatType, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "{}", self.name)
+        }
+    }
+
+    impl ExecutionPlan for NamedExec {
+        fn apply_expressions(
+            &self,
+            _f: &mut dyn FnMut(
+                &Arc<dyn datafusion::physical_expr::PhysicalExpr>,
+            ) -> datafusion::common::Result<
+                datafusion::common::tree_node::TreeNodeRecursion,
+            >,
+        ) -> datafusion::common::Result<datafusion::common::tree_node::TreeNodeRecursion> {
+            Ok(datafusion::common::tree_node::TreeNodeRecursion::Continue)
+        }
+
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn properties(&self) -> &Arc<PlanProperties> {
+            self.inner.properties()
+        }
+
+        fn children(&self) -> Vec<&Arc<dyn ExecutionPlan>> {
+            vec![&self.inner]
+        }
+
+        fn with_new_children(
+            self: Arc<Self>,
+            _children: Vec<Arc<dyn ExecutionPlan>>,
+        ) -> Result<Arc<dyn ExecutionPlan>> {
+            unimplemented!()
+        }
+
+        fn execute(
+            &self,
+            _partition: usize,
+            _context: Arc<TaskContext>,
+        ) -> Result<SendableRecordBatchStream> {
+            unimplemented!()
+        }
+    }
+
+    fn create_named_test_execution_plan(
+        name: &'static str,
+        inner: Arc<dyn ExecutionPlan>,
+    ) -> Arc<dyn ExecutionPlan> {
+        Arc::new(NamedExec { name, inner })
     }
 
     #[test]
@@ -400,6 +539,44 @@ mod tests {
         let metrics = collect_metrics(&metrics_info);
         assert_eq!(metrics.len(), 1);
         assert_eq!(metrics[0].stage, 1); // func() returns false, stage defaults to 1
+    }
+
+    #[test]
+    fn test_super_cluster_stops_at_remote_scan() {
+        let follower_plan =
+            create_named_test_execution_plan("FollowerOnlyExec", create_test_execution_plan());
+        let remote_scan_plan = create_named_test_execution_plan("RemoteScanExec", follower_plan);
+        let region_leader_plan =
+            create_named_test_execution_plan("SortPreservingMergeExec", remote_scan_plan);
+        let metrics_info = MetricsInfo {
+            plan: region_leader_plan,
+            is_super_cluster: true,
+            func: Box::new(|| true),
+        };
+
+        let metrics = collect_metrics(&metrics_info);
+        assert_eq!(metrics.len(), 1);
+        assert!(metrics[0].metrics.contains("SortPreservingMergeExec"));
+        assert!(metrics[0].metrics.contains("RemoteScanExec"));
+        assert!(!metrics[0].metrics.contains("FollowerOnlyExec"));
+    }
+
+    #[test]
+    fn test_non_super_cluster_keeps_remote_scan_child_metrics() {
+        let follower_plan =
+            create_named_test_execution_plan("FollowerOnlyExec", create_test_execution_plan());
+        let remote_scan_plan = create_named_test_execution_plan("RemoteScanExec", follower_plan);
+        let region_leader_plan =
+            create_named_test_execution_plan("SortPreservingMergeExec", remote_scan_plan);
+        let metrics_info = MetricsInfo {
+            plan: region_leader_plan,
+            is_super_cluster: false,
+            func: Box::new(|| true),
+        };
+
+        let metrics = collect_metrics(&metrics_info);
+        assert_eq!(metrics.len(), 1);
+        assert!(metrics[0].metrics.contains("FollowerOnlyExec, metrics=[]"));
     }
 
     #[test]

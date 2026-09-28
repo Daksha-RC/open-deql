@@ -1,9 +1,17 @@
 // tracesPage.js
 import { expect } from '@playwright/test';
 
+
 import { dateTimeButtonLocator, relative30SecondsButtonLocator, absoluteTabLocator, Past30SecondsValue } from '../commonActions.js';
+const testLogger = require('../../playwright-tests/utils/test-logger.js');
 const { isCloudEnvironment } = require('../cloudPages/cloud-env.js');
 
+// Panel titles rendered by web/src/plugins/traces/metrics/metrics.json.
+const TRACES_METRICS_PANELS = ['Rate', 'Errors', 'Duration'];
+const CHART_ZOOM_START_RATIO = 0.35;
+const CHART_ZOOM_END_RATIO = 0.75;
+const CHART_DRAG_STEPS = 20;
+const QUERY_CLEAR_ATTEMPTS = 10;
 
 export class TracesPage {
   constructor(page) {
@@ -12,14 +20,34 @@ export class TracesPage {
     // Navigation
     this.tracesMenuItem = page.locator('[data-test="menu-link-\\/traces-item"]');
 
-    // Search Bar - Tab Toggles
-    this.searchToggle = '[data-test="traces-search-toggle"]';
-    this.serviceMapsToggle = '[data-test="traces-service-maps-toggle"]';
+    // Search Bar - Tab Toggles (post UX revamp: OToggleGroupItem buttons)
+    // Source: web/src/plugins/traces/SearchBar.vue
+    this.searchToggle = '[data-test="traces-search-mode-traces-btn"]';
+    this.spansToggle = '[data-test="traces-search-mode-spans-btn"]';
+    // Service Graph and Services are reachable two ways with different
+    // semantics: (a) the Traces rail tile's hover flyout navigates to the
+    // standalone routes (/traces/service-graph, /traces/services), and
+    // (b) toolbar tabs on the Traces page switch the view IN-PAGE — the URL
+    // stays on /traces and gains ?tab=. Keep both paths covered.
+    this.tracesRailTile = '[data-test="nav-group-traces"]';
+    this.serviceMapsNavItem = '[data-test="nav-group-item-serviceGraph"]';
+    this.servicesCatalogNavItem = '[data-test="nav-group-item-servicesCatalog"]';
+    this.serviceGraphTabToggle = '[data-test="traces-service-graph-toggle"]';
+    this.servicesCatalogTabToggle = '[data-test="traces-search-mode-services-catalog-btn"]';
+    // Inline-safe selectors (defined in the inner components, so they work for
+    // both the in-page tabs and the standalone pages).
+    this.servicesCatalogTable = '[data-test="services-catalog-table"]';
+    this.servicesCatalogEmpty = '[data-test="services-catalog-empty"]';
+    this.servicesCatalogRefreshButton = '[data-test="services-catalog-refresh-btn"]';
+    this.servicesCatalogDateTimePicker = '[data-test="services-catalog-date-time-picker"]';
+    // No-data state inside the graph panel (OEmptyState rendered by
+    // ServiceGraphNoDataState.vue within the graph container).
+    this.serviceGraphEmptyState = '[data-test="service-graph-container"] [data-test="o2-empty-state"]';
 
     // Search Bar - Controls
     this.showMetricsToggle = '[data-test="traces-search-bar-show-metrics-toggle-btn"]';
     this.resetFiltersButton = '[data-test="traces-search-bar-reset-filters-btn"]';
-    this.sqlModeToggle = '[data-test="logs-search-bar-sql-mode-toggle-btn"]';
+    this.sqlModeToggle = '[data-cy="syntax-guide-button"]';
     this.dateTimeDropdown = '[data-test="logs-search-bar-date-time-dropdown"]';
     this.refreshButton = '[data-test="logs-search-bar-refresh-btn"]';
     this.shareLinkButton = '[data-test="logs-search-bar-share-link-btn"]';
@@ -27,13 +55,19 @@ export class TracesPage {
     // Main Components
     this.searchBar = '[data-test="logs-search-bar"]';
     this.indexList = '[data-test="traces-search-index-list"]';
-    this.fieldListCollapseButton = '[data-test="logs-search-field-list-collapse-btn"]';
+    this.fieldListCollapseButton = '[data-test="traces-search-field-list-collapse-btn"]';
     this.searchResult = '[data-test="logs-search-search-result"]';
 
     // Search Results
+    // Source: web/src/plugins/traces/components/TracesSearchResultList.vue
+    // Source: web/src/lib/core/Table/OTable.vue (rows use o2-table-row-{index})
     this.searchResultList = '[data-test="traces-search-result-list"]';
-    this.searchResultItem = '[data-test="traces-search-result-item"]';
-    this.searchResultCount = '[data-test="traces-search-result-count"]';
+    this.searchResultItem = '[data-test="traces-search-result-list"] [data-test^="o2-table-row-"]:not([data-test="o2-table-row-drag-handle"])';
+    this.searchResultCount = '[data-test="traces-count-badge"]';
+    this.tracesCountBadge = '[data-test="traces-count-badge"]';
+    this.tracesErrorCountBadge = '[data-test="traces-error-count-badge"]';
+    this.traceRowOperationName = '[data-test="trace-row-operation-name"]';
+    this.traceRowDuration = '[data-test="trace-row-duration"]';
 
     // Trace Details
     this.traceDetailsHeader = '[data-test="trace-details-header"]';
@@ -45,41 +79,81 @@ export class TracesPage {
     this.traceDetailsTimelineChart = '[data-test="trace-details-timeline-chart"]';
     this.traceDetailsToggleTimelineButton = '[data-test="trace-details-toggle-timeline-btn"]';
     this.traceDetailsViewLogsButton = '[data-test="trace-details-view-logs-btn"]';
+    this.traceDetailsLogStreamsSelect = '[data-test="trace-details-log-streams-select"]';
     this.traceDetailsSearchInput = '[data-test="trace-details-search-input"]';
+    this.traceDetailsSearchInputField = '[data-test="trace-details-search-input-field"]';
     this.traceDetailsSidebar = '[data-test="trace-details-sidebar"]';
+
+    // ===== LLM PREVIEW PANE (GenAI v5 parts) SELECTORS =====
+    // Source: web/src/plugins/traces/TraceDetailsSidebar.vue + LLMContentRenderer.vue
+    // + TraceTree.vue (span rows/select buttons). Preview tab shown v-if=canPreviewSpan;
+    // Input/Output panes render LLMContentRenderer (messages / tool / json views).
+    // `.tool-content` / `.io-section` / `.thread-view` carry NO data-test in the
+    // Vue source (verified); they are scoped under a stable data-test ancestor
+    // where one exists so the layout-coupled class names can't leak outside the
+    // sidebar / thread surfaces.
+    this.llmPreviewTab = '[data-test="trace-details-sidebar-tabs-preview"]';
+    this.llmObservationBadge = '[data-test="trace-details-sidebar-observation-badge"]';
+    this.llmIoSection = '[data-test="trace-details-sidebar"] .io-container .io-section';
+    this.llmToolContent = '[data-test="trace-details-sidebar"] .tool-content';
+    this.llmExpandBtn = '[data-test="traces-llm-content-renderer-expand-btn"]';
+    // ThreadView.vue root div carries only the semantic `thread-view` class (no
+    // data-test); it is the component root, not a framework-generated utility class.
+    this.llmThreadView = '.thread-view';
+    this.traceTreeSpanContainer = '[data-test^="trace-tree-span-container-"]';
 
     // Service Graph (Enterprise)
     this.serviceGraphChart = '[data-test="service-graph-chart"]';
     this.serviceGraphRefreshButton = '[data-test="service-graph-refresh-btn"]';
+    // Standalone Service Graph page (rail-flyout route /traces/service-graph).
+    this.serviceGraphPage = '[data-test="service-graph-page"]';
 
     // ===== ANALYZE DIMENSIONS SELECTORS (VERIFIED against Vue source) =====
     // TracesMetricsDashboard.vue: data-test="insights-button"
     this.insightsButton = '[data-test="insights-button"]';
-    // Traces SearchBar.vue: data-test="traces-search-bar-error-only-toggle-btn"
-    this.errorOnlyToggle = '[data-test="traces-search-bar-error-only-toggle-btn"]';
+    // SearchResult.vue: error-count badge doubles as the error-only toggle
+    this.errorOnlyToggle = '[data-test="traces-error-count-badge"]';
     // Traces SearchBar.vue: data-test="traces-search-bar-show-metrics-toggle-btn"
     this.metricsToggle = '[data-test="traces-search-bar-show-metrics-toggle-btn"]';
-    // TracesAnalysisDashboard.vue: data-test="analysis-dashboard-close"
-    this.analysisDashboardClose = '[data-test="analysis-dashboard-close"]';
+    // TracesAnalysisDashboard.vue was migrated to ODrawer
+    // (data-test="traces-analysis-dashboard-drawer"). The legacy
+    // `analysis-dashboard-close` data-test and `.analysis-dashboard-card`
+    // template class were removed — `.analysis-dashboard-card` only survives
+    // in CSS rules now, no element actually carries the class. Scope all
+    // selectors via the ODrawer slug instead.
+    this.analysisDashboardDrawer = '[data-test="traces-analysis-dashboard-drawer"]';
+    this.analysisDashboardClose = '[data-test="traces-analysis-dashboard-drawer"] [data-test="o-drawer-close-btn"]';
     // TracesAnalysisDashboard.vue: dimension sidebar (visible by default, not a dialog)
     this.dimensionSelectorSidebar = '[data-test="dimension-selector-sidebar"]';
     this.dimensionSelectorCollapseBtn = '[data-test="dimension-selector-collapse-btn"]';
     this.dimensionSearchInput = '[data-test="dimension-search-input"]';
+    // OInput inner native <input> — fill the -field variant per §4 OInput convention
+    this.dimensionSearchInputField = '[data-test="dimension-search-input-field"]';
     // TracesAnalysisDashboard.vue: data-test="percentile-refresh-button"
     this.percentileRefreshButton = '[data-test="percentile-refresh-button"]';
-    // Analysis dashboard card (container)
-    this.analysisDashboardCard = '.analysis-dashboard-card';
+    // Analysis dashboard card (container) — alias to the drawer slug for backwards-compat
+    this.analysisDashboardCard = '[data-test="traces-analysis-dashboard-drawer"]';
     // Metrics dashboard container
-    this.tracesMetricsDashboard = '.traces-metrics-dashboard';
-    // Analysis Dashboard Tabs (i18n labels: "Rate", "Latency", "Errors")
-    this.analysisDashboardTabs = '.analysis-dashboard-card .q-tabs';
-    this.rateTab = '.analysis-dashboard-card .q-tab:has-text("Rate")';
-    this.latencyTab = '.analysis-dashboard-card .q-tab:has-text("Duration")';
-    this.errorsTab = '.analysis-dashboard-card .q-tab:has-text("Errors")';
-    // Analysis dashboard states
-    this.analysisDashboardLoading = '.analysis-dashboard-card .q-spinner, .analysis-dashboard-card .q-spinner-hourglass';
-    this.analysisDashboardError = '.analysis-dashboard-card .q-banner--top-padding';
-    this.analysisDashboardRetryBtn = '.analysis-dashboard-card button:has-text("Retry")';
+    // Source: web/src/plugins/traces/metrics/TracesMetricsDashboard.vue
+    this.tracesMetricsDashboard = '[data-test="traces-metrics-dashboard"]';
+    // No-stream prompt rendered before a stream is selected
+    // Source: web/src/plugins/traces/TracesNoStreamState.vue
+    this.tracesNoStreamCard = '[data-test="traces-no-stream-select-stream-card"]';
+    // Right-click Duration gte/lte context menu
+    // Source: web/src/plugins/traces/metrics/TracesMetricsContextMenu.vue
+    this.metricsContextMenu = '[data-test="traces-metrics-context-menu"]';
+    this.metricsContextMenuGte = '[data-test="context-menu-gte"]';
+    this.metricsContextMenuLte = '[data-test="context-menu-lte"]';
+    // Analysis Dashboard Tabs — source: web/src/plugins/traces/metrics/TracesAnalysisDashboard.vue
+    // Tabs render as <OTab data-test="traces-analysis-dashboard-${name}-tab"> where name ∈ {volume,duration,error}
+    this.analysisDashboardTabs = '[data-test="traces-analysis-dashboard-drawer"]';
+    this.rateTab = '[data-test="traces-analysis-dashboard-volume-tab"]';
+    this.latencyTab = '[data-test="traces-analysis-dashboard-duration-tab"]';
+    this.errorsTab = '[data-test="traces-analysis-dashboard-error-tab"]';
+    // Analysis dashboard states — scope inside the drawer
+    this.analysisDashboardLoading = '[data-test="traces-analysis-dashboard-drawer"] [data-test="traces-analysis-dashboard-loading-indicator"]';
+    this.analysisDashboardError = '[data-test="traces-analysis-dashboard-drawer"] [data-test="traces-analysis-dashboard-error"]';
+    this.analysisDashboardRetryBtn = '[data-test="traces-analysis-dashboard-drawer"] [data-test="traces-analysis-dashboard-retry-btn"]';
 
     // Index List / Field List
     this.streamSelect = '[data-test="log-search-index-list-select-stream"]';
@@ -93,14 +167,17 @@ export class TracesPage {
 
     // Error States
     this.noStreamSelectedText = '[data-test="logs-search-no-stream-selected-text"]';
-    this.resultNotFoundText = '[data-test="logs-search-result-not-found-text"]';
-    this.errorMessage = '[data-test="logs-search-error-message"]';
+    this.resultNotFoundText = '[data-test="traces-search-result-not-found-text"]';
+    this.errorMessage = '[data-test="traces-search-error-message"]';
 
     // Query Editor
-    this.sqlModeButton = '[data-test="logs-search-sql-mode-btn"]';
-    this.uiModeButton = '[data-test="logs-search-ui-mode-btn"]';
+    // The traces SearchBar.vue renders <code-query-editor editor-id="traces-query-editor">
+    // CodeQueryEditor.vue renders <div data-test="query-editor" id="{editorId}">
+    // SQL mode toggle: SyntaxGuide OButton has data-cy="syntax-guide-button"
+    this.sqlModeButton = '[data-cy="syntax-guide-button"]';
     this.queryEditor = '[data-test="query-editor"]';
-    this.queryErrorMessage = '[data-test="logs-search-error-message"]';
+    this.queryEditorContainer = '[data-test="query-editor"]';
+    this.queryErrorMessage = '[data-test="traces-search-error-message"]';
     this.viewLines = '.view-lines';
 
     // Time Range Selectors
@@ -113,14 +190,25 @@ export class TracesPage {
     this.traceTreeSpanServiceNamePrefix = '[data-test^="trace-tree-span-service-name-"]';
 
     // Field List Toggle
-    this.fieldListToggleButton = '[data-test="logs-search-field-list-collapse-btn"]';
+    this.fieldListToggleButton = '[data-test="traces-search-field-list-collapse-btn"]';
 
     // Legacy/Common
     this.dateTimeButton = dateTimeButtonLocator;
     this.relative30SecondsButton = page.locator(relative30SecondsButtonLocator);
     this.absoluteTab = absoluteTabLocator;
-    this.profileButton = page.locator('button').filter({ hasText: (process.env["ZO_ROOT_USER_EMAIL"]) });
-    this.signOutButton = page.getByText('Sign Out');
+    // Profile menu / sign-out — navbar selectors verified against Header.vue
+    this.profileButton = page.locator('[data-test="header-my-account-profile-icon"]');
+    this.signOutButton = page.locator('[data-test="menu-link-logout-item"]');
+
+    // Trace details — datetime absolute tab Start/End time fields (OInput convention)
+    this.datetimeStartTime = '[data-test="datetime-start-time-field"]';
+    this.datetimeEndTime = '[data-test="datetime-end-time-field"]';
+
+    // Field list header expansion (Field rows include data-test=`log-search-expand-{name}-field-btn`)
+    this.fieldExpandPrefix = '[data-test^="log-search-expand-"]';
+
+    // Trace details span attribute table (rendered inside trace-details-sidebar)
+    this.traceDetailsSidebarRow = '[data-test="trace-details-sidebar"] [data-test^="o2-table-row-"]';
   }
 
   // Getter methods for common trace elements
@@ -133,17 +221,23 @@ export class TracesPage {
   }
 
   getResultsContainer() {
-    return this.page.locator('[data-test="traces-search-result-list"], .traces-result-container').first();
+    return this.page.locator(this.searchResultList).first();
   }
 
   async navigateToTraces() {
-    await this.tracesMenuItem.click();
     // Cloud: sidebar click may silently fail — verify URL and fallback to direct navigation
     if (isCloudEnvironment()) {
+      await this.tracesMenuItem.click();
       await this.page.waitForURL('**/traces**', { timeout: 5000 }).catch(async () => {
         await this.navigateToTracesUrl();
       });
+      return;
     }
+    // The sidebar click can be swallowed by the nav flyout under load, so retry until the traces route loads.
+    await expect(async () => {
+      await this.tracesMenuItem.click();
+      await this.page.waitForURL('**/traces**', { timeout: 5000 });
+    }).toPass({ timeout: 30000, intervals: [500, 1000, 2000] });
   }
 
   async validateTracesPage() {
@@ -154,32 +248,15 @@ export class TracesPage {
   }
 
   async tracesPageDefaultOrg() {
-
-    await this.page.locator('[data-test="navbar-organizations-select"]').getByText('arrow_drop_down').click();
-    // Wait for the dropdown options to be visible
-    await this.page.waitForSelector('text=default'); // Wait for the text "default" to be present
-
-    // Click the specific "default" option within the dropdown
-    const defaultOption = this.page.locator('text=default').first(); // Target the first occurrence
-    await defaultOption.click();
-
-
+    // Open the org dropdown via the trigger inside the navbar select
+    await this.page.locator('[data-test="navbar-organizations-select-trigger"]').click();
+    // The default org row uses the per-identifier data-test attribute
+    await this.page.locator('[data-test-org-identifier="default"]').first().click();
   }
 
   async tracesPageDefaultMultiOrg() {
-
-
-
-    await this.page.locator('[data-test="navbar-organizations-select"]').getByText('arrow_drop_down').click();
-    // await this.page.pause();
-    // await this.page.waitForTimeout(5000);
-
-    await this.page.getByRole('option', { name: 'defaulttestmulti' }).locator('div').nth(2).click();
-
-
-    // await validateUrlContains(this.page, 'path');
-
-
+    await this.page.locator('[data-test="navbar-organizations-select-trigger"]').click();
+    await this.page.locator('[data-test-org-identifier="defaulttestmulti"]').first().click();
   }
 
   async tracesPageURLValidation() {
@@ -198,28 +275,84 @@ export class TracesPage {
   // New helper methods for traces functionality
 
   async selectTraceStream(streamName = 'default') {
-    const streamSelectLocator = this.page.locator(this.streamSelect);
+    // OSelect renders an outer wrapper div with the consumer data-test and an
+    // inner PopoverTrigger <button type="button"> that actually opens the
+    // listbox. Reka's PopoverTrigger button does NOT have `role=button`
+    // because the role is implicit on a real <button>, so we use a CSS
+    // selector that matches a real <button> element inside the wrapper.
 
-    // Click the q-select to open the dropdown menu
-    await streamSelectLocator.click();
-    await this.page.locator('.q-menu').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    const wrapper = this.page.locator(this.streamSelect);
+    await wrapper.waitFor({ state: 'visible', timeout: 10000 });
 
-    // Type into the internal input to trigger the @filter filterStreamFn
-    await streamSelectLocator.fill('');
-    await streamSelectLocator.pressSequentially(streamName, { delay: 50 });
+    // The wrapper renders immediately, but its options arrive with the async
+    // stream-list fetch. Opening the popover before then finds an empty list,
+    // every retry below misses, and selection silently no-ops — which surfaces
+    // later as "Select Stream First" and zero query results. Wait for the
+    // option to exist in the DOM first.
+    const optionReady = `[data-test="log-search-index-list-select-stream-option"][data-test-value="${streamName}"]`;
+    await this.page
+      .locator(optionReady)
+      .first()
+      .waitFor({ state: 'attached', timeout: 15000 })
+      .catch(async () => {
+        // Options are only mounted while the popover is open — open it, wait,
+        // then leave it open for the selection logic below.
+        const t = wrapper.locator('button[type="button"]').first();
+        await t.click({ force: false }).catch(() => {});
+        await this.page
+          .locator(optionReady)
+          .first()
+          .waitFor({ state: 'attached', timeout: 15000 })
+          .catch(() => {});
+      });
 
-    // Wait for filter to apply
-    await this.page.waitForTimeout(300);
+    // Check the popover-trigger button's aria-expanded state — already
+    // selected streams will reflect in the trigger button text.
+    const trigger = wrapper.locator('button[type="button"]').first();
+    await trigger.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    const currentText = await trigger.textContent().catch(() => '');
+    if (currentText && currentText.includes(streamName)) {
+      return;
+    }
+    // Only open the popover if it isn't already (the readiness wait above may
+    // have opened it) — an unconditional click would toggle it shut.
+    const popover = this.page.locator('[data-test="log-search-index-list-select-stream-popover"]');
+    if (!(await popover.isVisible({ timeout: 500 }).catch(() => false))) {
+      await trigger.click({ force: false });
+      await popover.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    }
 
-    // Click the matching option by role (Quasar renders q-select options with role="option")
-    const option = this.page.getByRole('option', { name: streamName }).first();
-    await option.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    // Try clicking the matching option directly by data-test-value. Retry
+    // up to 3 times — OSelect uses virtualised ListboxItem rendering which
+    // can drop the first synthetic click.
+    const optionSel = `[data-test="log-search-index-list-select-stream-option"][data-test-value="${streamName}"]`;
+    let clicked = false;
+    for (let attempt = 0; attempt < 3 && !clicked; attempt++) {
+      const opt = this.page.locator(optionSel).first();
+      if (await opt.isVisible({ timeout: 2000 }).catch(() => false)) {
+        await opt.click({ force: false });
+        await this.page.waitForTimeout(800);
+        // Verify selection took: trigger button text should now contain stream name.
+        const trgText = await trigger.textContent().catch(() => '');
+        if (trgText && trgText.includes(streamName)) {
+          clicked = true;
+          break;
+        }
+        // Re-open popover and try again.
+        if (!await popover.isVisible({ timeout: 200 }).catch(() => false)) {
+          await trigger.click({ force: false });
+          await popover.waitFor({ state: 'visible', timeout: 3000 }).catch(() => {});
+        }
+      } else {
+        // Type into filter to filter the list.
+        await this.page.keyboard.type(streamName, { delay: 50 });
+        await this.page.waitForTimeout(300);
+      }
+    }
 
-    if (await option.isVisible({ timeout: 3000 }).catch(() => false)) {
-      await option.click();
-    } else {
-      // Fallback: press Enter to select the first filtered option
-      await this.page.keyboard.press('Enter');
+    // If popover is still open, dismiss it by pressing Escape.
+    if (await popover.isVisible({ timeout: 500 }).catch(() => false)) {
+      await this.page.keyboard.press('Escape').catch(() => {});
     }
 
     await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
@@ -228,6 +361,16 @@ export class TracesPage {
   async runTraceSearch() {
     await this.page.locator(this.refreshButton).click();
     await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    // Wait for one of the terminal search states to appear so callers can
+    // assert on a stable DOM (badge or no-results banner or error).
+    await Promise.any([
+      this.page.locator(this.tracesCountBadge).first().waitFor({ state: 'visible', timeout: 12000 }),
+      this.page.locator(this.resultNotFoundText).waitFor({ state: 'visible', timeout: 12000 }),
+      this.page.locator(this.errorMessage).waitFor({ state: 'visible', timeout: 12000 }),
+      this.page.locator(this.searchResultItem).first().waitFor({ state: 'visible', timeout: 12000 }),
+    ]).catch(() => {});
+    // Small buffer for Vue reactivity / animation
+    await this.page.waitForTimeout(500);
   }
 
   async resetAllFilters() {
@@ -244,30 +387,6 @@ export class TracesPage {
 
   async expectNoResultsMessage() {
     await expect(this.page.locator(this.resultNotFoundText)).toBeVisible();
-  }
-
-  async clickFirstTraceResult() {
-    const selectors = [
-      this.page.getByText(/Spans\s*:\s*\d+/).first(),
-      this.page.locator(this.searchResultItem).first(),
-      this.page.locator('tbody tr').first()
-    ];
-
-    for (const selector of selectors) {
-      try {
-        if (await selector.isVisible({ timeout: 3000 })) {
-          await selector.click();
-          await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
-          // Wait for trace details to render
-          await this.page.locator(this.traceDetailsTree).waitFor({ state: 'visible', timeout: 10000 }).catch(() => {});
-          return;
-        }
-      } catch {
-        continue;
-      }
-    }
-
-    throw new Error('No trace result found to click');
   }
 
   async expectTraceDetailsVisible() {
@@ -313,7 +432,9 @@ export class TracesPage {
   }
 
   async searchWithinTrace(searchText) {
-    await this.page.fill(this.traceDetailsSearchInput, searchText);
+    const searchField = this.page.locator(this.traceDetailsSearchInputField);
+    await searchField.waitFor({ state: 'visible' });
+    await searchField.fill(searchText);
     await this.page.keyboard.press('Enter');
   }
 
@@ -326,16 +447,97 @@ export class TracesPage {
   }
 
   async switchToServiceMaps() {
-    await this.page.locator(this.serviceMapsToggle).click();
+    await this.page.locator(this.tracesRailTile).hover();
+    await this.page.locator(this.serviceMapsNavItem).click();
+    await this.page.waitForURL(/\/traces\/service-graph/, { timeout: 10000 }).catch(() => {});
     await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+  }
+
+  // In-page toolbar tab on the Traces page (NOT the rail flyout) — clicking it
+  // switches the view inline; the URL stays on /traces and gains
+  // ?tab=service-graph. Waits for the inline graph view: the chart when
+  // topology data exists, or the no-data state otherwise (topology needs the
+  // service-graph daemon, which this suite does not seed).
+  async navigateToServiceGraphViaTab() {
+    await this.page.locator(this.serviceGraphTabToggle).click();
+    await this.page.waitForURL(/\/traces\?.*tab=service-graph/, { timeout: 10000 });
+    await this.page
+      .locator(this.serviceGraphChart)
+      .or(this.page.locator(this.serviceGraphEmptyState))
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 });
+  }
+
+  // In-page toolbar tab on the Traces page (NOT the rail flyout) — clicking it
+  // switches the view inline; the URL stays on /traces and gains
+  // ?tab=services-catalog. Waits for the inline catalog (table or empty state).
+  async navigateToServicesViaTab() {
+    await this.page.locator(this.servicesCatalogTabToggle).click();
+    await this.page.waitForURL(/\/traces\?.*tab=services-catalog/, { timeout: 10000 });
+    await this.page
+      .locator(this.servicesCatalogTable)
+      .or(this.page.locator(this.servicesCatalogEmpty))
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 });
   }
 
   async switchToSearchView() {
     await this.page.locator(this.searchToggle).click();
   }
 
+  // Verify the toggle flipped, so a silently-failed click cannot green downstream assertions.
+  async switchToSpansMode() {
+    await this.page.locator(this.spansToggle).click();
+    await this.expectSpansModeActive();
+  }
+
+  // The active search-mode toggle carries data-state="on" (OToggleGroupItem).
+  async expectSpansModeActive() {
+    await expect(this.page.locator(this.spansToggle))
+      .toHaveAttribute('data-state', 'on', { timeout: 10000 });
+  }
+
   async expectServiceGraphVisible() {
     await expect(this.page.locator(this.serviceGraphChart)).toBeVisible({ timeout: 10000 });
+  }
+
+  // In-page Service Graph tab view: the chart when topology data exists, else
+  // the no-data state (this suite does not seed the service-graph daemon).
+  async expectServiceGraphViewVisible() {
+    await expect(
+      this.page
+        .locator(this.serviceGraphChart)
+        .or(this.page.locator(this.serviceGraphEmptyState))
+        .first()
+    ).toBeVisible({ timeout: 15000 });
+  }
+
+  // In-page Services Catalog tab view: the table when data exists, else empty.
+  async expectServicesCatalogVisible() {
+    await expect(
+      this.page
+        .locator(this.servicesCatalogTable)
+        .or(this.page.locator(this.servicesCatalogEmpty))
+        .first()
+    ).toBeVisible({ timeout: 15000 });
+  }
+
+  // The catalog toolbar's date-time picker reflects the shared search period.
+  async expectServicesCatalogTimeRange(text) {
+    await expect(this.page.locator(this.servicesCatalogDateTimePicker))
+      .toContainText(text, { timeout: 10000 });
+  }
+
+  // The services-catalog toolbar tab is the active mode (data-state="on").
+  async expectServicesCatalogTabActive() {
+    await expect(this.page.locator(this.servicesCatalogTabToggle))
+      .toHaveAttribute('data-state', 'on', { timeout: 10000 });
+  }
+
+  // Standalone Service Graph page rendered from the rail flyout route.
+  async expectStandaloneServiceGraphPageVisible() {
+    await expect(this.page.locator(this.serviceGraphPage))
+      .toBeVisible({ timeout: 10000 });
   }
 
   async refreshServiceGraph() {
@@ -358,8 +560,12 @@ export class TracesPage {
   }
 
   async setTimeRange(range) {
-    // Set time range based on provided value (e.g., '15m', '1h', '24h')
+    // Set time range based on provided value (e.g., '15m', '1h', '6d', '1M').
+    // Source: web/src/components/DateTime.vue — items per period:
+    //   s/m: [1,5,10,15,30,45], h: [1,2,3,6,8,12], d/w/M: [1,2,3,4,5,6]
     await this.page.locator(this.dateTimeButton).click();
+    // Wait for relative tab content to mount
+    await this.page.locator('[data-test^="date-time-relative-"]').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
 
     const rangeMap = {
       '15m': '[data-test="date-time-relative-15-m-btn"]',
@@ -367,10 +573,10 @@ export class TracesPage {
       '1h': '[data-test="date-time-relative-1-h-btn"]',
       '6h': '[data-test="date-time-relative-6-h-btn"]',
       '12h': '[data-test="date-time-relative-12-h-btn"]',
-      '24h': '[data-test="date-time-relative-24-h-btn"]',
+      '24h': '[data-test="date-time-relative-1-d-btn"]',
       '2d': '[data-test="date-time-relative-2-d-btn"]',
-      '7d': '[data-test="date-time-relative-7-d-btn"]',
-      '30d': '[data-test="date-time-relative-30-d-btn"]'
+      '6d': '[data-test="date-time-relative-6-d-btn"]',
+      '1M': '[data-test="date-time-relative-1-M-btn"]',
     };
 
     const selector = rangeMap[range] || '[data-test="date-time-relative-15-m-btn"]';
@@ -389,20 +595,24 @@ export class TracesPage {
     await expect(this.page.locator(this.dateTimeButton)).toContainText(Past30SecondsValue);
   }
 
+  // Guards that a time-range change took effect before asserting downstream re-renders.
+  async getTimeRangeLabel() {
+    return (await this.page.locator(this.dateTimeButton).textContent().catch(() => '')) || '';
+  }
+
   async setDateTime() {
     await expect(this.page.locator(this.dateTimeButton)).toBeVisible();
     await this.page.locator(this.dateTimeButton).click();
     await this.page.locator(this.absoluteTab).click();
-    // Wait for absolute tab content to be visible
-    await this.page.getByLabel('access_time').first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    // Wait for absolute tab content (Start time field) to be visible
+    await this.page.locator(this.datetimeStartTime).first().waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
   }
 
   async fillTimeRange(startTime, endTime) {
-    await this.page.getByRole('button', { name: '1', exact: true }).click();
-    await this.page.getByLabel('access_time').first().fill(startTime);
-    await this.page.getByRole('button', { name: '1', exact: true }).click();
-    await this.page.getByLabel('access_time').nth(1).fill(endTime);
-    // await this.page.waitForTimeout(1000);
+    // Source: web/src/components/DateTime.vue — OTime renders an OInput,
+    // OInput inner native input uses data-test="${parent}-field"
+    await this.page.locator(this.datetimeStartTime).fill(startTime);
+    await this.page.locator(this.datetimeEndTime).fill(endTime);
   }
 
   async verifyDateTime(startTime, endTime) {
@@ -424,38 +634,27 @@ export class TracesPage {
     }
   }
 
-  async switchToUIMode() {
-    const uiButton = this.page.locator(this.uiModeButton);
-    if (await uiButton.isVisible({ timeout: 5000 }).catch(() => false)) {
-      await uiButton.click();
-      // Wait for UI mode elements to be visible after mode switch
-      await this.page.locator(this.searchBar).waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
-    }
-  }
-
   async enterSQLQuery(query) {
-    // Try different editor selectors - check visibility for each
-    // Note: Use .fill() to avoid pointer interception issues
-    const editorSelectors = [
-      this.page.locator('.monaco-editor .inputarea').first(),
-      this.page.locator('.monaco-editor textarea').first(),
-      this.page.locator(this.queryEditor).locator('.inputarea, textarea').first()
-    ];
-
-    let editor = null;
-    for (const selector of editorSelectors) {
-      if (await selector.isVisible({ timeout: 2000 }).catch(() => false)) {
-        editor = selector;
-        break;
-      }
+    // Set Monaco editor value directly via the editor API; this avoids
+    // DOM-input quirks and pointer interception in CI.
+    const editorId = 'traces-query-editor';
+    await this.page.locator(this.queryEditor).waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+    const ok = await this.page.evaluate(({ editorId, query }) => {
+      const w = /** @type {any} */ (window);
+      if (!w.monaco?.editor?.getEditors) return false;
+      const editors = w.monaco.editor.getEditors();
+      // Match by container id (CodeQueryEditor.vue sets :id="editorId")
+      const target = editors.find(e => {
+        const node = e.getDomNode?.();
+        return node && node.closest(`#${editorId}`);
+      }) || editors[0];
+      if (!target) return false;
+      target.setValue(query);
+      return true;
+    }, { editorId, query });
+    if (!ok) {
+      throw new Error('Monaco editor not found for traces-query-editor');
     }
-
-    if (!editor) {
-      throw new Error('No visible editor input found');
-    }
-
-    // Use fill() instead of click + type to avoid pointer interception
-    await editor.fill(query);
   }
 
   async runQuery() {
@@ -464,14 +663,14 @@ export class TracesPage {
 
   async expectQueryError() {
     const hasError = await this.page.locator(this.queryErrorMessage).isVisible({ timeout: 5000 }).catch(() => false) ||
-                    await this.page.locator('.q-banner').isVisible({ timeout: 5000 }).catch(() => false) ||
-                    await this.page.locator('[class*="error"]').isVisible({ timeout: 5000 }).catch(() => false);
+                    await this.page.locator('[data-test="traces-search-error-message"]').isVisible({ timeout: 5000 }).catch(() => false) ||
+                    await this.page.locator('[data-test="traces-search-error-text"]').isVisible({ timeout: 5000 }).catch(() => false);
     expect(hasError).toBeTruthy();
   }
 
   async expectQueryResults() {
-    const hasResults = await this.page.locator('tbody tr').first().isVisible({ timeout: 5000 }).catch(() => false) ||
-                      await this.page.locator('[data-test*="trace"]').first().isVisible({ timeout: 5000 }).catch(() => false);
+    const hasResults = await this.page.locator(this.searchResultItem).first().isVisible({ timeout: 5000 }).catch(() => false) ||
+                      await this.page.locator(this.tracesCountBadge).first().isVisible({ timeout: 5000 }).catch(() => false);
     expect(hasResults).toBeTruthy();
   }
 
@@ -483,7 +682,7 @@ export class TracesPage {
    */
   async waitForSearchComplete() {
     // Wait for loading to finish
-    const loadingIndicator = this.page.locator('[data-test*="loading"], .q-spinner').first();
+    const loadingIndicator = this.page.locator('[data-test*="loading"]').first();
     try {
       if (await loadingIndicator.isVisible({ timeout: 500 })) {
         await expect(loadingIndicator).not.toBeVisible({ timeout: 10000 });
@@ -492,9 +691,8 @@ export class TracesPage {
       // Loading might not always appear
     }
 
-    // Check all possible states
-    const hasResults = await this.page.locator(this.searchResultItem).first().isVisible({ timeout: 1000 }).catch(() => false) ||
-                      await this.page.locator('tbody tr').first().isVisible({ timeout: 1000 }).catch(() => false);
+    // Check all possible states — a real row is the only positive result signal
+    const hasResults = await this.page.locator(this.searchResultItem).first().isVisible({ timeout: 1000 }).catch(() => false);
     const hasNoResults = await this.page.locator(this.resultNotFoundText).isVisible({ timeout: 1000 }).catch(() => false);
     const hasError = await this.page.locator(this.errorMessage).isVisible({ timeout: 1000 }).catch(() => false);
 
@@ -542,10 +740,7 @@ export class TracesPage {
    */
   async getResultCount() {
     const resultItems = await this.page.locator(this.searchResultItem).count();
-    if (resultItems > 0) return resultItems;
-
-    const tableRows = await this.page.locator('tbody tr').count();
-    return tableRows;
+    return resultItems;
   }
 
   /**
@@ -579,8 +774,8 @@ export class TracesPage {
     await this.waitForSearchComplete();
     const newCount = await this.getResultCount();
 
-    // Verify filter is in query editor
-    const queryText = await this.page.locator('.view-lines').textContent().catch(() => '');
+    // Verify filter is in query editor via Monaco editor model
+    const queryText = await this.getQueryEditorContent();
     if (!queryText) {
       throw new Error(`Filter "${filterDescription}" not visible in query editor`);
     }
@@ -653,6 +848,25 @@ export class TracesPage {
   }
 
   /**
+   * Navigate to the traces page carrying a `stream` query param. A full goto
+   * re-fetches the stream list (fetched once on mount), so a stream ingested
+   * AFTER the initial page load becomes selectable, and the `stream` param makes
+   * the page auto-select it (Index.vue loadStreamLists matches queryParams.stream).
+   */
+  async navigateToTracesUrlWithStream(streamName) {
+    const org = process.env["ORGNAME"] || 'default';
+    const baseUrl = (process.env["ZO_BASE_URL"] || '').replace(/\/+$/, '');
+    const tracesUrl = `${baseUrl}/web/traces?org_identifier=${org}&stream=${encodeURIComponent(streamName)}`;
+
+    await this.page.goto(tracesUrl);
+
+    try {
+      await this.page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+    } catch {
+    }
+  }
+
+  /**
    * Setup trace search with stream and time range
    * @param {string} streamName - Stream name to select
    */
@@ -703,7 +917,7 @@ export class TracesPage {
   async hasTraceResults() {
     // Wait for loading to complete
     try {
-      const loadingIndicator = this.page.locator('[data-test*="loading"], .q-spinner').first();
+      const loadingIndicator = this.page.locator('[data-test*="loading"]').first();
       if (await loadingIndicator.isVisible({ timeout: 500 })) {
         await loadingIndicator.waitFor({ state: 'hidden', timeout: 15000 });
       }
@@ -714,16 +928,12 @@ export class TracesPage {
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        const resultSelectors = [
-          this.page.locator(this.searchResultItem).first(),
-          this.page.locator('tbody tr').first(),
-          this.page.getByText(/Spans\s*:\s*\d+/).first()
-        ];
-
-        for (const element of resultSelectors) {
-          if (await element.isVisible({ timeout: 3000 })) {
-            return true;
-          }
+        // A real row is rendered as a TR with data-test^="o2-table-row-"
+        // — the count badge is shown even with 0 results, so do NOT use it
+        // here as a positive signal.
+        const firstRow = this.page.locator(this.searchResultItem).first();
+        if (await firstRow.isVisible({ timeout: 3000 })) {
+          return true;
         }
 
         // Check for no results message
@@ -731,11 +941,10 @@ export class TracesPage {
           return false;
         }
 
-        // Check for error
+        // Check for error — return false so callers can check isErrorMessageVisible()
         const errorElement = this.page.locator(this.errorMessage);
         if (await errorElement.isVisible({ timeout: 1000 })) {
-          const errorText = await errorElement.textContent();
-          throw new Error(`Search failed with error: ${errorText}`);
+          return false;
         }
 
         // If not the last attempt, wait and retry
@@ -743,9 +952,6 @@ export class TracesPage {
           await this.page.waitForTimeout(2000);
         }
       } catch (error) {
-        if (error.message.includes('Search failed')) {
-          throw error;
-        }
         if (attempt === maxAttempts) return false;
       }
     }
@@ -754,11 +960,15 @@ export class TracesPage {
   }
 
   /**
-   * Get error traces in results
-   * @returns {Locator} Locator for error traces
+   * Get error traces in results.
+   * Source: TracesSearchResultList.vue uses TraceStatusCell which renders a
+   * SpanStatusCodeBadge — error rows have a status code badge with red theme.
+   * Detect via the global error-count badge or rows tagged as errors.
+   * @returns {Locator} Locator for the error-count badge (visible when there
+   *   are 1+ error traces in the current result set)
    */
   getErrorTraces() {
-    return this.page.getByText(/Errors\s*:\s*[1-9]\d*/);
+    return this.page.locator(this.tracesErrorCountBadge);
   }
 
   /**
@@ -780,11 +990,8 @@ export class TracesPage {
    */
   async clickFirstTraceResult() {
     const selectors = [
-      this.page.getByText(/Spans\s*:\s*\d+/).first(),
+      this.page.locator(this.traceRowOperationName).first(),
       this.page.locator(this.searchResultItem).first(),
-      this.page.locator('tbody tr').first(),
-      this.page.locator('[data-test*="trace-result"]').first(),
-      this.page.locator('.trace-item').first()
     ];
 
     for (const selector of selectors) {
@@ -805,12 +1012,14 @@ export class TracesPage {
   }
 
   /**
-   * Expand field in field list
+   * Expand field in field list.
+   * Source: web/src/components/common/FieldExpansion.vue
+   *   data-test="log-search-expand-{field.name}-field-btn"
    * @param {string} fieldName - Name of field to expand
    * @returns {boolean} True if expanded successfully
    */
   async expandTraceField(fieldName) {
-    const expandButton = this.page.getByRole('button', { name: new RegExp(`Expand.*${fieldName}`, 'i') });
+    const expandButton = this.page.locator(`[data-test="log-search-expand-${fieldName}-field-btn"]`);
 
     try {
       await expect(expandButton).toBeVisible({ timeout: 3000 });
@@ -823,17 +1032,18 @@ export class TracesPage {
   }
 
   /**
-   * Select field value after expanding
+   * Add a field=value filter to the query via the field expansion's
+   * "Add to filter" button. Source: FieldExpansion.vue
+   *   data-test="log-search-index-list-add-{field.name}-field-btn"
    * @param {string} fieldName - Name of field
-   * @param {string} value - Value to select
-   * @returns {boolean} True if selected successfully
+   * @returns {boolean} True if added successfully
    */
-  async selectFieldValue(fieldName, value) {
-    const fieldValue = this.page.locator('div').filter({ hasText: new RegExp(`^${fieldName}='${value}'`) }).first();
+  async selectFieldValue(fieldName) {
+    const addBtn = this.page.locator(`[data-test="log-search-index-list-add-${fieldName}-field-btn"]`).first();
 
     try {
-      await expect(fieldValue).toBeVisible({ timeout: 3000 });
-      await fieldValue.click();
+      await expect(addBtn).toBeVisible({ timeout: 3000 });
+      await addBtn.click();
       await this.page.waitForTimeout(1000);
       return true;
     } catch {
@@ -846,11 +1056,7 @@ export class TracesPage {
    * @returns {number} Number of visible traces
    */
   async getTraceCount() {
-    const resultItems = await this.page.locator(this.searchResultItem).count();
-    const tableRows = await this.page.locator('tbody tr').count();
-    const spanTexts = await this.page.getByText(/Spans\s*:\s*\d+/).count();
-
-    return Math.max(resultItems, tableRows, spanTexts);
+    return await this.page.locator(this.searchResultItem).count();
   }
 
   /**
@@ -885,7 +1091,7 @@ export class TracesPage {
       }
 
       // Check if still loading
-      const isLoading = await this.page.locator('[data-test*="loading"], .q-spinner').first().isVisible({ timeout: 500 });
+      const isLoading = await this.page.locator('[data-test*="loading"]').first().isVisible({ timeout: 500 });
       if (isLoading) {
       }
 
@@ -902,12 +1108,22 @@ export class TracesPage {
   // ===== POM Compliance Helper Methods =====
 
   /**
-   * Get query editor content
+   * Get query editor content from the Monaco model rather than DOM text.
+   * Avoids reliance on `.view-lines` and survives virtual rendering.
    * @returns {Promise<string>} Content of the query editor
    */
   async getQueryEditorContent() {
-    const viewLines = this.page.locator(this.viewLines);
-    return await viewLines.textContent().catch(() => '');
+    const editorId = 'traces-query-editor';
+    return await this.page.evaluate(({ editorId }) => {
+      const w = /** @type {any} */ (window);
+      if (!w.monaco?.editor?.getEditors) return '';
+      const editors = w.monaco.editor.getEditors();
+      const target = editors.find(e => {
+        const node = e.getDomNode?.();
+        return node && node.closest(`#${editorId}`);
+      }) || editors[0];
+      return target?.getValue?.() ?? '';
+    }, { editorId }).catch(() => '');
   }
 
   /**
@@ -920,11 +1136,37 @@ export class TracesPage {
   }
 
   /**
-   * Check if no results message is visible
+   * Check if no results message is visible.
+   * Polls briefly so this resolves to a stable terminal state — callers use
+   * this in compound `hasResults || noResults` assertions after a search, so
+   * a too-short timeout can return false while the search is still settling
+   * (count badge visible but list not yet rendered).
    * @returns {Promise<boolean>}
    */
   async isNoResultsVisible() {
-    return await this.page.locator(this.resultNotFoundText).isVisible({ timeout: 1000 }).catch(() => false);
+    // Race against any terminal-state signal so we don't sleep the whole timeout
+    // when results have already rendered.
+    await Promise.any([
+      this.page.locator(this.resultNotFoundText).waitFor({ state: 'visible', timeout: 8000 }),
+      this.page.locator(this.searchResultItem).first().waitFor({ state: 'visible', timeout: 8000 }),
+      this.page.locator(this.errorMessage).waitFor({ state: 'visible', timeout: 8000 }),
+    ]).catch(() => {});
+
+    // Primary: explicit "no results" text element
+    if (await this.page.locator(this.resultNotFoundText).isVisible({ timeout: 500 }).catch(() => false)) {
+      return true;
+    }
+
+    // Secondary: traces may not render a "no results" text when 0 results are
+    // returned — instead only the count badge updates (showing "0 traces").
+    // Treat badge-visible + zero result rows as the "no results" terminal state.
+    const badgeVisible = await this.page.locator(this.tracesCountBadge).isVisible({ timeout: 500 }).catch(() => false);
+    if (badgeVisible) {
+      const rowCount = await this.page.locator(this.searchResultItem).count();
+      if (rowCount === 0) return true;
+    }
+
+    return false;
   }
 
   /**
@@ -944,12 +1186,24 @@ export class TracesPage {
   }
 
   /**
-   * Check if specific text is visible in results
+   * Check if a search result row contains the given text.
+   * Scans only data-test scoped result/badge containers — never bare text nodes.
    * @param {string} text - Text to look for
    * @returns {Promise<boolean>}
    */
   async isTextVisibleInResults(text) {
-    return await this.page.getByText(text).first().isVisible({ timeout: 2000 }).catch(() => false);
+    const containers = [
+      this.searchResultList,
+      this.tracesCountBadge,
+      this.tracesErrorCountBadge,
+    ];
+    for (const sel of containers) {
+      const node = this.page.locator(sel).first();
+      if (!(await node.isVisible({ timeout: 1000 }).catch(() => false))) continue;
+      const txt = (await node.textContent().catch(() => '')) || '';
+      if (txt.includes(text)) return true;
+    }
+    return false;
   }
 
   /**
@@ -967,24 +1221,35 @@ export class TracesPage {
   }
 
   /**
-   * Get cell by name in trace details
-   * @param {string} name - Cell name
-   * @param {boolean} exact - Exact match
-   * @returns {Promise<boolean>} True if visible
+   * Check if a row in the trace-details sidebar attribute table contains the
+   * given name. Scopes search to data-test rows inside trace-details-sidebar.
+   * @param {string} name - Attribute or value text
+   * @returns {Promise<boolean>}
    */
-  async isCellVisible(name, exact = false) {
-    return await this.page.getByRole('cell', { name, exact }).isVisible({ timeout: 2000 }).catch(() => false);
+  async isCellVisible(name) {
+    const rows = this.page.locator(this.traceDetailsSidebarRow);
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      const txt = (await rows.nth(i).textContent().catch(() => '')) || '';
+      if (txt.includes(name)) return true;
+    }
+    return false;
   }
 
   /**
-   * Click on a cell by name
-   * @param {string} name - Cell name
-   * @param {boolean} exact - Exact match
+   * Click on a sidebar attribute row whose text contains the given name.
+   * @param {string} name - Attribute or value text
    */
-  async clickCell(name, exact = false) {
-    const cell = this.page.getByRole('cell', { name, exact });
-    if (await cell.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await cell.first().click();
+  async clickCell(name) {
+    const rows = this.page.locator(this.traceDetailsSidebarRow);
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      const row = rows.nth(i);
+      const txt = (await row.textContent().catch(() => '')) || '';
+      if (txt.includes(name)) {
+        await row.click();
+        return;
+      }
     }
   }
 
@@ -997,15 +1262,21 @@ export class TracesPage {
   }
 
   /**
-   * Check if status code 2 (error) is visible
+   * Check if HTTP status code 2 is visible inside a trace span row in the tree
    * @returns {Promise<boolean>}
    */
   async isStatusCode2Visible() {
-    return await this.page.getByRole('cell', { name: '2' }).first().isVisible({ timeout: 3000 }).catch(() => false);
+    const httpStatus = this.page.locator('[data-test^="trace-tree-span-http-status-"]');
+    const count = await httpStatus.count();
+    for (let i = 0; i < count; i++) {
+      const txt = (await httpStatus.nth(i).textContent().catch(() => '')) || '';
+      if (txt.includes('2')) return true;
+    }
+    return false;
   }
 
   /**
-   * Check if duration cell is visible
+   * Check if duration is shown in the sidebar attribute table
    * @returns {Promise<boolean>}
    */
   async isDurationCellVisible() {
@@ -1047,46 +1318,64 @@ export class TracesPage {
   }
 
   /**
-   * Get error traces with regex pattern
+   * Check whether the result set contains any error traces — proxied by the
+   * presence of the traces-error-count-badge data-test (only rendered when
+   * errorCount > 0 in TracesSearchResult.vue).
    * @returns {Promise<boolean>} True if error traces found
    */
   async hasErrorTracesWithPattern() {
-    const errorTrace = this.page.getByText(/Errors\s*:\s*[1-9]\d*/);
-    return await errorTrace.first().isVisible({ timeout: 5000 }).catch(() => false);
+    return await this.page.locator(this.tracesErrorCountBadge).first().isVisible({ timeout: 5000 }).catch(() => false);
   }
 
   /**
-   * Click first error trace
+   * Click the first row that is flagged as an error by the rendered TenstackTable
+   * trace-row. Falls back to the first result row if no explicit error icon row
+   * exists.
    */
   async clickFirstErrorTrace() {
-    const errorTrace = this.page.getByText(/Errors\s*:\s*[1-9]\d*/);
-    if (await errorTrace.first().isVisible({ timeout: 5000 }).catch(() => false)) {
-      await errorTrace.first().click();
-      await this.page.waitForTimeout(2000);
+    // Source: TraceTree.vue renders error icons keyed by spanId, but the
+    // result-row error detection lives on TenstackTable cells; rely on the
+    // top-level table row marker for error trace styling.
+    const errorRow = this.page
+      .locator(`${this.searchResultList} [data-test^="o2-table-row-"]:not([data-test="o2-table-row-drag-handle"])`)
+      .first();
+    if (await errorRow.isVisible({ timeout: 5000 }).catch(() => false)) {
+      await errorRow.click();
+      // Wait for the trace-details panel to actually open instead of a blind 2s.
+      // Under CI load the details tree can take longer to render, and the caller
+      // immediately asserts on it — a fixed wait raced the render and flaked.
+      await this.page.locator(this.traceDetailsTree)
+        .waitFor({ state: 'visible', timeout: 15000 })
+        .catch(() => {});
       return true;
     }
     return false;
   }
 
   /**
-   * Check if attribute cell is visible
+   * Check if an attribute is shown in the trace-details sidebar attribute table.
    * @param {string} attrName - Attribute name
    * @returns {Promise<boolean>}
    */
   async isAttributeCellVisible(attrName) {
-    return await this.page.getByRole('cell', { name: attrName, exact: true }).isVisible({ timeout: 2000 }).catch(() => false);
+    return await this.isCellVisible(attrName);
   }
 
   /**
-   * Click attribute cell
+   * Click on a sidebar attribute row by name
    * @param {string} attrName - Attribute name
    */
   async clickAttributeCell(attrName) {
-    const attrCell = this.page.getByRole('cell', { name: attrName, exact: true });
-    if (await attrCell.isVisible({ timeout: 2000 }).catch(() => false)) {
-      await attrCell.click();
-      await this.page.waitForTimeout(500);
-      return true;
+    const rows = this.page.locator(this.traceDetailsSidebarRow);
+    const count = await rows.count();
+    for (let i = 0; i < count; i++) {
+      const row = rows.nth(i);
+      const txt = (await row.textContent().catch(() => '')) || '';
+      if (txt.trim() === attrName || txt.includes(attrName)) {
+        await row.click();
+        await this.page.waitForTimeout(500);
+        return true;
+      }
     }
     return false;
   }
@@ -1132,6 +1421,60 @@ export class TracesPage {
   }
 
   /**
+   * Check if view logs button is enabled (not disabled)
+   * @returns {Promise<boolean>}
+   */
+  async isViewLogsButtonEnabled() {
+    const button = this.page.locator(this.traceDetailsViewLogsButton);
+    if (await button.isVisible({ timeout: 5000 }).catch(() => false)) {
+      return !(await button.isDisabled());
+    }
+    return false;
+  }
+
+  /**
+   * Check if log streams selector is visible (indicates non-enterprise mode)
+   * @returns {Promise<boolean>}
+   */
+  async isLogStreamsSelectVisible() {
+    return await this.page.locator(this.traceDetailsLogStreamsSelect).isVisible({ timeout: 5000 }).catch(() => false);
+  }
+
+  /**
+   * Select first available log stream in trace details
+   * @returns {Promise<boolean>} True if selection was successful
+   */
+  async selectFirstLogStreamInTraceDetails() {
+    const wrapper = this.page.locator(this.traceDetailsLogStreamsSelect);
+    if (!(await wrapper.isVisible({ timeout: 5000 }).catch(() => false))) {
+      return false;
+    }
+
+    // Get the trigger button inside the OSelect wrapper
+    const trigger = wrapper.locator('button[type="button"]').first();
+    await trigger.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+
+    // Open the popover
+    await trigger.click({ force: false });
+
+    // Wait for popover to open
+    const popover = this.page.locator('[data-test="trace-details-log-streams-select-popover"]');
+    await popover.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+
+    // Select the first available option
+    const firstOption = this.page.locator('[data-test="trace-details-log-streams-select-option"]').first();
+    if (await firstOption.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await firstOption.click({ force: false });
+      await this.page.waitForTimeout(500);
+      return true;
+    }
+
+    // Close popover if selection failed
+    await this.page.keyboard.press('Escape').catch(() => {});
+    return false;
+  }
+
+  /**
    * Check if search input in trace details is visible
    * @returns {Promise<boolean>}
    */
@@ -1156,11 +1499,15 @@ export class TracesPage {
   }
 
   /**
-   * Check if service maps toggle is visible
+   * Check if the Service Graph entry is reachable from the Traces rail flyout.
    * @returns {Promise<boolean>}
    */
   async isServiceMapsToggleVisible() {
-    return await this.page.locator(this.serviceMapsToggle).isVisible({ timeout: 5000 }).catch(() => false);
+    await this.page.locator(this.tracesRailTile).hover().catch(() => {});
+    return await this.page
+      .locator(this.serviceMapsNavItem)
+      .isVisible({ timeout: 5000 })
+      .catch(() => false);
   }
 
   /**
@@ -1241,6 +1588,53 @@ export class TracesPage {
   /**
    * Click share link button
    */
+  /**
+   * Click Share and return the short URL from the clipboard.
+   *
+   * Deliberately self-contained rather than reusing logsPage's version: that one
+   * is depended on by 10 green share-link tests and is not worth destabilising.
+   * The button is the same shared ShareButton component (it even carries the
+   * logs data-test), so the toast wait and origin re-pointing below mirror it.
+   *
+   * Requires a deployment with `web_url` set — ShareButton is disabled outright
+   * without it (components/common/ShareButton.vue).
+   */
+  async clickShareLinkAndGetUrl() {
+    const shareBtn = this.page.locator(this.shareLinkButton);
+    await expect(shareBtn, 'Share button must be enabled — needs web_url configured').toBeEnabled({ timeout: 10000 });
+    await shareBtn.click();
+
+    // Wait for the copy-success toast specifically: a preceding refresh can
+    // leave an unrelated info toast on screen and trip strict mode.
+    await this.page
+      .locator('[data-test-variant="success"]')
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 });
+
+    let sharedUrl = await this.page.evaluate(() => navigator.clipboard.readText());
+
+    // Re-point the short URL at the host the tests authenticated against: a
+    // deployed app builds share links from its PUBLIC base URL, and navigating
+    // cross-origin drops the auth cookies. The /short/<id> id resolves the same
+    // on any ingress, so swapping only the origin keeps the session valid.
+    const baseUrl = process.env.ZO_BASE_URL;
+    if (baseUrl && sharedUrl && !sharedUrl.includes('localhost')) {
+      try {
+        const shared = new URL(sharedUrl);
+        const base = new URL(baseUrl);
+        if (shared.origin !== base.origin) {
+          shared.protocol = base.protocol;
+          shared.host = base.host;
+          sharedUrl = shared.toString();
+        }
+      } catch {
+        // leave the URL as-is; the navigation below will surface any problem
+      }
+    }
+    testLogger.info('Traces share URL captured', { url: sharedUrl });
+    return sharedUrl;
+  }
+
   async clickShareLinkButton() {
     await this.page.locator(this.shareLinkButton).click();
     await this.page.waitForTimeout(1000);
@@ -1293,23 +1687,46 @@ export class TracesPage {
   }
 
   /**
-   * Get the currently selected stream name from the stream selector
+   * Get the currently selected stream name from the stream selector.
+   * The OSelect parent has the selected value reflected in its `aria-label`
+   * once the stream is chosen.
+   *
+   * Update: OSelect's PopoverTrigger now also forwards the committed
+   * selection via `data-test-selected-value` (raw value) and
+   * `data-test-selected-label` (display label). The data-test attributes are
+   * the preferred read source (zero-tolerance policy — no reads via
+   * `aria-label`); the aria-label note above is kept as historical context
+   * for why this method originally needed an attribute fallback at all.
+   * `inputValue()` remains the fallback for non-OSelect inputs (e.g.
+   * fallback OInput wrappers used in some legacy stream pickers).
    * @returns {Promise<string|null>} - The selected stream name or null if not found
    */
   async getSelectedStreamName() {
     const streamSelector = this.page.locator(this.streamSelect);
-    if (await streamSelector.isVisible({ timeout: 3000 }).catch(() => false)) {
-      // The selected streams are shown as chips/tags inside the selector
-      const selectedChip = this.page.locator('[data-test*="stream-toggle-"][class*="truthy"], [data-test*="stream-chip"]').first();
-      if (await selectedChip.isVisible({ timeout: 2000 }).catch(() => false)) {
-        const text = await selectedChip.textContent();
-        return text?.trim() || null;
-      }
-      // Fallback: try to get from input value
-      const inputValue = await streamSelector.inputValue().catch(() => null);
-      return inputValue;
+    if (!(await streamSelector.isVisible({ timeout: 3000 }).catch(() => false))) {
+      return null;
     }
-    return null;
+    // OSelect path: read the PopoverTrigger's data-test-selected-value attr
+    // (the trigger lives inside the wrapper; the wrapper has the data-test
+    // and the trigger is its single PopoverTrigger child).
+    const trigger = streamSelector.locator(
+      '[data-test-selected-value], [data-test-selected-label]',
+    );
+    if (await trigger.count()) {
+      const value = await trigger
+        .first()
+        .getAttribute('data-test-selected-value')
+        .catch(() => null);
+      if (value) return value.trim();
+      const label = await trigger
+        .first()
+        .getAttribute('data-test-selected-label')
+        .catch(() => null);
+      if (label) return label.trim();
+    }
+    // Fallback for OInput-style selectors (no OSelect): read the input value.
+    const inputValue = await streamSelector.inputValue().catch(() => null);
+    return inputValue?.trim() || null;
   }
 
   /**
@@ -1323,6 +1740,49 @@ export class TracesPage {
   }
 
   /**
+   * Open a tab in the trace details view ('waterfall', 'flame-graph', 'map',
+   * 'dag', 'thread').
+   *
+   * Tests must not assume which tab is active on open: the view defaults to the
+   * flame graph, the last active tab is persisted per-browser, and LLM-only tabs
+   * (dag/thread) are hidden for traces without LLM spans. Anything reading the
+   * span tree has to select 'waterfall' explicitly first.
+   * @param {string} tabValue
+   * @returns {Promise<boolean>} whether the tab existed and was selected
+   */
+  async openTraceDetailsTab(tabValue) {
+    const tab = this.page.locator(`[data-test="trace-details-${tabValue}-tab"]`);
+    const appeared = await tab
+      .waitFor({ state: 'visible', timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!appeared) return false;
+    await tab.click();
+    await this.page.waitForTimeout(1000);
+    return true;
+  }
+
+  // The detail opens on the flame graph and the last tab persists per-browser (#13347), so select explicitly.
+  /** Open the first search result's trace details on the waterfall tab. */
+  async openFirstTraceWaterfall() {
+    const firstResult = this.getTraceResultItems().first();
+    await firstResult.waitFor({ state: 'visible', timeout: 30000 });
+    await firstResult.click();
+    await this.openTraceDetailsTab('waterfall');
+    await this.page.locator(this.traceDetailsTree).waitFor({ state: 'visible', timeout: 20000 });
+  }
+
+  /**
+   * How many spans in the open trace tree carry the given span-kind badge.
+   * @param {string} kind - e.g. 'server', 'client'
+   */
+  async countSpanKindBadges(kind) {
+    return await this.page
+      .locator(`[data-test="trace-tree-span-kind-badge-${kind}"]`)
+      .count();
+  }
+
+  /**
    * Check if trace details tree is visible
    * @returns {Promise<boolean>}
    */
@@ -1331,33 +1791,21 @@ export class TracesPage {
   }
 
   /**
-   * Check if any trace detail element is visible
+   * Check if any trace detail element is visible.
+   * Detects via the TraceDetails.vue data-tests and the TraceTree.vue span
+   * container data-tests.
    * @returns {Promise<boolean>}
    */
   async isAnyTraceDetailVisible() {
-    // Try multiple selectors that indicate trace details are visible
     const detailSelectors = [
       this.traceDetailsTree,
       this.traceDetailsSidebar,
       this.spanBlock,
       this.spanBlockContainer,
-      '[data-test*="trace-detail"]',
-      '[data-test*="trace-tree"]',
-      '[data-test*="span-block"]',
       '[data-test="trace-details-header"]',
-      '.trace-detail',
-      '.trace-tree',
-      '.span-block',
-      // Additional selectors for trace details panel
-      '[class*="trace-detail"]',
-      '[class*="traceDetail"]',
-      '[class*="span-detail"]',
-      '[class*="spanDetail"]',
-      // Check for trace ID in URL or page content
-      '[data-test*="span"]',
-      '[data-test*="timeline"]',
-      // Generic table/detail views that might be trace details
-      '[data-test*="detail"]'
+      '[data-test^="trace-tree-span-container-"]',
+      '[data-test^="trace-tree-span-service-name-"]',
+      '[data-test="trace-details-tree-container"]',
     ];
 
     for (const selector of detailSelectors) {
@@ -1375,26 +1823,6 @@ export class TracesPage {
     if (currentUrl.includes('trace_id') || currentUrl.includes('span_id')) {
       return true;
     }
-
-    // Check for inline expanded trace details (some UIs show details inline when clicking a trace)
-    // Look for expanded row indicators or additional content
-    const inlineIndicators = [
-      '[class*="expanded"]',
-      '[class*="open"]',
-      '[aria-expanded="true"]',
-      '[data-expanded="true"]'
-    ];
-
-    for (const indicator of inlineIndicators) {
-      try {
-        if (await this.page.locator(indicator).first().isVisible({ timeout: 1000 })) {
-          return true;
-        }
-      } catch {
-        continue;
-      }
-    }
-
     return false;
   }
 
@@ -1414,13 +1842,22 @@ export class TracesPage {
   }
 
   /**
-   * Get error message element text (if visible)
+   * Get error message element text (if visible). Source: traces Index.vue
+   * exposes both `traces-search-error-message` and the legacy
+   * `logs-search-error-message` data-tests.
    * @returns {Promise<string>}
    */
   async getVisibleErrorMessage() {
-    const errorElement = this.page.locator('.error-message');
-    if (await errorElement.isVisible({ timeout: 1000 }).catch(() => false)) {
-      return await errorElement.textContent().catch(() => '');
+    const candidates = [
+      this.errorMessage,
+      '[data-test="traces-search-error-message"]',
+      '[data-test="traces-search-error-text"]',
+    ];
+    for (const sel of candidates) {
+      const el = this.page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1000 }).catch(() => false)) {
+        return (await el.textContent().catch(() => '')) || '';
+      }
     }
     return '';
   }
@@ -1459,16 +1896,30 @@ export class TracesPage {
    */
   async reloadPage() {
     await this.page.reload();
-    await this.page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+    await this.page.waitForLoadState('domcontentloaded', { timeout: 10000 }).catch(() => {});
+    await this.page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {});
+    // After SPA hydrates, wait for any traces page anchor (search bar, error,
+    // or the stream selector) to mount. The traces SPA can land on the
+    // `/traces` route even if the layout has not fully mounted yet.
+    await Promise.any([
+      this.page.locator(this.searchBar).waitFor({ state: 'visible', timeout: 20000 }),
+      this.page.locator(this.streamSelect).waitFor({ state: 'visible', timeout: 20000 }),
+      this.page.locator('[data-test="traces-search-mode-spans-btn"]').waitFor({ state: 'visible', timeout: 20000 }),
+    ]).catch(() => {});
+    // Give Vue a tick to render the rest of the layout.
+    await this.page.waitForTimeout(500);
   }
 
   /**
-   * Click button with specific text filter
-   * @param {string} text - Button text to filter by
+   * Click a search-toolbar control by its data-test slug.
+   * The traces SearchBar.vue exposes stable data-tests for every button:
+   *   refresh, reset-filters, sql-mode-toggle, error-only-toggle,
+   *   metrics-toggle, share-link, etc.
+   * @param {string} dataTest - Data-test attribute value
    * @returns {Promise<boolean>}
    */
-  async clickButtonWithText(text) {
-    const button = this.page.locator('button').filter({ hasText: text }).first();
+  async clickButtonWithText(dataTest) {
+    const button = this.page.locator(`[data-test="${dataTest}"]`).first();
     if (await button.isVisible({ timeout: 2000 }).catch(() => false)) {
       await button.click();
       await this.page.waitForTimeout(1000);
@@ -1625,11 +2076,13 @@ export class TracesPage {
    * @returns {Promise<boolean>}
    */
   async hasAnalysisDashboardCharts() {
-    const chartPanel = this.page.locator('.analysis-dashboard-card canvas, .analysis-dashboard-card [data-test*="chart"]');
+    const chartPanel = this.page.locator(
+      `${this.analysisDashboardDrawer} canvas, ${this.analysisDashboardDrawer} [data-test*="chart"]`
+    );
     return await chartPanel.first().isVisible({ timeout: 10000 }).catch(() => false);
   }
 
-  // --- Error Only Toggle (Traces SearchBar.vue) ---
+  // --- Error Only Toggle (SearchResult.vue — error-count badge) ---
 
   /**
    * Check if Error Only toggle is visible
@@ -1640,11 +2093,53 @@ export class TracesPage {
   }
 
   /**
+   * Deterministically wait for the error-count badge (which doubles as the
+   * error-only toggle) to appear. The badge renders only when the current search
+   * returns at least one error span (SearchResult.vue: v-if errorCount>0), so
+   * freshly-ingested error traces may not show on the first search due to backend
+   * indexing latency. Re-run the search until the badge appears. Used by tests
+   * that ingest guaranteed error traces in beforeAll — this converts a
+   * data/timing dependency into a bounded wait for backend processing.
+   * @param {number} [maxAttempts=8]
+   * @returns {Promise<boolean>} true once the badge is visible
+   */
+  async waitForErrorBadgeAfterSearch(maxAttempts = 8) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      await this.setupTraceSearch();
+      await this.waitForTraceSearchResults();
+      if (await this.isErrorOnlyToggleVisible()) {
+        return true;
+      }
+      // Give the backend a moment to index the just-ingested error traces
+      // before re-running the search.
+      await this.page.waitForTimeout(3000);
+    }
+    return false;
+  }
+
+  /**
    * Toggle Error Only filter
    */
   async toggleErrorOnlyFilter() {
     await this.page.locator(this.errorOnlyToggle).click();
     await this.page.waitForTimeout(1000);
+  }
+
+  /**
+   * Whether the error-only filter is currently active. The badge (SearchResult.vue)
+   * swaps its fill class when showErrorOnly is true, so this reads that class as the
+   * state guard for the toggle.
+   * @returns {Promise<boolean>}
+   */
+  async isErrorOnlyFilterActive() {
+    const badge = this.page.locator(this.errorOnlyToggle);
+    const shown = await badge
+      .waitFor({ state: 'visible', timeout: 3000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!shown) return false;
+    const cls = (await badge.getAttribute('class').catch(() => '')) || '';
+    return cls.includes('bg-badge-error-solid-bg');
   }
 
   // --- Metrics Dashboard ---
@@ -1665,8 +2160,6 @@ export class TracesPage {
     const chartSelectors = [
       this.page.locator(this.tracesMetricsDashboard).locator('canvas').first(),
       this.page.locator('[data-test="chart-renderer"] canvas').first(),
-      this.page.locator('.chart-container canvas').first(),
-      this.page.locator('canvas').first()
     ];
 
     let chart = null;
@@ -1711,6 +2204,575 @@ export class TracesPage {
     return insightsVisible;
   }
 
+  // --- RED Metrics Charts (TracesMetricsDashboard.vue + PanelContainer.vue) ---
+
+  /**
+   * Locator for a RED metrics panel by its title.
+   * @param {string} title - Panel title: 'Rate', 'Errors' or 'Duration'
+   */
+  metricsPanelLocator(title) {
+    return this.page.locator(
+      `${this.tracesMetricsDashboard} [data-test-panel-title="${title}"]`
+    );
+  }
+
+  /**
+   * Wait for every RED metrics panel to finish rendering its ECharts canvas.
+   * @returns {Promise<string[]>} Titles of the panels that rendered a canvas
+   */
+  async waitForMetricsPanels(timeout = 30000) {
+    await this.page
+      .locator(this.tracesMetricsDashboard)
+      .waitFor({ state: 'visible', timeout })
+      .catch(() => {});
+
+    const rendered = [];
+    for (const title of TRACES_METRICS_PANELS) {
+      const canvas = this.metricsPanelLocator(title).locator('canvas').first();
+      const ok = await canvas.waitFor({ state: 'visible', timeout }).then(() => true).catch(() => false);
+      if (ok) rendered.push(title);
+    }
+    return rendered;
+  }
+
+  /**
+   * Assert the no-stream prompt is absent, i.e. a stream was auto-selected.
+   * @param {string} message - Assertion message
+   */
+  async expectNoStreamCardHidden(message) {
+    await expect(this.page.locator(this.tracesNoStreamCard), message)
+      .toBeHidden({ timeout: 15000 });
+  }
+
+  /**
+   * Bounding box of a metrics panel's ECharts canvas.
+   * @param {string} title - Panel title
+   */
+  async getMetricsPanelCanvasBox(title) {
+    const canvas = this.metricsPanelLocator(title).locator('canvas').first();
+    if (!(await canvas.isVisible({ timeout: 10000 }).catch(() => false))) return null;
+    return await canvas.boundingBox();
+  }
+
+  /**
+   * Drag-select a band on a panel's chart, which ECharts treats as a zoom because
+   * ChartRenderer arms `dataZoomSelect` on every render.
+   * @param {string} title - Panel title
+   * @param {{ startRatio?: number, endRatio?: number, yStartRatio?: number, yEndRatio?: number }} [range]
+   * @returns {Promise<boolean>} true when the drag was performed
+   */
+  async zoomOnMetricsPanel(title, range = {}) {
+    const {
+      startRatio = CHART_ZOOM_START_RATIO,
+      endRatio = CHART_ZOOM_END_RATIO,
+      yStartRatio = 0.5,
+      yEndRatio = 0.5,
+    } = range;
+    const box = await this.getMetricsPanelCanvasBox(title);
+    if (!box) return false;
+
+    // Coordinates only after this point — ECharts re-renders detach the canvas element.
+    const startX = box.x + box.width * startRatio;
+    const endX = box.x + box.width * endRatio;
+    const startY = box.y + box.height * yStartRatio;
+    const endY = box.y + box.height * yEndRatio;
+
+    await this.page.mouse.move(startX, startY);
+    await this.page.mouse.down();
+    for (let i = 1; i <= CHART_DRAG_STEPS; i++) {
+      const p = i / CHART_DRAG_STEPS;
+      await this.page.mouse.move(startX + (endX - startX) * p, startY + (endY - startY) * p);
+      await this.page.waitForTimeout(20);
+    }
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1500);
+    return true;
+  }
+
+  /**
+   * Drag across both axes of the Duration panel so the selection carries a real
+   * duration band; a flat horizontal drag collapses it to a single value.
+   * @returns {Promise<boolean>} true when the drag was performed
+   */
+  async zoomDurationBand() {
+    return await this.zoomOnMetricsPanel('Duration', {
+      startRatio: 0.25,
+      endRatio: 0.8,
+      yStartRatio: 0.15,
+      yEndRatio: 0.85,
+    });
+  }
+
+  /**
+   * Click a chart without dragging, which must not register as a zoom selection.
+   * @param {string} title - Panel title
+   * @returns {Promise<boolean>} true when the click landed
+   */
+  async clickMetricsPanelWithoutDrag(title) {
+    const box = await this.getMetricsPanelCanvasBox(title);
+    if (!box) return false;
+    await this.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await this.page.mouse.down();
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1500);
+    return true;
+  }
+
+  /**
+   * Composite every ECharts layer of a panel into one offscreen canvas and keep the
+   * pixels under `slot`; canvas pixels exclude the DOM tooltip that floats over the chart.
+   * @param {string} title - Panel title
+   * @param {string} slot - Key to store the snapshot under
+   * @returns {Promise<boolean>} true when a snapshot was taken
+   */
+  async snapshotMetricsPanelPixels(title, slot) {
+    return await this.page.evaluate(
+      ({ title, slot }) => {
+        const panel = document.querySelector(
+          `[data-test="traces-metrics-dashboard"] [data-test-panel-title="${title}"]`
+        );
+        const canvases = panel ? [...panel.querySelectorAll('canvas')] : [];
+        if (!canvases.length) return false;
+        const w = canvases[0].width;
+        const h = canvases[0].height;
+        const off = document.createElement('canvas');
+        off.width = w;
+        off.height = h;
+        const ctx = off.getContext('2d');
+        for (const c of canvases) ctx.drawImage(c, 0, 0, w, h);
+        const win = window;
+        win.__o2ChartSnaps = win.__o2ChartSnaps || {};
+        win.__o2ChartSnaps[slot] = ctx.getImageData(0, 0, w, h);
+        return true;
+      },
+      { title, slot }
+    );
+  }
+
+  /**
+   * Compare the two stored snapshots inside the zoom selection rectangle, which is
+   * located from the flat fill the drag paints rather than from drag coordinates.
+   * @returns {Promise<{ rect: object, beforeInk: number, duringInk: number, inkRatio: number } | null>}
+   */
+  async measureChartInkUnderSelection() {
+    return await this.page.evaluate(() => {
+      const snaps = window.__o2ChartSnaps || {};
+      const before = snaps.before;
+      const during = snaps.during;
+      if (!before || !during) return null;
+
+      const { width: w, height: h } = during;
+      const key = (d, i) => `${d[i]},${d[i + 1]},${d[i + 2]},${d[i + 3]}`;
+      const tally = (img) => {
+        const counts = new Map();
+        for (let i = 0; i < img.data.length; i += 4) {
+          const k = key(img.data, i);
+          counts.set(k, (counts.get(k) || 0) + 1);
+        }
+        return counts;
+      };
+
+      const beforeCounts = tally(before);
+      const duringCounts = tally(during);
+      let beforeBg = '';
+      let beforeBgN = 0;
+      for (const [k, n] of beforeCounts) if (n > beforeBgN) [beforeBg, beforeBgN] = [k, n];
+
+      // The fill is whatever the drag added: most common colour that barely existed before.
+      let fill = '';
+      let fillN = 0;
+      for (const [k, n] of duringCounts) {
+        if (n > fillN && n > (beforeCounts.get(k) || 0) * 2) [fill, fillN] = [k, n];
+      }
+      if (!fill || fillN < 200) return null;
+
+      let x0 = w;
+      let x1 = -1;
+      let y0 = h;
+      let y1 = -1;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          if (key(during.data, (y * w + x) * 4) !== fill) continue;
+          if (x < x0) x0 = x;
+          if (x > x1) x1 = x;
+          if (y < y0) y0 = y;
+          if (y > y1) y1 = y;
+        }
+      }
+      // Inset past the selection border, which is drawn in its own colour.
+      x0 += 3;
+      x1 -= 3;
+      y0 += 3;
+      y1 -= 3;
+      if (x1 - x0 < 10 || y1 - y0 < 10) return null;
+
+      let beforeInk = 0;
+      let duringInk = 0;
+      for (let y = y0; y <= y1; y++) {
+        for (let x = x0; x <= x1; x++) {
+          const i = (y * w + x) * 4;
+          if (key(before.data, i) !== beforeBg) beforeInk++;
+          const d = key(during.data, i);
+          if (d !== fill && d !== beforeBg) duringInk++;
+        }
+      }
+      return {
+        rect: { x0, y0, x1, y1 },
+        beforeInk,
+        duringInk,
+        inkRatio: beforeInk ? duringInk / beforeInk : 1,
+      };
+    });
+  }
+
+  /**
+   * Hold a zoom drag open on a panel, snapshotting its canvas before and during, then release.
+   * @param {string} title - Panel title
+   * @returns {Promise<boolean>} true when both snapshots were taken
+   */
+  async zoomWithCanvasSnapshots(title) {
+    const box = await this.getMetricsPanelCanvasBox(title);
+    if (!box) return false;
+
+    const startX = box.x + box.width * CHART_ZOOM_START_RATIO;
+    const endX = box.x + box.width * CHART_ZOOM_END_RATIO;
+    const y = box.y + box.height / 2;
+
+    // Hover first so the axis pointer is already painted into the baseline snapshot.
+    await this.page.mouse.move(startX, y);
+    await this.page.waitForTimeout(600);
+    const before = await this.snapshotMetricsPanelPixels(title, 'before');
+
+    await this.page.mouse.down();
+    for (let i = 1; i <= CHART_DRAG_STEPS; i++) {
+      await this.page.mouse.move(startX + (endX - startX) * (i / CHART_DRAG_STEPS), y);
+      await this.page.waitForTimeout(20);
+    }
+    await this.page.waitForTimeout(400);
+    const during = await this.snapshotMetricsPanelPixels(title, 'during');
+
+    await this.page.mouse.up();
+    await this.page.waitForTimeout(1000);
+    return before && during;
+  }
+
+  /**
+   * Clear the traces query editor with real keystrokes, retrying until Monaco is empty.
+   * @returns {Promise<boolean>} true once the editor holds no text
+   */
+  async clearTraceQueryByKeyboard() {
+    const input = this.page
+      .locator(`${this.queryEditor} .inputarea, ${this.queryEditor} textarea`)
+      .first();
+    for (let attempt = 0; attempt < QUERY_CLEAR_ATTEMPTS; attempt++) {
+      // Monaco's .inputarea is intentionally non-actionable — force focus to type real keystrokes.
+      await input.click({ force: true });
+      await this.page.waitForTimeout(250);
+      await this.page.keyboard.press('ControlOrMeta+A');
+      await this.page.waitForTimeout(200);
+      await this.page.keyboard.press('Delete');
+      await this.page.waitForTimeout(400);
+      if ((await this.getQueryEditorContent()).trim() === '') return true;
+    }
+    return false;
+  }
+
+  /**
+   * Type a query with real keystrokes. Monaco's setValue() never reaches the app's
+   * search state, so a programmatically set query is dropped from the request.
+   * @param {string} query - Query text to type
+   * @returns {Promise<boolean>} true when the editor holds exactly this query
+   */
+  async typeTraceQuery(query) {
+    if (!(await this.clearTraceQueryByKeyboard())) return false;
+    if (query) {
+      const input = this.page
+        .locator(`${this.queryEditor} .inputarea, ${this.queryEditor} textarea`)
+        .first();
+      // Monaco's .inputarea is intentionally non-actionable — force focus to type real keystrokes.
+      await input.click({ force: true });
+      await this.page.keyboard.type(query, { delay: 25 });
+      await this.page.waitForTimeout(600);
+    }
+    return (await this.getQueryEditorContent()).trim() === query.trim();
+  }
+
+  /**
+   * Whether the traces search error banner is on screen.
+   * @returns {Promise<boolean>}
+   */
+  async isSearchErrorVisible(timeout = 10000) {
+    return await this.page
+      .locator(this.errorMessage)
+      .isVisible({ timeout })
+      .catch(() => false);
+  }
+
+  /**
+   * Error text surfaced by any RED metrics panel, or '' when every panel is clean.
+   * @returns {Promise<string>}
+   */
+  async getMetricsPanelErrorText() {
+    const errors = this.page.locator(
+      `${this.tracesMetricsDashboard} [data-test="panel-schema-renderer-error-message"]`
+    );
+    if (!(await errors.first().isVisible({ timeout: 2000 }).catch(() => false))) return '';
+    return (await errors.first().textContent().catch(() => '')) || '';
+  }
+
+  /**
+   * Whether any RED metrics panel reports no data for the current query.
+   * @returns {Promise<boolean>}
+   */
+  async hasMetricsPanelNoData() {
+    return await this.page
+      .locator(`${this.tracesMetricsDashboard} [data-test="no-data"]`)
+      .first()
+      .isVisible({ timeout: 10000 })
+      .catch(() => false);
+  }
+
+  // --- Right-click Context Menu (TracesMetricsContextMenu.vue) ---
+
+  /**
+   * Record which metrics panel each contextmenu event reaches.
+   * Capture phase runs before ChartRenderer's handler, so the record survives its
+   * stopPropagation() and a "menu did not open" result can be told apart from a
+   * right-click that simply missed the canvas.
+   */
+  async armMetricsContextMenuProbe() {
+    await this.page.evaluate(() => {
+      window.__o2CtxMenuHits = [];
+      if (window.__o2CtxMenuProbe) return;
+      window.__o2CtxMenuProbe = (e) => {
+        const panel = e.target && e.target.closest && e.target.closest('[data-test-panel-title]');
+        if (panel) window.__o2CtxMenuHits.push(panel.getAttribute('data-test-panel-title'));
+      };
+      document.addEventListener('contextmenu', window.__o2CtxMenuProbe, true);
+    });
+  }
+
+  /**
+   * Panel titles that received a contextmenu event since the probe was armed.
+   * @returns {Promise<string[]>}
+   */
+  async getMetricsContextMenuProbeHits() {
+    return await this.page.evaluate(() => window.__o2CtxMenuHits || []);
+  }
+
+  /**
+   * Viewport points on a panel canvas that sit on a plotted series mark.
+   * ECharts fires its contextmenu event only on a data item, and Duration is a
+   * scatter of 5px dots, so a right-click on empty plot space never reaches it.
+   * Scans the canvas for saturated (series-coloured) pixels whose 3x3 neighbourhood
+   * is also coloured, i.e. the inside of a mark rather than an anti-aliased edge.
+   * @param {import('@playwright/test').Locator} canvas
+   * @param {number} max - Maximum number of points to return
+   * @returns {Promise<{x: number, y: number}[]>}
+   */
+  async findPlottedPoints(canvas, max = 5) {
+    return await canvas.evaluate((el, limit) => {
+      const ctx = el.getContext('2d');
+      if (!ctx || !el.width || !el.height) return [];
+      const { data, width, height } = ctx.getImageData(0, 0, el.width, el.height);
+      const coloured = (x, y) => {
+        const i = (y * width + x) * 4;
+        const r = data[i], g = data[i + 1], b = data[i + 2];
+        return data[i + 3] > 200 && Math.max(r, g, b) - Math.min(r, g, b) > 60;
+      };
+      const rect = el.getBoundingClientRect();
+      const sx = rect.width / width, sy = rect.height / height;
+      const points = [];
+      const step = Math.max(1, Math.floor(width / 200));
+      for (let x = 1; x < width - 1 && points.length < limit; x += step) {
+        for (let y = 1; y < height - 1; y++) {
+          if (!coloured(x, y)) continue;
+          let solid = true;
+          for (let dx = -1; dx <= 1 && solid; dx++) {
+            for (let dy = -1; dy <= 1 && solid; dy++) solid = coloured(x + dx, y + dy);
+          }
+          if (!solid) continue;
+          points.push({ x: rect.left + x * sx, y: rect.top + y * sy });
+          x += Math.floor(width / limit);
+          break;
+        }
+      }
+      return points;
+    }, max);
+  }
+
+  /**
+   * Right-click a plotted point of a metrics panel chart to open the Duration-only
+   * gte/lte context menu, retrying because ECharts arms its contextmenu handler a
+   * beat after the panel data resolves. Falls back to the canvas centre when no
+   * plotted point can be located.
+   * @param {string} title - Panel title ('Duration', 'Rate', 'Errors')
+   * @returns {Promise<{ dispatched: boolean, opened: boolean }>} whether the
+   *   right-click reached the panel, and whether the menu opened
+   */
+  async openMetricsContextMenu(title = 'Duration') {
+    await this.armMetricsContextMenuProbe();
+    const canvas = this.metricsPanelLocator(title).locator('canvas').first();
+    const ready = await canvas
+      .waitFor({ state: 'visible', timeout: 10000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!ready) return { dispatched: false, opened: false };
+    const box = await canvas.boundingBox();
+    if (!box) return { dispatched: false, opened: false };
+    // ECharts stacks canvas layers, so a locator click hits the wrong one — drive the mouse instead.
+    const points = await this.findPlottedPoints(canvas);
+    const targets = points.length ? points : [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }];
+    let opened = false;
+    for (let attempt = 0; attempt < 3 && !opened; attempt++) {
+      for (const point of targets) {
+        await this.page.mouse.click(point.x, point.y, { button: 'right' });
+        opened = await this.isMetricsContextMenuVisible(1000);
+        if (opened) break;
+      }
+    }
+    const hits = await this.getMetricsContextMenuProbeHits();
+    return { dispatched: hits.includes(title), opened };
+  }
+
+  /**
+   * Whether the metrics context menu is currently open.
+   * @param {number} timeout - How long to wait for it to appear
+   * @returns {Promise<boolean>}
+   */
+  async isMetricsContextMenuVisible(timeout = 3000) {
+    return await this.page
+      .locator(this.metricsContextMenu)
+      .waitFor({ state: 'visible', timeout })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /**
+   * Assert the metrics context menu is visible.
+   */
+  async expectMetricsContextMenuVisible() {
+    await expect(this.page.locator(this.metricsContextMenu)).toBeVisible({ timeout: 10000 });
+  }
+
+  /**
+   * Assert the metrics context menu is hidden.
+   */
+  async expectMetricsContextMenuHidden() {
+    await expect(this.page.locator(this.metricsContextMenu)).toBeHidden({ timeout: 5000 });
+  }
+
+  /**
+   * Assert the metrics context menu never opens. A right-click on a non-Duration
+   * panel must be a no-op, so settle briefly (a buggy late render is caught) then
+   * assert the menu is still absent.
+   */
+  async expectMetricsContextMenuStaysHidden() {
+    await this.page.waitForTimeout(600);
+    await expect(this.page.locator(this.metricsContextMenu)).toBeHidden({ timeout: 1000 });
+  }
+
+  /**
+   * Whether a context menu item is visible.
+   * @param {'gte'|'lte'} condition
+   * @returns {Promise<boolean>}
+   */
+  async isMetricsContextMenuItemVisible(condition) {
+    const selector = condition === 'gte' ? this.metricsContextMenuGte : this.metricsContextMenuLte;
+    return await this.page
+      .locator(selector)
+      .waitFor({ state: 'visible', timeout: 3000 })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  /**
+   * Click a context menu item to write a single-sided duration bound.
+   * @param {'gte'|'lte'} condition
+   */
+  async selectMetricsContextMenuItem(condition) {
+    const selector = condition === 'gte' ? this.metricsContextMenuGte : this.metricsContextMenuLte;
+    await this.page.locator(selector).click();
+  }
+
+  /**
+   * Dismiss the metrics context menu with Escape.
+   */
+  async dismissMetricsContextMenu() {
+    await this.page.keyboard.press('Escape');
+  }
+
+  /**
+   * Per-dimension panel tally inside the Insights drawer.
+   * @returns {Promise<{ panels: number, charts: number, errors: number, errorText: string }>}
+   */
+  async getAnalysisPanelStates() {
+    return await this.page.evaluate((drawerSel) => {
+      const drawer = document.querySelector(drawerSel);
+      if (!drawer) return { panels: 0, charts: 0, errors: 0, errorText: '' };
+      const panels = [...drawer.querySelectorAll('[data-test-panel-title]')];
+      const errored = panels.filter((p) =>
+        p.querySelector('[data-test="panel-schema-renderer-error-message"]')
+      );
+      // The no-data overlay coexists with an empty canvas, so exclude it to keep charts/noData disjoint.
+      return {
+        panels: panels.length,
+        charts: panels.filter(
+          (p) => p.querySelector('canvas') && !p.querySelector('[data-test="no-data"]')
+        ).length,
+        noData: panels.filter((p) => p.querySelector('[data-test="no-data"]')).length,
+        errors: errored.length,
+        errorText: errored.length ? errored[0].textContent.trim().slice(0, 300) : '',
+      };
+    }, this.analysisDashboardDrawer);
+  }
+
+  /**
+   * Open one Insights tab and wait for its panels to settle.
+   * @param {'volume'|'duration'|'error'} name - Tab slug from TracesAnalysisDashboard.vue
+   */
+  async openAnalysisTab(name) {
+    await this.page.locator(`[data-test="traces-analysis-dashboard-${name}-tab"]`).click();
+    await this.waitForAnalysisDashboardLoad();
+    return await this.waitForAnalysisPanelsSettled();
+  }
+
+  /**
+   * Wait until every dimension panel has resolved and stopped changing, then report it.
+   * The previous tab's panels stay mounted for a beat after a tab switch, so a single
+   * resolved read can describe the old tab; two matching reads cannot.
+   * @returns {Promise<{ panels: number, charts: number, noData: number, errors: number, errorText: string }>}
+   */
+  async waitForAnalysisPanelsSettled(timeout = 45000) {
+    const deadline = Date.now() + timeout;
+    let previous = null;
+    while (Date.now() < deadline) {
+      const states = await this.getAnalysisPanelStates();
+      const resolved =
+        states.panels > 0 && states.charts + states.noData + states.errors === states.panels;
+      if (resolved && previous && JSON.stringify(previous) === JSON.stringify(states)) {
+        return states;
+      }
+      previous = resolved ? states : null;
+      await this.page.waitForTimeout(1000);
+    }
+    return await this.getAnalysisPanelStates();
+  }
+
+  /**
+   * Rendered text of the Insights drawer; per-panel query errors land in the panel
+   * body rather than the drawer's error slot, so the whole drawer is the safe source.
+   * @returns {Promise<string>}
+   */
+  async getAnalysisDashboardText() {
+    return (
+      (await this.page
+        .locator(this.analysisDashboardDrawer)
+        .innerText()
+        .catch(() => '')) || ''
+    );
+  }
+
   // --- Dimension Selector Sidebar (TracesAnalysisDashboard.vue) ---
 
   /**
@@ -1718,17 +2780,25 @@ export class TracesPage {
    * @returns {Promise<boolean>}
    */
   async isDimensionSidebarVisible() {
-    return await this.page.locator(this.dimensionSelectorSidebar).isVisible({ timeout: 5000 }).catch(() => false);
+    return await this.page.locator(this.dimensionSelectorSidebar).isVisible().catch(() => false);
   }
 
   /**
    * Toggle dimension selector sidebar via collapse button
    */
   async toggleDimensionSidebar() {
-    const btn = this.page.locator(this.dimensionSelectorCollapseBtn);
-    if (await btn.isVisible({ timeout: 3000 }).catch(() => false)) {
+    const sidebar = this.page.locator(this.dimensionSelectorSidebar);
+    const sidebarVisible = await sidebar.isVisible().catch(() => false);
+    if (sidebarVisible) {
+      // Sidebar is open — click the collapse btn inside it
+      const btn = this.page.locator(this.dimensionSelectorCollapseBtn);
       await btn.click();
-      await this.page.waitForTimeout(500);
+      await sidebar.waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+    } else {
+      // Sidebar is collapsed — click the collapsed bar to expand
+      const collapsedBar = this.page.locator('[data-test="dimension-selector-collapsed-bar"]');
+      await collapsedBar.click();
+      await sidebar.waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
     }
   }
 
@@ -1745,10 +2815,20 @@ export class TracesPage {
    * @param {string} searchText - text to type in dimension search
    */
   async searchDimension(searchText) {
-    const input = this.page.locator(this.dimensionSearchInput);
+    // OInput: fill the -field native <input>, not the wrapper <div>
+    const input = this.page.locator(this.dimensionSearchInputField);
     await input.click();
     await input.fill(searchText);
-    await this.page.waitForTimeout(500);
+    // Deterministic wait: matching checkbox must be visible AND the visible checkbox
+    // count must converge (debounced filter has settled).
+    await this.page.locator(`[data-test="dimension-checkbox-${searchText}"]`).waitFor({ state: 'visible', timeout: 5000 });
+    let lastCount = -1;
+    await expect.poll(async () => {
+      const current = await this.page.locator('[data-test^="dimension-checkbox-"]').count();
+      const stable = current === lastCount;
+      lastCount = current;
+      return stable;
+    }, { intervals: [100, 150, 200, 250], timeout: 5000 }).toBe(true);
   }
 
   /**
@@ -1840,13 +2920,36 @@ export class TracesPage {
 
   /**
    * Check if a specific tab is active in Analysis Dashboard
-   * @param {string} tabLabel - 'Rate', 'Latency', or 'Errors'
+   * @param {string} tabLabel - 'Rate', 'Latency'/'Duration', or 'Errors'
    * @returns {Promise<boolean>}
    */
   async isTabActive(tabLabel) {
-    const activeTab = this.page.locator('.analysis-dashboard-card .q-tab--active, .analysis-dashboard-card .q-tab.q-tab--active')
-      .filter({ hasText: new RegExp(tabLabel, 'i') });
-    return await activeTab.first().isVisible({ timeout: 2000 }).catch(() => false);
+    // Each OTab carries data-test="traces-analysis-dashboard-${name}-tab"; map
+    // the labels used by callers (Rate/Latency/Errors) to internal names
+    // (volume/duration/error) and rely on data-state for active.
+    // OTab wraps the Reka TabsTrigger in a <span> for disabled-tooltip support,
+    // so the consumer's data-test lands on the wrapper while data-state="active"
+    // is on the inner button. Poll the DOM for active state on either the
+    // wrapper itself OR a descendant (mirrors the metricsBuilderPage pattern
+    // for OToggleGroupItem).
+    const labelToName = { rate: 'volume', latency: 'duration', duration: 'duration', errors: 'error', error: 'error' };
+    const name = labelToName[tabLabel.toLowerCase()] || tabLabel.toLowerCase();
+    const testId = `traces-analysis-dashboard-${name}-tab`;
+    const drawerSel = this.analysisDashboardDrawer;
+    const isActive = await this.page.waitForFunction(
+      ({ drawerSel, testId }) => {
+        const drawer = document.querySelector(drawerSel);
+        if (!drawer) return null;
+        const el = drawer.querySelector(`[data-test="${testId}"]`);
+        if (!el) return null;
+        if (el.getAttribute('data-state') === 'active') return true;
+        const inner = el.querySelector('[data-state="active"]');
+        return inner ? true : null;
+      },
+      { drawerSel, testId },
+      { timeout: 3000 }
+    ).then(h => h.jsonValue()).catch(() => null);
+    return Boolean(isActive);
   }
 
   /**
@@ -1854,7 +2957,9 @@ export class TracesPage {
    * @returns {Promise<number>}
    */
   async getVisibleTabCount() {
-    return await this.page.locator('.analysis-dashboard-card .q-tab').count();
+    return await this.page
+      .locator(`${this.analysisDashboardDrawer} [data-test^="traces-analysis-dashboard-"][data-test$="-tab"]`)
+      .count();
   }
 
   // --- Percentile Refresh (Latency tab only) ---
@@ -1949,35 +3054,45 @@ export class TracesPage {
   }
 
   /**
-   * Get column headers from trace results table
+   * Get column headers from trace results table.
+   * Source: web/src/components/TenstackTable.vue — each header has
+   *   data-test=`o2-table-th-${header.id}`
    * @returns {Locator}
    */
   getTraceResultColumnHeaders() {
-    return this.page.locator('[data-test*="trace-result"] th, .traces-table th, [class*="trace"] thead th');
+    return this.page.locator('[data-test^="o2-table-th-"]');
   }
 
   /**
-   * Get duration column header
+   * Get duration column header — id is the column key in TenstackTable.
    * @returns {Locator}
    */
   getDurationHeader() {
-    return this.page.locator('th:has-text("Duration"), th:has-text("duration")');
+    return this.page.locator('[data-test="o2-table-th-duration"]');
   }
 
   /**
-   * Get timestamp column header
+   * Get timestamp column header. The traces table uses
+   * `store.state.zoConfig.timestamp_column` (usually `_timestamp`) as the
+   * column id, but accept either `start_time` or `_timestamp`.
    * @returns {Locator}
    */
   getTimestampHeader() {
-    return this.page.locator('th:has-text("Timestamp"), th:has-text("timestamp"), th:has-text("Time")');
+    return this.page.locator(
+      '[data-test="o2-table-th-_timestamp"], [data-test="o2-table-th-start_time"]'
+    );
   }
 
   /**
-   * Get sort indicator element
+   * Get sort indicator element rendered inside the active sort column header.
+   * TenstackTable now exposes per-column sort icons via
+   * `data-test="o2-table-sort-icon-${columnId}"` with state attributes
+   * `data-test-sort-state="active|inactive"` and `data-test-sort-direction`.
+   * Targeting any cell in active state is sufficient for the "is sorted" check.
    * @returns {Locator}
    */
   getSortIndicator() {
-    return this.page.locator('[class*="sort"], [data-test*="sort"], .q-icon:has-text("arrow")');
+    return this.page.locator('[data-test-sort-state="active"]');
   }
 
   /**
@@ -1991,13 +3106,409 @@ export class TracesPage {
   /**
    * Get selected/active stream indicator
    * For traces, checks if stream dropdown has a selected value
-   * Uses stable selectors that don't rely on Quasar internal classes
+   * Uses stable selectors that don't rely on framework-internal CSS classes
    * @returns {Locator}
    */
   getSelectedStreamToggle() {
     // Look for selected stream toggles or chips (indicated by 'truthy' class or stream-chip data-test)
     // Also check for stream selector with non-empty aria-label as fallback
     return this.page.locator('[data-test*="stream-toggle-"][class*="truthy"], [data-test*="stream-chip"], [data-test="log-search-index-list-select-stream"][aria-label]:not([aria-label=""])');
+  }
+
+  // ===== Regression Test Helper Methods =====
+
+  /**
+   * Get PromQL tab/mode element on the current page.
+   * Targets the QueryTypeSelector button (used in metrics page and PanelEditor):
+   *   data-test="dashboard-promql-query-type"
+   * @returns {import('@playwright/test').Locator}
+   */
+  getPromQLTab() {
+    return this.page.locator('[data-test="dashboard-promql-query-type"]').first();
+  }
+
+  /**
+   * Check if PromQL tab is visible
+   * @returns {Promise<boolean>}
+   */
+  async isPromQLTabVisible() {
+    return await this.getPromQLTab().isVisible({ timeout: 5000 }).catch(() => false);
+  }
+
+  /**
+   * Get logs-specific query mode toggles (Quick/SQL mode)
+   * @returns {{ quickMode: import('@playwright/test').Locator, sqlMode: import('@playwright/test').Locator }}
+   */
+  getLogsQueryModeToggles() {
+    return {
+      quickMode: this.page.locator('[data-test="logs-search-bar-quick-mode-toggle-btn"]'),
+      sqlMode: this.page.locator('[data-test="logs-search-bar-sql-mode-toggle-btn"]'),
+    };
+  }
+
+  /**
+   * Check if any logs query mode toggle is visible.
+   * These toggles live inside the utilities dropdown menu, so we open the menu first.
+   * Also checks for the always-visible OToggleGroup items (logs-logs-toggle, etc.)
+   * as a fallback indicator that logs-specific UI is active.
+   * @returns {Promise<{quickMode: boolean, sqlMode: boolean}>}
+   */
+  async isAnyLogsQueryToggleVisible() {
+    // First check the always-visible OToggleGroup items (not in any dropdown)
+    const logsToggle = this.page.locator('[data-test="logs-logs-toggle"]');
+    const logsToggleVisible = await logsToggle.isVisible({ timeout: 3000 }).catch(() => false);
+    if (logsToggleVisible) {
+      return { quickMode: true, sqlMode: true };
+    }
+
+    // Fallback: open the utilities menu and check dropdown items
+    try {
+      const utilsBtn = this.page.locator('[data-test="logs-search-bar-utilities-menu-btn"]');
+      if (await utilsBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await utilsBtn.click();
+        await this.page.waitForTimeout(500);
+      }
+    } catch {}
+
+    const toggles = this.getLogsQueryModeToggles();
+    return {
+      quickMode: await toggles.quickMode.isVisible({ timeout: 3000 }).catch(() => false),
+      sqlMode: await toggles.sqlMode.isVisible({ timeout: 3000 }).catch(() => false),
+    };
+  }
+
+  /**
+   * Check if autocomplete/suggestion widget is visible in the Monaco editor.
+   * Uses page.evaluate() to check Monaco's internal `visible` CSS class,
+   * because the app CSS forces display:flex !important on .suggest-widget,
+   * which makes Playwright's .isVisible() always return true.
+   * @returns {Promise<boolean>}
+   */
+  async isSuggestionWidgetVisible() {
+    return await this.page.evaluate(() => {
+      const widget = document.querySelector('.monaco-editor .suggest-widget');
+      if (!widget) return false;
+      return widget.classList.contains('visible') || widget.classList.contains('focused');
+    });
+  }
+
+  /**
+   * Get log detail traces tab
+   * @returns {Locator}
+   */
+  getLogDetailTracesTab() {
+    return this.page.locator('[name="correlated-traces"]');
+  }
+
+  /**
+   * Get dialog/modal box
+   * @returns {Locator}
+   */
+  getDialogBox() {
+    return this.page.locator('[data-test="dialog-box"]');
+  }
+
+  /**
+   * Get navbar organization selector
+   * @returns {Locator}
+   */
+  getNavbarOrgSelector() {
+    return this.page.locator('[data-test="navbar-organizations-select"]');
+  }
+
+  /**
+   * Get span blocks in trace details
+   * @returns {Locator}
+   */
+  getSpanBlocks() {
+    return this.page.locator('[data-test="span-block"]');
+  }
+
+  /**
+   * Get span block detail container
+   * @returns {Locator}
+   */
+  getSpanBlockDetail() {
+    return this.page.locator('[data-test="span-block-container"]');
+  }
+
+  /**
+   * Get search bar element
+   * @returns {Locator}
+   */
+  getSearchBarElement() {
+    return this.page.locator('[data-test="logs-search-bar"]');
+  }
+
+  /**
+   * Get timestamp column header (logs table variant, for cross-feature tests)
+   * @returns {Locator}
+   */
+  getLogsTimestampHeader() {
+    return this.page.locator('[data-test="o2-table-th-timestamp"]');
+  }
+
+  /**
+   * Get first log row's timestamp cell (for cross-feature tests)
+   * @returns {Locator}
+   */
+  getFirstLogTimestampCell() {
+    return this.page.locator('[data-test="logs-search-result-logs-table"] tbody tr[data-test^="o2-table-row-"]').first().locator('[data-test^="o2-table-cell-"]').first();
+  }
+
+  /**
+   * Get error indicator elements
+   * @returns {Locator}
+   */
+  getErrorElements() {
+    return this.page.locator('.error, .text-negative, [class*="error"]').first();
+  }
+
+  /**
+   * Get hover/tooltip/popup elements
+   * @returns {Locator}
+   */
+  getHoverElements() {
+    return this.page.locator('[class*="hover"], [class*="tooltip"], [class*="popup"]');
+  }
+
+  /**
+   * Get SQL mode toggle button
+   * @returns {Locator}
+   */
+  getSqlModeToggle() {
+    return this.page.locator(this.sqlModeButton);
+  }
+
+  /**
+   * Get query editor locator
+   * @returns {Locator}
+   */
+  getQueryEditorLocator() {
+    return this.page.locator(this.queryEditor);
+  }
+
+  /**
+   * Get the traces field list table
+   * @returns {Locator}
+   */
+  getFieldsTableLocator() {
+    return this.page.locator(this.fieldsTable);
+  }
+
+  /**
+   * Get field expansion headers in the traces field list
+   * (.field-expansion-item is a framework component class, not a data-test hook)
+   * @returns {Locator}
+   */
+  getFieldExpansionHeaders() {
+    return this.page.locator('.field-expansion-item .field-expansion-header');
+  }
+
+  /**
+   * Get field expansion items anywhere on the page (fallback locator)
+   * @returns {Locator}
+   */
+  getFieldExpansionItems() {
+    return this.page.locator('.field-expansion-item');
+  }
+
+  /**
+   * Get the traces search bar "More" dropdown menu button
+   * @returns {Locator}
+   */
+  getMoreMenuButton() {
+    return this.page.locator('[data-test="traces-search-bar-more-menu-btn"]');
+  }
+
+  /**
+   * Get the page body (used to dismiss open menus/popups by clicking a corner)
+   * @returns {Locator}
+   */
+  getPageBody() {
+    return this.page.locator('body');
+  }
+
+  /**
+   * Get organization menu item labels in the org selector dropdown
+   * @returns {Locator}
+   */
+  getOrgMenuItemLabels() {
+    return this.page.locator('[data-test="organization-menu-item-label-item-label"]');
+  }
+
+  // ===== LLM PREVIEW PANE (GenAI v5 parts) METHODS =====
+
+  /**
+   * Locate the Input pane of the LLM preview (first `.io-section` inside the
+   * sidebar's `.io-container`).
+   */
+  getLlmInputPane() {
+    return this.page.locator(this.llmIoSection).first();
+  }
+
+  /**
+   * Locate the Output pane of the LLM preview (second `.io-section`).
+   */
+  getLlmOutputPane() {
+    return this.page.locator(this.llmIoSection).nth(1);
+  }
+
+  /**
+   * Open the sidebar for the span whose trace-tree operation name contains
+   * `operationName`, by clicking that span row's select button.
+   * @param {string} operationName - span name (e.g. "chat <suffix>")
+   * @returns {Promise<boolean>} true if a matching span was found and clicked
+   */
+  async clickTraceTreeSpanByOperationName(operationName) {
+    // Wait for at least one span row to render before scanning (the tree data
+    // arrives async after the trace result is clicked).
+    await this.page
+      .locator(this.traceTreeSpanContainer)
+      .first()
+      .waitFor({ state: 'visible', timeout: 15000 })
+      .catch(() => {});
+    const containers = this.page.locator(this.traceTreeSpanContainer);
+    const count = await containers.count();
+    for (let i = 0; i < count; i++) {
+      const container = containers.nth(i);
+      const nameEl = container.locator(
+        '[data-test^="trace-tree-span-operation-name-"]:not([data-test*="container"])'
+      );
+      if ((await nameEl.count()) === 0) continue;
+      const txt = (await nameEl.first().textContent().catch(() => '')) || '';
+      if (txt.includes(operationName)) {
+        const selectBtn = container.locator('[data-test^="trace-tree-span-select-btn-"]');
+        await selectBtn.first().waitFor({ state: 'visible', timeout: 10000 });
+        await selectBtn.first().click();
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Assert the LLM Preview tab is present (sidebar open on a span with
+   * `hasTracePreview(span)`).
+   */
+  async expectPreviewTabVisible() {
+    await expect(this.page.locator(this.llmPreviewTab)).toBeVisible({ timeout: 15000 });
+  }
+
+  /**
+   * Assert the Input pane of the LLM preview contains `text`.
+   */
+  async expectLlmInputContains(text) {
+    await expect(this.getLlmInputPane()).toContainText(text, { timeout: 15000 });
+  }
+
+  /**
+   * Assert the Input pane of the LLM preview does NOT contain `text`.
+   */
+  async expectLlmInputNotContains(text) {
+    await expect(this.getLlmInputPane()).not.toContainText(text);
+  }
+
+  /**
+   * Assert the Output pane of the LLM preview contains `text`.
+   */
+  async expectLlmOutputContains(text) {
+    await expect(this.getLlmOutputPane()).toContainText(text, { timeout: 15000 });
+  }
+
+  /**
+   * Assert the tool-observation view (`.tool-content`) is visible for the
+   * `execute_tool` span.
+   */
+  async expectToolContentVisible() {
+    await expect(this.page.locator(this.llmToolContent).first()).toBeVisible({ timeout: 15000 });
+  }
+
+  /**
+   * Assert the tool-observation view contains `text` (e.g. "Tool: calculator").
+   */
+  async expectToolContentContains(text) {
+    await expect(this.page.locator(this.llmToolContent).first()).toContainText(text, { timeout: 15000 });
+  }
+
+  /**
+   * Locate the "System Instructions" collapsible trigger (rendered above the
+   * Input pane when `gen_ai_system_instructions` is present).
+   */
+  getSystemInstructionsTrigger() {
+    return this.page.getByRole('button', { name: /system instructions/i }).first();
+  }
+
+  /**
+   * Assert the "System Instructions" collapsible is present.
+   */
+  async expectSystemInstructionsVisible() {
+    await expect(this.getSystemInstructionsTrigger()).toBeVisible({ timeout: 15000 });
+  }
+
+  /**
+   * Expand the "System Instructions" collapsible.
+   */
+  async expandSystemInstructions() {
+    await this.getSystemInstructionsTrigger().click();
+  }
+
+  /**
+   * Assert the expanded "System Instructions" body shows `text` (visible, not
+   * merely present in the DOM).
+   */
+  async expectSystemInstructionsContains(text) {
+    await expect(this.getLlmInputPane().getByText(text, { exact: false }).first()).toBeVisible({ timeout: 15000 });
+  }
+
+  /**
+   * Locate the truncation "expand" button inside the Input pane.
+   */
+  getLlmExpandButton() {
+    return this.getLlmInputPane().locator(this.llmExpandBtn);
+  }
+
+  /**
+   * Assert the truncation "expand" button is visible (content > 15 lines).
+   */
+  async expectLlmExpandButtonVisible() {
+    await expect(this.getLlmExpandButton()).toBeVisible({ timeout: 15000 });
+  }
+
+  /**
+   * Click the truncation "expand" button to reveal full content.
+   */
+  async clickLlmExpandButton() {
+    await this.getLlmExpandButton().click();
+  }
+
+  /**
+   * Locate the "collapse" button (rendered after expanding; it carries no
+   * data-test, so target by its `traces.lLMContentRenderer.collapse` label).
+   */
+  getLlmCollapseButton() {
+    return this.getLlmInputPane().getByRole('button', { name: /collapse/i });
+  }
+
+  /**
+   * Assert the "collapse" button is visible (full content is shown).
+   */
+  async expectLlmCollapseButtonVisible() {
+    await expect(this.getLlmCollapseButton()).toBeVisible({ timeout: 15000 });
+  }
+
+  /**
+   * Click the "collapse" button to return to the truncated preview.
+   */
+  async clickLlmCollapseButton() {
+    await this.getLlmCollapseButton().click();
+  }
+
+  /**
+   * Assert the Thread tab transcript contains `text`.
+   */
+  async expectThreadViewContains(text) {
+    await expect(this.page.locator(this.llmThreadView)).toContainText(text, { timeout: 15000 });
   }
 
 }

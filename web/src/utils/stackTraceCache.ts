@@ -52,43 +52,33 @@ export const generateCacheKey = (
   orgIdentifier: string,
   service?: string,
   version?: string,
-  env?: string
+  env?: string,
 ): string => {
   // Create a simple hash from the string
   const hashString = (str: string) => {
     let hash = 0;
     for (let i = 0; i < str.length; i++) {
       const char = str.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
+      hash = (hash << 5) - hash + char;
       hash = hash & hash; // Convert to 32bit integer
     }
     return hash.toString(36);
   };
 
-  const parts = [
-    orgIdentifier,
-    hashString(stacktrace),
-    service || "",
-    version || "",
-    env || "",
-  ];
+  const parts = [orgIdentifier, hashString(stacktrace), service || "", version || "", env || ""];
 
   return parts.join("::");
 };
 
 // Get cached translation if available and not expired
-export const getCachedTranslation = (
-  cacheKey: string
-): StackTraceFrame[] | null => {
+export const getCachedTranslation = (cacheKey: string): StackTraceFrame[] | null => {
   const cached = translationCache.get(cacheKey);
   if (cached) {
     const now = Date.now();
     if (now - cached.timestamp < CACHE_DURATION) {
-      console.log("Using cached translation for key:", cacheKey);
       return cached.data;
     } else {
       // Cache expired, remove it
-      console.log("Cache expired for key:", cacheKey);
       translationCache.delete(cacheKey);
     }
   }
@@ -96,11 +86,7 @@ export const getCachedTranslation = (
 };
 
 // Store translation in cache
-export const setCachedTranslation = (
-  cacheKey: string,
-  data: StackTraceFrame[]
-): void => {
-  console.log("Caching translation for key:", cacheKey);
+export const setCachedTranslation = (cacheKey: string, data: StackTraceFrame[]): void => {
   translationCache.set(cacheKey, {
     data: data,
     timestamp: Date.now(),

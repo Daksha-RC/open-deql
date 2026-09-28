@@ -19,9 +19,6 @@
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
-
 vi.mock("@tanstack/vue-virtual", () => ({
   useVirtualizer: (optsRef: any) => ({
     __v_isRef: true,
@@ -39,11 +36,6 @@ vi.mock("@tanstack/vue-virtual", () => ({
   }),
 }));
 
-vi.mock("quasar", async (importOriginal) => {
-  const actual = (await importOriginal()) as any;
-  return { ...actual, debounce: (fn: any) => fn };
-});
-
 vi.mock("vuex", async (importOriginal) => {
   const actual = (await importOriginal()) as any;
   return {
@@ -58,10 +50,16 @@ vi.mock("vuex", async (importOriginal) => {
   };
 });
 
-vi.mock("vue-i18n", () => ({
-  useI18n: () => ({ t: (k: string) => k }),
-  createI18n: () => ({ install: vi.fn() }),
-}));
+vi.mock("vue-i18n", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue-i18n")>();
+  return {
+    ...actual,
+    // Delegate to the real catalogue instead of echoing the key, so assertions
+    // on rendered copy (e.g. the row count -> "1-3 of 3") test real messages.
+    useI18n: () => ({ t: (...args: any[]) => (i18n.global.t as any)(...args) }),
+    createI18n: () => ({ install: vi.fn() }),
+  };
+});
 
 vi.mock("vue-draggable-next", () => ({
   VueDraggableNext: {
@@ -107,7 +105,7 @@ vi.mock("@/utils/dashboard/colorPalette", async (importOriginal) => {
   return {
     ...actual,
     // Prepend a dark color so auto-color mode can assign it and trigger white text logic.
-    getColorForTable: ["#000000", ...actual.getColorForTable],
+    getColorForTable: (theme: string) => ["#000000", ...actual.getColorForTable(theme)],
   };
 });
 
@@ -124,19 +122,18 @@ vi.stubGlobal("CSS", { supports: () => false });
 // Mock Blob/URL for download tests
 const mockCreateObjectURL = vi.fn(() => "blob:mock-url");
 const mockRevokeObjectURL = vi.fn();
-vi.stubGlobal("URL", {
-  createObjectURL: mockCreateObjectURL,
-  revokeObjectURL: mockRevokeObjectURL,
-});
+vi.stubGlobal(
+  "URL",
+  Object.assign(globalThis.URL, {
+    createObjectURL: mockCreateObjectURL,
+    revokeObjectURL: mockRevokeObjectURL,
+  }),
+);
 
 import TableRenderer from "@/components/dashboards/panels/TableRenderer.vue";
 import { findFirstValidMappedValue } from "@/utils/dashboard/panelValidation";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
-
-installQuasar({
-  plugins: [Dialog, Notify],
-});
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -200,7 +197,7 @@ describe("TableRenderer", () => {
 
     it("should render the table-wrapper div", () => {
       wrapper = createWrapper();
-      expect(wrapper.find(".table-wrapper").exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-table-renderer-wrapper"]').exists()).toBe(true);
     });
 
     it("should render the TenstackTable with correct data-test attribute", () => {
@@ -219,60 +216,149 @@ describe("TableRenderer", () => {
     });
   });
 
+  describe("URL cells", () => {
+    const advisoryUrl = "https://example.com/advisory/CVE-2026-39822";
+    const urlData = {
+      columns: [
+        { name: "advisory_link", label: "Advisory", field: "advisory_link", sortable: true },
+      ],
+      rows: [{ advisory_link: advisoryUrl }],
+    };
+
+    it("renders absolute http(s) values as safe external links", () => {
+      wrapper = createWrapper({ data: urlData });
+      const link = wrapper.find(`a[href="${advisoryUrl}"]`);
+      expect(link.exists()).toBe(true);
+      expect(link.attributes("target")).toBe("_blank");
+      expect(link.attributes("rel")).toBe("noopener noreferrer");
+      expect(link.text()).toBe(advisoryUrl);
+    });
+
+    it("leaves unsafe URL protocols as text", () => {
+      wrapper = createWrapper({
+        data: {
+          ...urlData,
+          rows: [{ advisory_link: "javascript:alert(1)" }],
+        },
+      });
+      expect(wrapper.find("a").exists()).toBe(false);
+      expect(wrapper.text()).toContain("javascript:alert(1)");
+    });
+
+    it("keeps non-URL values as formatted text in a mixed URL column", () => {
+      wrapper = createWrapper({
+        data: {
+          ...urlData,
+          rows: [{ advisory_link: advisoryUrl }, { advisory_link: "Not available" }],
+        },
+      });
+      expect(wrapper.find(`a[href="${advisoryUrl}"]`).exists()).toBe(true);
+      expect(wrapper.text()).toContain("Not available");
+    });
+  });
+
   // ── Props passthrough to TenstackTable ────────────────────────────────────
   describe("Props passthrough", () => {
     it("should pass wrapCells=true to TenstackTable as wrap prop", () => {
       wrapper = createWrapper({ wrapCells: true });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       expect(table.props("wrap")).toBe(true);
     });
 
     it("should pass wrapCells=false to TenstackTable as wrap prop", () => {
       wrapper = createWrapper({ wrapCells: false });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       expect(table.props("wrap")).toBe(false);
+    });
+
+    // Regression: a flat 150px per column trimmed timestamps and wasted space.
+    it("should mark non-pivot columns autoWidth so they carry no fixed width", () => {
+      wrapper = createWrapper();
+      const columns = wrapper.findComponent({ name: "OTable" }).props("columns") as any[];
+      expect(columns.length).toBeGreaterThan(0);
+      expect(columns.every((c) => c.meta?.autoWidth === true)).toBe(true);
+      expect(columns.every((c) => c.size === undefined)).toBe(true);
+    });
+
+    it("should leave pivot columns alone, since pivot fixes its own widths", () => {
+      wrapper = createWrapper({
+        data: { ...mockTableData, pivotHeaderLevels: [{ cells: [{ label: "a", colspan: 1 }] }] },
+      });
+      const columns = wrapper.findComponent({ name: "OTable" }).props("columns") as any[];
+      expect(columns.length).toBeGreaterThan(0);
+      expect(columns.some((c) => c.meta?.autoWidth === true)).toBe(false);
     });
 
     it("should pass showPagination=true to TenstackTable", () => {
       wrapper = createWrapper({ showPagination: true });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("showPagination")).toBe(true);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("pagination")).toBe("client");
     });
 
     it("should default showPagination to false", () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("showPagination")).toBe(false);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("pagination")).toBe("none");
     });
 
     it("should pass rowsPerPage to TenstackTable", () => {
       wrapper = createWrapper({ showPagination: true, rowsPerPage: 25 });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("rowsPerPage")).toBe(25);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("pageSize")).toBe(25);
     });
 
     it("should use TABLE_ROWS_PER_PAGE_DEFAULT_VALUE (10) as default rowsPerPage", () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("rowsPerPage")).toBe(10);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("pageSize")).toBe(10);
     });
 
-    it("should set useVirtualScroll=false on TenstackTable", () => {
+    it("should enable virtualScroll on OTable for non-pivot tables", () => {
+      // Flat tables can return thousands of rows (e.g. Logs Visualize SELECT *);
+      // virtualization keeps only the visible rows in the DOM so the main thread
+      // does not stall rendering them all at once.
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("useVirtualScroll")).toBe(false);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("virtualScroll")).toBe(true);
+    });
+
+    it("should disable virtualScroll on OTable for pivot tables", () => {
+      // Pivots are aggregated (small) and their fake-rowspan row-merge needs all
+      // rows present, so they stay non-virtualized.
+      wrapper = createWrapper({
+        data: { ...mockTableData, pivotHeaderLevels: [{ level: 0 }] },
+      });
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("virtualScroll")).toBe(false);
+    });
+
+    // The remaining two cases mirror the pre-migration gate
+    // (`!useVirtualScroll && !showPagination && !wrap`).
+    it("should disable virtualScroll on OTable when cells wrap", () => {
+      // Wrapped rows vary from ~29px to ~81px; virtualizing them makes the total
+      // height jump while scrolling, which reads as flicker.
+      wrapper = createWrapper({ wrapCells: true });
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("virtualScroll")).toBe(false);
+    });
+
+    it("should disable virtualScroll on OTable when pagination is enabled", () => {
+      // Only `pageSize` rows reach the DOM, so there is nothing to virtualize.
+      wrapper = createWrapper({ showPagination: true });
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("virtualScroll")).toBe(false);
     });
 
     it("should set enableColumnReorder=false on TenstackTable", () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       expect(table.props("enableColumnReorder")).toBe(false);
     });
 
-    it("should set enableCellCopy=true on TenstackTable", () => {
+    it("should set enableCellCopy=false — copy moved to the floating hover-action toolbar", () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("enableCellCopy")).toBe(true);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("enableCellCopy")).toBe(false);
     });
   });
 
@@ -280,8 +366,8 @@ describe("TableRenderer", () => {
   describe("Sorting", () => {
     it("should pass sortedRows to TenstackTable rows prop", () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      const rows = table.props("rows");
+      const table = wrapper.findComponent({ name: "OTable" });
+      const rows = table.props("data");
       expect(rows.length).toBe(mockTableData.rows.length);
     });
 
@@ -296,8 +382,8 @@ describe("TableRenderer", () => {
       wrapper.vm.handleSortChange("count", "asc");
       await wrapper.vm.$nextTick();
 
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      const rows = table.props("rows");
+      const table = wrapper.findComponent({ name: "OTable" });
+      const rows = table.props("data");
       expect(rows[0].count).toBe(1);
       expect(rows[1].count).toBe(3);
       expect(rows[2].count).toBe(5);
@@ -314,8 +400,8 @@ describe("TableRenderer", () => {
       wrapper.vm.handleSortChange("count", "desc");
       await wrapper.vm.$nextTick();
 
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      const rows = table.props("rows");
+      const table = wrapper.findComponent({ name: "OTable" });
+      const rows = table.props("data");
       expect(rows[0].count).toBe(5);
       expect(rows[1].count).toBe(3);
       expect(rows[2].count).toBe(1);
@@ -323,8 +409,8 @@ describe("TableRenderer", () => {
 
     it("should return rows unsorted when no sortBy is set", () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      const rows = table.props("rows");
+      const table = wrapper.findComponent({ name: "OTable" });
+      const rows = table.props("data");
       expect(rows).toEqual(mockTableData.rows);
     });
 
@@ -346,8 +432,8 @@ describe("TableRenderer", () => {
       wrapper.vm.handleSortChange("level", "asc");
       await wrapper.vm.$nextTick();
 
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      const rows = table.props("rows");
+      const table = wrapper.findComponent({ name: "OTable" });
+      const rows = table.props("data");
       expect(rows[0].level).toBe("ERROR");
       expect(rows[1].level).toBe("INFO");
       expect(rows[2].level).toBe("WARN");
@@ -356,74 +442,89 @@ describe("TableRenderer", () => {
 
   // ── cellStyleFn ───────────────────────────────────────────────────────────
   describe("cellStyleFn", () => {
-    it("should return empty string for cells with no colorMode and no mapping", () => {
-      wrapper = createWrapper();
-      vi.mocked(findFirstValidMappedValue).mockReturnValue(null);
+    // getCellStyle takes `{ columnId, row, value }` and returns a style object;
+    // the column config is looked up by id (col.name) from data.columns.
+    const styleFor = (colConfig: any, value: any, valueMapping?: any[]): Record<string, any> => {
+      wrapper = createWrapper({
+        data: { columns: [{ name: "x", field: "x", ...colConfig }], rows: [] },
+        ...(valueMapping ? { valueMapping } : {}),
+      });
+      return wrapper.vm.cellStyleFn({ columnId: "x", row: {}, value });
+    };
 
-      const cell = {
-        column: { columnDef: { meta: { _col: { colorMode: undefined } } } },
-        getValue: () => "INFO",
-      };
-      const style = wrapper.vm.cellStyleFn(cell);
-      expect(style).toBe("");
+    it("should return empty style for cells with no colorMode and no mapping", () => {
+      vi.mocked(findFirstValidMappedValue).mockReturnValue(null);
+      expect(styleFor({ colorMode: undefined }, "INFO")).toEqual({});
     });
 
     it("should return background-color style when value-mapping has a valid color", () => {
-      wrapper = createWrapper({ valueMapping: [{ value: "ERROR", color: "#ff0000" }] });
       vi.mocked(findFirstValidMappedValue).mockReturnValue({ color: "#ff0000" });
-
-      const cell = {
-        column: { columnDef: { meta: { _col: {} } } },
-        getValue: () => "ERROR",
-      };
-      const style = wrapper.vm.cellStyleFn(cell);
-      expect(style).toContain("background-color: #ff0000");
+      const style = styleFor({}, "ERROR", [{ value: "ERROR", color: "#ff0000" }]);
+      expect(style.backgroundColor).toBe("#ff0000");
     });
 
-    it("should return empty string when value-mapping color is invalid hex", () => {
-      wrapper = createWrapper({ valueMapping: [{ value: "INFO", color: "not-a-hex" }] });
+    it("should return empty style when value-mapping color is invalid hex", () => {
       vi.mocked(findFirstValidMappedValue).mockReturnValue({ color: "not-a-hex" });
+      expect(styleFor({}, "INFO", [{ value: "INFO", color: "not-a-hex" }])).toEqual({});
+    });
 
-      const cell = {
-        column: { columnDef: { meta: { _col: {} } } },
-        getValue: () => "INFO",
-      };
-      const style = wrapper.vm.cellStyleFn(cell);
-      expect(style).toBe("");
+    it("applies the LAST matching conditional rule when several match", () => {
+      vi.mocked(findFirstValidMappedValue).mockReturnValue(null);
+      const style = styleFor(
+        {
+          conditionalRules: [
+            { operator: ">", threshold: 400, textColor: "#a16207", bgColor: "#fefce8" },
+            { operator: ">", threshold: 1000, textColor: "#b91c1c", bgColor: "#fef2f2" },
+          ],
+        },
+        2301,
+      );
+      // 2301 matches both >400 and >1000 → the later rule (>1000) wins.
+      expect(style.color).toBe("#b91c1c");
+      expect(style.backgroundColor).toBe("#fef2f2");
+    });
+
+    it("applies the only matching conditional rule when just one matches", () => {
+      vi.mocked(findFirstValidMappedValue).mockReturnValue(null);
+      const style = styleFor(
+        {
+          conditionalRules: [
+            { operator: ">", threshold: 400, textColor: "#a16207", bgColor: "#fefce8" },
+            { operator: ">", threshold: 1000, textColor: "#b91c1c", bgColor: "#fef2f2" },
+          ],
+        },
+        500,
+      );
+      expect(style.color).toBe("#a16207");
+      expect(style.backgroundColor).toBe("#fefce8");
     });
 
     it("should apply auto-color mode with a consistent color per distinct value", () => {
-      wrapper = createWrapper();
       vi.mocked(findFirstValidMappedValue).mockReturnValue(null);
-
-      const col: any = { colorMode: "auto", field: "status" };
-      const makeCell = (val: string) => ({
-        column: { id: "status", columnDef: { meta: { _col: col } } },
-        getValue: () => val,
+      wrapper = createWrapper({
+        data: {
+          columns: [{ name: "status", field: "status", colorMode: "auto" }],
+          rows: [],
+        },
       });
-
-      const style1a = wrapper.vm.cellStyleFn(makeCell("active"));
-      const style1b = wrapper.vm.cellStyleFn(makeCell("active"));
-      const style2 = wrapper.vm.cellStyleFn(makeCell("inactive"));
-
-      expect(style1a).toBe(style1b); // same value → same color
-      expect(style2).not.toBe(""); // different value → different entry
+      const s1a = wrapper.vm.cellStyleFn({ columnId: "status", row: {}, value: "active" });
+      const s1b = wrapper.vm.cellStyleFn({ columnId: "status", row: {}, value: "active" });
+      const s2 = wrapper.vm.cellStyleFn({ columnId: "status", row: {}, value: "inactive" });
+      expect(s1a).toEqual(s1b); // same value → same color
+      expect(s2).not.toEqual({}); // different value → a color assigned
     });
 
     it("should use white text on dark backgrounds in auto-color mode", () => {
-      wrapper = createWrapper();
       vi.mocked(findFirstValidMappedValue).mockReturnValue(null);
-
-      // "dark-value" is the first value assigned in a fresh autoColorCache, so it
-      // receives the first palette color (#000000 — dark). isDashboardColor() returns
-      // true → text color must be #ffffff.
-      const col: any = { colorMode: "auto", field: "status" };
-      const cell = {
-        column: { id: "status", columnDef: { meta: { _col: col } } },
-        getValue: () => "dark-value",
-      };
-      const style = wrapper.vm.cellStyleFn(cell);
-      expect(style).toContain("color: #ffffff");
+      wrapper = createWrapper({
+        data: {
+          columns: [{ name: "status", field: "status", colorMode: "auto" }],
+          rows: [],
+        },
+      });
+      // The first value assigned gets the first palette color (#000000, dark).
+      const style = wrapper.vm.cellStyleFn({ columnId: "status", row: {}, value: "dark-value" });
+      expect(style.color).toBe("#ffffff");
     });
   });
 
@@ -431,20 +532,20 @@ describe("TableRenderer", () => {
   describe("row-click emit", () => {
     it("should emit row-click when TenstackTable emits click:dataRow", async () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       const row = mockTableData.rows[0];
 
-      await table.vm.$emit("click:dataRow", row, 0, null);
+      await table.vm.$emit("row-click", row, 0, null);
 
       expect(wrapper.emitted("row-click")).toBeTruthy();
     });
 
     it("should forward the row data in the row-click emit", async () => {
       wrapper = createWrapper();
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       const row = mockTableData.rows[1];
 
-      await table.vm.$emit("click:dataRow", row, 1, null);
+      await table.vm.$emit("row-click", row, 1, null);
 
       const emitted = wrapper.emitted("row-click");
       expect(emitted).toBeTruthy();
@@ -477,7 +578,7 @@ describe("TableRenderer", () => {
     });
   });
 
-  // ── CSV Export — field vs name lookup (fix for #11574) ──────────────────
+  // ── CSV Export — field vs name lookup ───────────────────────────────────
   describe("CSV Export — field key lookup", () => {
     // Capture Blob content via a mock class since jsdom Blob lacks .text()
     let capturedCsv: string;
@@ -485,11 +586,14 @@ describe("TableRenderer", () => {
 
     beforeEach(() => {
       capturedCsv = "";
-      vi.stubGlobal("Blob", class MockBlob {
-        constructor(parts: any[], _options?: any) {
-          capturedCsv = String(parts?.[0] ?? "");
-        }
-      });
+      vi.stubGlobal(
+        "Blob",
+        class MockBlob {
+          constructor(parts: any[]) {
+            capturedCsv = String(parts?.[0] ?? "");
+          }
+        },
+      );
     });
 
     afterEach(() => {
@@ -526,9 +630,7 @@ describe("TableRenderer", () => {
 
     it("should not produce empty values when row data is keyed by field", () => {
       const data = {
-        columns: [
-          { name: "Timestamp", label: "Timestamp", field: "_timestamp", align: "left" },
-        ],
+        columns: [{ name: "Timestamp", label: "Timestamp", field: "_timestamp", align: "left" }],
         rows: [{ _timestamp: "2023-01-01T00:00:00Z" }],
       };
       wrapper = createWrapper({ data });
@@ -543,9 +645,7 @@ describe("TableRenderer", () => {
 
     it("should still work when name and field are identical", () => {
       const data = {
-        columns: [
-          { name: "count", label: "Count", field: "count", align: "right" },
-        ],
+        columns: [{ name: "count", label: "Count", field: "count", align: "right" }],
         rows: [{ count: 42 }],
       };
       wrapper = createWrapper({ data });
@@ -574,9 +674,7 @@ describe("TableRenderer", () => {
 
     it("should properly escape double quotes in CSV values", () => {
       const data = {
-        columns: [
-          { name: "msg", label: "Message", field: "msg", align: "left" },
-        ],
+        columns: [{ name: "msg", label: "Message", field: "msg", align: "left" }],
         rows: [{ msg: 'He said "hello"' }],
       };
       wrapper = createWrapper({ data });
@@ -620,10 +718,92 @@ describe("TableRenderer", () => {
       expect(controls.exists()).toBe(true);
     });
 
-    it("should render bottom slot when showPagination is false too (always present)", () => {
+    it("should still render the row count when showPagination is false", () => {
       wrapper = createWrapper({ showPagination: false });
       const paginationDiv = wrapper.find('[data-test="dashboard-table-pagination"]');
       expect(paginationDiv.exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-table-row-count"]').text()).toBe("1-3 of 3");
+    });
+
+    it("should drop the pagination bar chrome when showPagination is false", () => {
+      // Count-only footer: no separator or bar height, so it reads as a caption
+      // under the table rather than an empty pager.
+      wrapper = createWrapper({ showPagination: false });
+      const classes = wrapper.find('[data-test="dashboard-table-pagination"]').classes();
+      expect(classes).not.toContain("border-t");
+      expect(classes).not.toContain("min-h-10");
+    });
+
+    it("should not render the page-size select when showPagination is false", () => {
+      wrapper = createWrapper({ showPagination: false });
+      expect(wrapper.find('[data-test="dashboard-table-rows-per-page-select"]').exists()).toBe(
+        false,
+      );
+    });
+
+    it("re-slices the rows when the footer page size changes", async () => {
+      const rows = Array.from({ length: 15 }, (_, i) => ({
+        timestamp: `t${i}`,
+        level: "INFO",
+        count: i,
+      }));
+      wrapper = createWrapper({
+        showPagination: true,
+        rowsPerPage: 5,
+        data: { columns: mockTableData.columns, rows },
+      });
+      await flushPromises();
+
+      const table = wrapper.findComponent({ name: "OTable" }).vm.table;
+      expect(table.getRowModel().rows.length).toBe(5);
+
+      wrapper.findComponent({ name: "TablePaginationControls" }).vm.$emit("update:rowsPerPage", 10);
+      await flushPromises();
+
+      expect(table.getRowModel().rows.length).toBe(10);
+    });
+
+    it("re-slices when the rows-per-page config prop changes", async () => {
+      const rows = Array.from({ length: 15 }, (_, i) => ({
+        timestamp: `t${i}`,
+        level: "INFO",
+        count: i,
+      }));
+      wrapper = createWrapper({
+        showPagination: true,
+        rowsPerPage: 5,
+        data: { columns: mockTableData.columns, rows },
+      });
+      await flushPromises();
+      const table = wrapper.findComponent({ name: "OTable" }).vm.table;
+      expect(table.getRowModel().rows.length).toBe(5);
+
+      // Simulates changing the "Records per page" field in the panel config.
+      await wrapper.setProps({ rowsPerPage: 10 });
+      await flushPromises();
+      expect(table.getRowModel().rows.length).toBe(10);
+    });
+
+    it("paginates when pagination is enabled after mount", async () => {
+      const rows = Array.from({ length: 15 }, (_, i) => ({
+        timestamp: `t${i}`,
+        level: "INFO",
+        count: i,
+      }));
+      // Mounted with pagination off, the Add Panel default.
+      wrapper = createWrapper({
+        showPagination: false,
+        rowsPerPage: 5,
+        data: { columns: mockTableData.columns, rows },
+      });
+      await flushPromises();
+      // all rows, no pagination
+      expect(wrapper.findComponent({ name: "OTable" }).vm.table.getRowModel().rows.length).toBe(15);
+
+      // The table is re-keyed on the pagination mode, so this rebuilds it.
+      await wrapper.setProps({ showPagination: true });
+      await flushPromises();
+      expect(wrapper.findComponent({ name: "OTable" }).vm.table.getRowModel().rows.length).toBe(5);
     });
   });
 
@@ -638,28 +818,28 @@ describe("TableRenderer", () => {
       await wrapper.setProps({ data: newData });
       await flushPromises();
 
-      const table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("rows").length).toBe(1);
+      const table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("data").length).toBe(1);
     });
 
     it("should update when wrapCells prop changes", async () => {
       wrapper = createWrapper({ wrapCells: false });
-      let table = wrapper.findComponent({ name: "TenstackTable" });
+      let table = wrapper.findComponent({ name: "OTable" });
       expect(table.props("wrap")).toBe(false);
 
       await wrapper.setProps({ wrapCells: true });
-      table = wrapper.findComponent({ name: "TenstackTable" });
+      table = wrapper.findComponent({ name: "OTable" });
       expect(table.props("wrap")).toBe(true);
     });
 
     it("should update pagination when showPagination changes", async () => {
       wrapper = createWrapper({ showPagination: false });
-      let table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("showPagination")).toBe(false);
+      let table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("pagination")).toBe("none");
 
       await wrapper.setProps({ showPagination: true });
-      table = wrapper.findComponent({ name: "TenstackTable" });
-      expect(table.props("showPagination")).toBe(true);
+      table = wrapper.findComponent({ name: "OTable" });
+      expect(table.props("pagination")).toBe("client");
     });
   });
 
@@ -707,7 +887,7 @@ describe("TableRenderer", () => {
 
     it("should forward the column format function to TenstackTable unchanged", () => {
       wrapper = createWrapper({ data: tsData });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       const cols = table.props("columns") as any[];
       const tsCol = cols.find((c: any) => c.field === "event_time" || c.name === "event_time");
       expect(tsCol).toBeDefined();
@@ -716,7 +896,7 @@ describe("TableRenderer", () => {
 
     it("the format function on the timestamp column should produce a value without the ISO 'T' separator", () => {
       wrapper = createWrapper({ data: tsData });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       const cols = table.props("columns") as any[];
       const tsCol = cols.find((c: any) => c.field === "event_time" || c.name === "event_time");
       const result = tsCol.format(ISO_RAW);
@@ -726,7 +906,7 @@ describe("TableRenderer", () => {
 
     it("the format function should produce the same formatted value that will be written to clipboard on copy", () => {
       wrapper = createWrapper({ data: tsData });
-      const table = wrapper.findComponent({ name: "TenstackTable" });
+      const table = wrapper.findComponent({ name: "OTable" });
       const cols = table.props("columns") as any[];
       const tsCol = cols.find((c: any) => c.field === "event_time" || c.name === "event_time");
       // The clipboard copy path calls getCellDisplayValue which calls col.format(rawValue).

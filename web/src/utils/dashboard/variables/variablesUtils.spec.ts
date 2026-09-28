@@ -20,6 +20,9 @@ import {
   formatRateInterval,
   processVariableContent,
   normalizeVariableSyntax,
+  replaceVariablePlaceholders,
+  getReferencedVariableNames,
+  getVariablesReferencedInQueries,
 } from "./variablesUtils";
 
 describe("Variables Utils", () => {
@@ -195,62 +198,72 @@ describe("Variables Utils", () => {
         { name: "env", value: "production" },
         { name: "empty", value: "" },
         { name: "null", value: null },
-      ]
+      ],
     };
 
     it("should replace simple variable placeholders", () => {
       const content = "SELECT * FROM logs WHERE region = '${region}' AND env = '${env}'";
       const expected = "SELECT * FROM logs WHERE region = 'us-east-1' AND env = 'production'";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
     it("should replace alternative syntax variable placeholders", () => {
       const content = "SELECT * FROM logs WHERE region = '$region' AND env = '$env'";
       const expected = "SELECT * FROM logs WHERE region = 'us-east-1' AND env = 'production'";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
+    // Deliberate: this function only renders HTML/Markdown panel text (its sole callers are
+    // HTMLRenderer.vue and MarkdownRenderer.vue), where a comma list is the readable form.
+    // PromQL/SQL panel queries go through usePanelVariableSubstitution.replaceQueryValue,
+    // which already pipe-joins for promql — do not "fix" this default to `|`.
     it("should handle array values with default comma separation", () => {
       const content = "SELECT * FROM logs WHERE service IN (${service})";
       const expected = "SELECT * FROM logs WHERE service IN (api,web,db)";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
+    });
+
+    it("keeps the comma default for a regex-shaped placeholder in display text", () => {
+      const content = 'up{service=~"$service"}';
+
+      expect(processVariableContent(content, mockVariablesData)).toBe('up{service=~"api,web,db"}');
     });
 
     it("should handle array values with CSV formatting", () => {
       const content = "SELECT * FROM logs WHERE service IN (${service:csv})";
       const expected = "SELECT * FROM logs WHERE service IN (api,web,db)";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
     it("should handle array values with pipe formatting", () => {
       const content = "SELECT * FROM logs WHERE service REGEXP '${service:pipe}'";
       const expected = "SELECT * FROM logs WHERE service REGEXP 'api|web|db'";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
     it("should handle array values with double quote formatting", () => {
       const content = "SELECT * FROM logs WHERE service IN (${service:doublequote})";
       const expected = 'SELECT * FROM logs WHERE service IN ("api","web","db")';
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
     it("should handle array values with single quote formatting", () => {
       const content = "SELECT * FROM logs WHERE service IN (${service:singlequote})";
       const expected = "SELECT * FROM logs WHERE service IN ('api','web','db')";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
     it("should handle empty values", () => {
       const content = "SELECT * FROM logs WHERE field = '${empty}'";
       const expected = "SELECT * FROM logs WHERE field = ''";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
@@ -265,19 +278,19 @@ describe("Variables Utils", () => {
     it("should handle multiple occurrences of the same variable", () => {
       const content = "${region}-${region}-${region}";
       const expected = "us-east-1-us-east-1-us-east-1";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
     it("should handle content with no variables", () => {
       const content = "SELECT * FROM logs WHERE timestamp > '2023-01-01'";
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(content);
     });
 
     it("should handle undefined variables data", () => {
       const content = "SELECT * FROM logs WHERE region = '${region}'";
-      
+
       expect(processVariableContent(content, null)).toBe(content);
       expect(processVariableContent(content, undefined)).toBe(content);
     });
@@ -285,19 +298,19 @@ describe("Variables Utils", () => {
     it("should handle empty variables data", () => {
       const content = "SELECT * FROM logs WHERE region = '${region}'";
       const emptyData = { values: [] };
-      
+
       expect(processVariableContent(content, emptyData)).toBe(content);
     });
 
     it("should handle variables without names", () => {
       const content = "SELECT * FROM logs WHERE region = '${region}'";
-      const invalidData = { 
+      const invalidData = {
         values: [
           { value: "us-east-1" }, // missing name
           { name: "", value: "test" }, // empty name
-        ]
+        ],
       };
-      
+
       expect(processVariableContent(content, invalidData)).toBe(content);
     });
 
@@ -306,10 +319,10 @@ describe("Variables Utils", () => {
         SELECT * FROM logs 
         WHERE region = '\${region}' 
         AND service IN (\${service:singlequote})
-        AND env = '\$env'
+        AND env = '$env'
         AND query REGEXP '\${service:pipe}'
       `;
-      
+
       const expected = `
         SELECT * FROM logs 
         WHERE region = 'us-east-1' 
@@ -317,7 +330,7 @@ describe("Variables Utils", () => {
         AND env = 'production'
         AND query REGEXP 'api|web|db'
       `;
-      
+
       expect(processVariableContent(content, mockVariablesData)).toBe(expected);
     });
 
@@ -380,7 +393,7 @@ describe("Variables Utils", () => {
       });
 
       it("should handle null and undefined inputs", () => {
-        expect(getTimeInSecondsBasedOnUnit(null, "s")).toBe(null); // null * 1 = null  
+        expect(getTimeInSecondsBasedOnUnit(null, "s")).toBe(null); // null * 1 = null
         expect(getTimeInSecondsBasedOnUnit(undefined, "s")).toBe(undefined); // undefined * 1 = undefined
         expect(getTimeInSecondsBasedOnUnit(5, null)).toBe(5);
         expect(getTimeInSecondsBasedOnUnit(5, undefined)).toBe(5);
@@ -422,7 +435,7 @@ describe("Variables Utils", () => {
           { name: "mixed", value: ["string", 123, true] },
           { name: "special_chars", value: "test@#$%^&*()_+" },
           { name: "unicode", value: "测试数据" },
-        ]
+        ],
       };
 
       it("should handle numeric array values", () => {
@@ -462,14 +475,18 @@ describe("Variables Utils", () => {
       });
 
       it("should handle nested variable-like patterns that aren't variables", () => {
-        const content = "SELECT * FROM logs WHERE field LIKE '${region}' AND other = '$not_a_variable'";
-        const expected = "SELECT * FROM logs WHERE field LIKE 'us-east-1' AND other = '$not_a_variable'";
+        const content =
+          "SELECT * FROM logs WHERE field LIKE '${region}' AND other = '$not_a_variable'";
+        const expected =
+          "SELECT * FROM logs WHERE field LIKE 'us-east-1' AND other = '$not_a_variable'";
         expect(processVariableContent(content, extendedMockData)).toBe(expected);
       });
 
       it("should handle malformed variable patterns", () => {
-        const content = "SELECT * FROM logs WHERE field = '${' AND other = '}' AND valid = '${region}'";
-        const expected = "SELECT * FROM logs WHERE field = '${' AND other = '}' AND valid = 'us-east-1'";
+        const content =
+          "SELECT * FROM logs WHERE field = '${' AND other = '}' AND valid = '${region}'";
+        const expected =
+          "SELECT * FROM logs WHERE field = '${' AND other = '}' AND valid = 'us-east-1'";
         expect(processVariableContent(content, extendedMockData)).toBe(expected);
       });
 
@@ -547,7 +564,9 @@ describe("Variables Utils", () => {
     });
 
     it("should handle multiple variables in one string", () => {
-      expect(normalizeVariableSyntax("{{ a }} and ${ b } and {{c:csv}}")).toBe("{{a}} and ${b} and {{c:csv}}");
+      expect(normalizeVariableSyntax("{{ a }} and ${ b } and {{c:csv}}")).toBe(
+        "{{a}} and ${b} and {{c:csv}}",
+      );
     });
 
     it("should handle variables with hyphens and underscores", () => {
@@ -566,7 +585,7 @@ describe("Variables Utils", () => {
       values: [
         { name: "region", value: "us-east-1" },
         { name: "service", value: ["api", "web", "db"] },
-      ]
+      ],
     };
 
     it("should replace mustache variables with spaces", () => {
@@ -606,7 +625,7 @@ describe("Variables Utils", () => {
       const formatted = formatInterval(interval);
       const seconds = getTimeInSecondsBasedOnUnit(formatted.value, formatted.unit);
       const rateFormatted = formatRateInterval(seconds);
-      
+
       expect(formatted).toEqual({ value: 1, unit: "h" });
       expect(seconds).toBe(3600);
       expect(rateFormatted).toBe("1h");
@@ -616,14 +635,149 @@ describe("Variables Utils", () => {
       const variablesData = {
         values: [
           { name: "interval", value: "1h" },
-          { name: "services", value: ["api", "web"] }
-        ]
+          { name: "services", value: ["api", "web"] },
+        ],
       };
-      
-      const query = "rate(requests[${interval}]) by (service) where service in (${services:singlequote})";
+
+      const query =
+        "rate(requests[${interval}]) by (service) where service in (${services:singlequote})";
       const processed = processVariableContent(query, variablesData);
-      
+
       expect(processed).toBe("rate(requests[1h]) by (service) where service in ('api','web')");
+    });
+  });
+
+  describe("replaceVariablePlaceholders", () => {
+    const values: Record<string, string> = { traceid: "abc123", traceid_sql: "xyz789" };
+    const resolveFrom =
+      (map: Record<string, string>) =>
+      ({ name }: { name: string }) =>
+        map[name];
+
+    it.each([
+      ["$traceid_sql", "xyz789"],
+      ["${traceid_sql}", "xyz789"],
+      ["{{traceid_sql}}", "xyz789"],
+      ["$traceid", "abc123"],
+    ])("resolves %s to the longest matching variable", (placeholder, expected) => {
+      expect(
+        replaceVariablePlaceholders(placeholder, ["traceid", "traceid_sql"], resolveFrom(values)),
+      ).toBe(expected);
+      expect(
+        replaceVariablePlaceholders(placeholder, ["traceid_sql", "traceid"], resolveFrom(values)),
+      ).toBe(expected);
+    });
+
+    it("keeps concatenating a literal suffix onto the longest defined prefix", () => {
+      expect(
+        replaceVariablePlaceholders("'$env-api' $env_west", ["env"], resolveFrom({ env: "prod" })),
+      ).toBe("'prod-api' prod_west");
+    });
+
+    it("leaves unknown placeholders untouched", () => {
+      expect(
+        replaceVariablePlaceholders("$other ${other} {{other}}", ["traceid"], resolveFrom(values)),
+      ).toBe("$other ${other} {{other}}");
+    });
+
+    it("keeps the placeholder when resolve returns undefined instead of using a shorter name", () => {
+      expect(
+        replaceVariablePlaceholders(
+          "$traceid_sql",
+          ["traceid", "traceid_sql"],
+          resolveFrom({ traceid: "abc123" }),
+        ),
+      ).toBe("$traceid_sql");
+    });
+
+    it("does not rescan substituted values", () => {
+      expect(
+        replaceVariablePlaceholders(
+          "$traceid",
+          ["traceid", "traceid_sql"],
+          resolveFrom({ traceid: "$traceid_sql", traceid_sql: "xyz789" }),
+        ),
+      ).toBe("$traceid_sql");
+    });
+
+    it("inserts replacement-pattern characters literally", () => {
+      expect(replaceVariablePlaceholders("$v", ["v"], () => "$& $1 $$")).toBe("$& $1 $$");
+    });
+
+    it("matches names containing regex metacharacters literally", () => {
+      expect(replaceVariablePlaceholders("$a.b $aXb", ["a.b"], () => "hit")).toBe("hit $aXb");
+    });
+
+    it("passes the format of braced and mustache placeholders", () => {
+      const seen: (string | undefined)[] = [];
+      replaceVariablePlaceholders("${v:csv} {{ v : pipe }} $v", ["v"], ({ format }) => {
+        seen.push(format);
+        return "";
+      });
+      expect(seen).toEqual(["csv", "pipe", undefined]);
+    });
+
+    it("leaves unsupported formats untouched", () => {
+      expect(replaceVariablePlaceholders("${v:json} {{v:json}}", ["v"], () => "hit")).toBe(
+        "${v:json} {{v:json}}",
+      );
+    });
+
+    it("flags placeholders wrapped in single quotes", () => {
+      const quoted: boolean[] = [];
+      replaceVariablePlaceholders("'$v' $v '${v}' '$v-x'", ["v"], (p) => {
+        quoted.push(p.quoted);
+        return "";
+      });
+      expect(quoted).toEqual([true, false, true, false]);
+    });
+
+    it("returns the text unchanged when there are no names", () => {
+      expect(replaceVariablePlaceholders("$v", [], () => "hit")).toBe("$v");
+    });
+  });
+
+  describe("getReferencedVariableNames", () => {
+    it("reports only the longest matching name for each placeholder", () => {
+      expect([
+        ...getReferencedVariableNames(
+          ["WHERE a = '$traceid_sql'", undefined, "{{env}}"],
+          ["traceid", "traceid_sql", "env"],
+        ),
+      ]).toEqual(["traceid_sql", "env"]);
+    });
+  });
+
+  describe("getVariablesReferencedInQueries", () => {
+    it("returns referenced non ad hoc variables in definition order", () => {
+      const variables = [
+        { name: "traceid", type: "textbox" },
+        { name: "traceid_sql", type: "textbox" },
+        { name: "env", type: "dynamic_filters" },
+      ];
+      expect(
+        getVariablesReferencedInQueries(variables, [
+          { query: "WHERE a = '$traceid_sql' AND $env" },
+        ])?.map((v) => v.name),
+      ).toEqual(["traceid_sql"]);
+    });
+
+    it("returns undefined without variables", () => {
+      expect(getVariablesReferencedInQueries(undefined, [{ query: "$a" }])).toBeUndefined();
+    });
+  });
+
+  describe("processVariableContent with shared name prefixes", () => {
+    it("resolves each placeholder to its own variable regardless of definition order", () => {
+      const variablesData = {
+        values: [
+          { name: "traceid", value: "abc123" },
+          { name: "traceid_sql", value: "xyz789" },
+        ],
+      };
+      expect(processVariableContent("$traceid | $traceid_sql", variablesData)).toBe(
+        "abc123 | xyz789",
+      );
     });
   });
 });

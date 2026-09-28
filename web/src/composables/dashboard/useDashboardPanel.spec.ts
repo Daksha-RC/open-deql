@@ -131,6 +131,20 @@ describe("useDashboardPanel", () => {
     });
   });
 
+  // ── The four PromQL-label tests that were here ─────────────────────────────
+  // They drove fetchPromQLLabels through /prometheus/api/v1/series: two on the
+  // call itself, one on the time range it was given, one on its failure path.
+  // Labels now come from the stream SCHEMA and values one label at a time, so
+  // asserting the series call asserts the bug. Their subjects live in
+  // useDashboardPanel.promqlLabels.spec.ts, against the sources that serve them.
+  //
+  // One BEHAVIOUR CHANGE those tests were protecting, recorded rather than
+  // dropped: the label list no longer follows the panel's time range, because a
+  // schema has no time range. A label whose series went quiet inside the
+  // selected window is still offered. For a picker that is the better error —
+  // the alternative hides a label the metric really has — and it is why the two
+  // range tests could not simply be retargeted.
+
   it("adds and removes query entries", () => {
     const panel = useDashboardPanelData("dashboard-panel-test-1");
 
@@ -140,16 +154,24 @@ describe("useDashboardPanel", () => {
     panel.addQuery();
     expect(panel.dashboardPanelData.data.queries).toHaveLength(2);
     expect(panel.dashboardPanelData.data.queries[1].fields.stream).toBe("stream-a");
+    // New query is seeded synchronously with default builder fields so the tab
+    // is ready the moment it activates (no async race with stream selection).
+    expect(panel.dashboardPanelData.data.queries[1].fields.y).toHaveLength(1);
+    expect(panel.dashboardPanelData.data.queries[1].fields.y[0].functionName).toBe("count");
 
     panel.removeQuery(1);
     expect(panel.dashboardPanelData.data.queries).toHaveLength(1);
   });
 
-  it("resets panel data and adds default timestamp field", () => {
+  it("resets panel data and seeds default histogram x + count y fields", () => {
     const panel = useDashboardPanelData("dashboard-panel-test-2");
     panel.resetDashboardPanelDataAndAddTimeField();
 
-    expect(addXAxisItemMock).toHaveBeenCalledWith({ name: "_ts" });
+    const fields = panel.dashboardPanelData.data.queries[0].fields;
+    expect(fields.x).toHaveLength(1);
+    expect(fields.x[0].functionName).toBe("histogram");
+    expect(fields.y).toHaveLength(1);
+    expect(fields.y[0].functionName).toBe("count");
   });
 
   it("turns off VRL toggle when query type changes to promql", async () => {
@@ -169,9 +191,7 @@ describe("useDashboardPanel", () => {
     panel.dashboardPanelData.meta.stream.selectedStreamFields = [{ name: "fallback" }];
     panel.dashboardPanelData.meta.stream.useUserDefinedSchemas = "user_defined_schema";
 
-    expect(panel.selectedStreamFieldsBasedOnUserDefinedSchema.value).toEqual([
-      { name: "field_1" },
-    ]);
+    expect(panel.selectedStreamFieldsBasedOnUserDefinedSchema.value).toEqual([{ name: "field_1" }]);
   });
 
   it("updates grouped fields for SQL mode with joins", async () => {
@@ -195,33 +215,5 @@ describe("useDashboardPanel", () => {
       { name: "main_stream", schema: [], settings: {}, stream_alias: undefined },
       { name: "joined_stream", schema: [], settings: {}, stream_alias: "j1" },
     ]);
-  });
-
-  it("fetches and normalizes PromQL labels", async () => {
-    const panel = useDashboardPanelData("dashboard-panel-test-6");
-
-    await panel.fetchPromQLLabels("cpu_usage");
-
-    expect(getPromSeriesMock).toHaveBeenCalledTimes(1);
-    expect(panel.dashboardPanelData.meta.promql.availableLabels).toEqual([
-      "pod",
-      "region",
-    ]);
-    expect(panel.dashboardPanelData.meta.promql.labelValuesMap.get("pod")).toEqual([
-      "pod-a",
-      "pod-b",
-    ]);
-    expect(panel.dashboardPanelData.meta.promql.loadingLabels).toBe(false);
-  });
-
-  it("clears PromQL labels on fetch failure", async () => {
-    const panel = useDashboardPanelData("dashboard-panel-test-7");
-    getPromSeriesMock.mockRejectedValueOnce(new Error("network"));
-
-    await panel.fetchPromQLLabels("cpu_usage");
-
-    expect(panel.dashboardPanelData.meta.promql.availableLabels).toEqual([]);
-    expect(panel.dashboardPanelData.meta.promql.labelValuesMap.size).toBe(0);
-    expect(panel.dashboardPanelData.meta.promql.loadingLabels).toBe(false);
   });
 });

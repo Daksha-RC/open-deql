@@ -15,10 +15,21 @@
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, flushPromises, config } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
+import i18n from "@/locales";
 import FlameGraphView from "@/components/traces/FlameGraphView.vue";
+import { SEVERITY_MARKER_TOKEN } from "@/composables/traces/useSpanEvents";
+import { createStore } from "vuex";
 
-installQuasar();
+// The component reads the stream's configured timestamp column off the store so
+// its event markers agree with the waterfall's.
+const mockStore = createStore({
+  state: {
+    theme: "light",
+    zoConfig: { timestamp_column: "@timestamp" },
+  },
+});
+
+config.global.plugins = [...(config.global.plugins ?? []), i18n, mockStore];
 
 // Stub ChartRenderer globally so defineAsyncComponent resolves synchronously
 const ChartRendererStub = {
@@ -28,6 +39,43 @@ const ChartRendererStub = {
   template: '<div class="chart-renderer-stub"></div>',
 };
 
+// Stub TraceDetailsSidebar so defineAsyncComponent resolves
+const TraceDetailsSidebarStub = {
+  name: "TraceDetailsSidebar",
+  props: [
+    "span",
+    "baseTracePosition",
+    "searchQuery",
+    "streamName",
+    "serviceStreamsEnabled",
+    "parentMode",
+    "activeTab",
+  ],
+  emits: [
+    "view-logs",
+    "close",
+    "select-span",
+    "open-trace",
+    "add-filter",
+    "apply-filter-immediately",
+    "update:activeTab",
+  ],
+  template: '<div class="trace-details-sidebar-stub"></div>',
+};
+
+// Mock serviceColorRegistry so getOrSetServiceColor returns predictable colors
+vi.mock("@/utils/traces/serviceColorRegistry", () => ({
+  getOrSetServiceColor: vi.fn((name: string) => {
+    const colorMap: Record<string, string> = {
+      "service-1": "#4caf50",
+      "service-2": "#2196f3",
+      "service-3": "#ff9800",
+    };
+    return colorMap[name] || "#9CA3AF";
+  }),
+  clearServiceColorRegistry: vi.fn(),
+}));
+
 // Mock useTraces composable
 const mockSearchObj = {
   meta: {
@@ -35,6 +83,11 @@ const mockSearchObj = {
       "service-1": "#4caf50",
       "service-2": "#2196f3",
       "service-3": "#ff9800",
+    },
+  },
+  data: {
+    traceDetails: {
+      selectedSpanId: null as string | null,
     },
   },
 };
@@ -59,6 +112,7 @@ const createMockSpan = (overrides = {}) => ({
   span_id: "span-1",
   operationName: "GET /api/users",
   serviceName: "service-1",
+  resolvedIdentity: "service-1",
   startOffsetMs: 0,
   durationMs: 100,
   depth: 0,
@@ -100,7 +154,12 @@ describe("FlameGraphView", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    config.global.stubs = { ChartRenderer: ChartRendererStub };
+    config.global.stubs = {
+      ChartRenderer: ChartRendererStub,
+      TraceDetailsSidebar: TraceDetailsSidebarStub,
+    };
+    // Reset store state between tests
+    mockSearchObj.data.traceDetails.selectedSpanId = null;
   });
 
   afterEach(() => {
@@ -289,7 +348,7 @@ describe("FlameGraphView", () => {
         },
       });
 
-      expect(wrapper.find(".tw\\:flex-1").exists()).toBe(true);
+      expect(wrapper.find(".flex-1").exists()).toBe(true);
     });
   });
 
@@ -366,6 +425,7 @@ describe("FlameGraphView", () => {
       const unknownServiceSpan = [
         createMockSpan({
           serviceName: "unknown-service",
+          resolvedIdentity: "unknown-service",
         }),
       ];
 
@@ -448,7 +508,7 @@ describe("FlameGraphView", () => {
   });
 
   describe("Chart Interaction", () => {
-    it("should emit span-selected event when span is clicked", async () => {
+    it("should open bottom panel and set selectedSpanId when span is clicked", async () => {
       wrapper = mount(FlameGraphView, {
         props: {
           spans: mockSpans,
@@ -460,7 +520,10 @@ describe("FlameGraphView", () => {
       await flushPromises();
       await wrapper.vm.$nextTick();
 
-      // Call handleChartClick directly (ChartRenderer emits 'click' which calls this)
+      // Sidebar should not be visible initially
+      expect(wrapper.vm.sidebarVisible).toBe(false);
+
+      // Click a span
       wrapper.vm.handleChartClick({
         data: {
           spanData: {
@@ -469,11 +532,17 @@ describe("FlameGraphView", () => {
         },
       });
 
-      expect(wrapper.emitted("span-selected")).toBeTruthy();
-      expect(wrapper.emitted("span-selected")[0]).toEqual(["span-1", true]);
+      await flushPromises();
+      await wrapper.vm.$nextTick();
+
+      // Should open the bottom panel
+      expect(wrapper.vm.sidebarVisible).toBe(true);
+      // Should emit select-span with the span id
+      expect(wrapper.emitted("select-span")).toBeTruthy();
+      expect(wrapper.emitted("select-span")[0]).toEqual(["span-1"]);
     });
 
-    it("should not emit event when clicking without span data", async () => {
+    it("should not open bottom panel when clicking without span data", async () => {
       wrapper = mount(FlameGraphView, {
         props: {
           spans: mockSpans,
@@ -488,7 +557,155 @@ describe("FlameGraphView", () => {
       // Click without span data
       wrapper.vm.handleChartClick({ data: null });
 
-      expect(wrapper.emitted("span-selected")).toBeFalsy();
+      expect(wrapper.vm.sidebarVisible).toBe(false);
+    });
+
+    it("should render TraceDetailsSidebar when bottom panel is open", async () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: null,
+        },
+      });
+
+      await flushPromises();
+      await wrapper.vm.$nextTick();
+
+      // Sidebar should not be rendered initially
+      expect(wrapper.find(".trace-details-sidebar-stub").exists()).toBe(false);
+
+      // Click a span to open the panel
+      wrapper.vm.handleChartClick({
+        data: {
+          spanData: {
+            span_id: "span-1",
+          },
+        },
+      });
+      await wrapper.vm.$nextTick();
+
+      // Sidebar should now be rendered
+      expect(wrapper.find(".trace-details-sidebar-stub").exists()).toBe(true);
+    });
+  });
+
+  describe("Bottom Panel Behavior", () => {
+    it("should close sidebar and emit close event", async () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: null,
+        },
+      });
+
+      // Open sidebar first
+      wrapper.vm.sidebarVisible = true;
+      await wrapper.vm.$nextTick();
+
+      // Close sidebar
+      wrapper.vm.closeSidebar();
+
+      expect(wrapper.vm.sidebarVisible).toBe(false);
+      expect(wrapper.emitted("close")).toBeTruthy();
+    });
+
+    it("should close sidebar when selectedSpanId prop becomes null", async () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: "span-1",
+        },
+      });
+
+      // Open sidebar
+      wrapper.vm.sidebarVisible = true;
+      await wrapper.vm.$nextTick();
+
+      // Change prop to null (simulating parent clearing selection)
+      await wrapper.setProps({ selectedSpanId: null });
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.sidebarVisible).toBe(false);
+    });
+
+    it("should emit select-span when handleSelectSpan is called", async () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: null,
+        },
+      });
+
+      wrapper.vm.handleSelectSpan("span-2");
+
+      expect(wrapper.emitted("select-span")).toBeTruthy();
+      expect(wrapper.emitted("select-span")[0]).toEqual(["span-2"]);
+    });
+
+    it("should set sidebarActiveTab default to attributes", () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: null,
+        },
+      });
+
+      expect(wrapper.vm.sidebarActiveTab).toBe("attributes");
+    });
+  });
+
+  describe("New Props", () => {
+    it("should accept spanMap prop and compute selectedSpan", async () => {
+      const spanMap = {
+        "span-1": createMockSpan({ span_id: "span-1" }),
+        "span-2": createMockSpan({ span_id: "span-2" }),
+      };
+
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: "span-1",
+          spanMap,
+        },
+      });
+
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.selectedSpan).toEqual(spanMap["span-1"]);
+    });
+
+    it("should return null from selectedSpan when spanId not in spanMap", () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: "nonexistent",
+          spanMap: {},
+        },
+      });
+
+      expect(wrapper.vm.selectedSpan).toBeNull();
+    });
+
+    it("should accept streamName and parentMode props", () => {
+      wrapper = mount(FlameGraphView, {
+        props: {
+          spans: mockSpans,
+          traceDuration: 100,
+          selectedSpanId: null,
+          streamName: "test-stream",
+          parentMode: "embedded",
+        },
+      });
+
+      expect(wrapper.props("streamName")).toBe("test-stream");
+      expect(wrapper.props("parentMode")).toBe("embedded");
     });
   });
 
@@ -560,9 +777,7 @@ describe("FlameGraphView", () => {
       await wrapper.vm.$nextTick();
 
       const { data } = wrapper.vm.flameGraphDataAndDepth;
-      const selectedItem = data.find(
-        (d: any) => d.spanData.span_id === "span-1",
-      );
+      const selectedItem = data.find((d: any) => d.spanData.span_id === "span-1");
       expect(selectedItem.itemStyle.borderColor).toBe("#2563EB");
       expect(selectedItem.itemStyle.borderWidth).toBe(3);
     });
@@ -737,7 +952,7 @@ describe("FlameGraphView", () => {
       data.forEach((d: any) => expect(d.value[2]).toBe(0.1));
     });
 
-    it("should handle undefined selectedSpanId", () => {
+    it("should treat undefined selectedSpanId as null and return null selectedSpan", () => {
       wrapper = mount(FlameGraphView, {
         props: {
           spans: mockSpans,
@@ -746,7 +961,9 @@ describe("FlameGraphView", () => {
         },
       });
 
-      expect(wrapper.vm).toBeTruthy();
+      // withDefaults maps undefined → null; selectedSpan must also be null
+      expect(wrapper.props("selectedSpanId")).toBeNull();
+      expect(wrapper.vm.selectedSpan).toBeNull();
     });
   });
 
@@ -834,7 +1051,7 @@ describe("FlameGraphView", () => {
       });
 
       expect(result).toContain("⚠ Has errors");
-      expect(result).toContain("#f87171");
+      expect(result).toContain('class="text-flame-tooltip-error mt-1"');
     });
 
     it("should not show error indicator for normal spans", async () => {
@@ -898,8 +1115,7 @@ describe("FlameGraphView", () => {
 
       await wrapper.vm.$nextTick();
 
-      const { formatDuration } =
-        await import("@/composables/traces/useTraceProcessing");
+      const { formatDuration } = await import("@/composables/traces/useTraceProcessing");
 
       getFormatter(wrapper)({
         data: {
@@ -939,10 +1155,10 @@ describe("FlameGraphView", () => {
 
       expect(result).toContain("<div");
       expect(result).toContain("font-weight: bold");
-      expect(result).toContain("font-size: 11px");
+      expect(result).toContain("font-size: var(--text-2xs)");
       expect(result).toContain("display: flex");
       expect(result).toContain("justify-content: space-between");
-      expect(result).toContain("color: #cbd5e1");
+      expect(result).toContain('class="text-flame-tooltip-label"');
     });
 
     it("should handle very small percentages correctly", async () => {
@@ -1059,18 +1275,17 @@ describe("FlameGraphView", () => {
       wrapper = mount(FlameGraphView, {
         props: { spans: mockSpans, traceDuration: 100, selectedSpanId: null },
       });
-      // Manually set cursorVisible to true first
-      wrapper.vm.cursorVisible = true;
+      // Put cursor in visible state first via the public mousemove handler
+      wrapper.vm.handleChartMouseMove({
+        clientX: 60,
+        currentTarget: { getBoundingClientRect: () => ({ left: 10, width: 500 }) },
+      });
+      expect(wrapper.vm.cursorVisible).toBe(true);
       // Trigger mouseleave on the chart wrapper div
-      const chartWrapper = wrapper.find(".tw\\:flex.tw\\:flex-col.tw\\:flex-1");
-      if (chartWrapper.exists()) {
-        await chartWrapper.trigger("mouseleave");
-        expect(wrapper.vm.cursorVisible).toBe(false);
-      } else {
-        // Directly test the reactive property
-        wrapper.vm.cursorVisible = false;
-        expect(wrapper.vm.cursorVisible).toBe(false);
-      }
+      const chartWrapper = wrapper.find('[data-test="flame-graph-view-chart-wrapper"]');
+      expect(chartWrapper.exists()).toBe(true);
+      await chartWrapper.trigger("mouseleave");
+      expect(wrapper.vm.cursorVisible).toBe(false);
     });
 
     it("should not update cursor when hasData is false", () => {
@@ -1110,6 +1325,8 @@ describe("FlameGraphView", () => {
       wrapper = mount(FlameGraphView, {
         props: { spans: mockSpans, traceDuration: 100, selectedSpanId: null },
       });
+      // clientX=60, rect.left=10 → offsetX=50; gridWidth=500-10-10=480
+      // fraction = (50-10)/480 ≈ 0.0833; time = 0.0833 * 100 ≈ 8.33ms → "8.33ms" via mock
       const mockEvent = {
         clientX: 60,
         currentTarget: {
@@ -1117,8 +1334,232 @@ describe("FlameGraphView", () => {
         },
       } as unknown as MouseEvent;
       wrapper.vm.handleChartMouseMove(mockEvent);
-      // cursorTimeLabel should be a non-empty string (set by formatDuration)
-      expect(typeof wrapper.vm.cursorTimeLabel).toBe("string");
+      // The mocked formatDuration returns "<value>ms" for values in [1, 1000)
+      expect(wrapper.vm.cursorTimeLabel).toMatch(/^\d+\.\d+ms$/);
     });
+  });
+});
+
+describe("FlameGraphView span event markers", () => {
+  // start_time is nanoseconds; durationMs is milliseconds. The two events land
+  // at 0% and 40% of the block. Omitting start_time makes the builder return []
+  // and every assertion below would fail for the wrong reason.
+  const spanStartNs = 1752490492843000000;
+  const spanWithEvents = {
+    span_id: "s1",
+    operationName: "op",
+    serviceName: "svc",
+    resolvedIdentity: "svc",
+    start_time: spanStartNs,
+    startOffsetMs: 0,
+    durationMs: 100,
+    depth: 0,
+    hasError: false,
+    events: [
+      { name: "a", _timestamp: spanStartNs },
+      { name: "b", _timestamp: spanStartNs + 40_000_000 },
+    ],
+  };
+
+  const mountView = () =>
+    mount(FlameGraphView, {
+      props: { spans: [spanWithEvents], traceDuration: 100, selectedSpanId: null },
+    });
+
+  it("builds marker children for a span with events", () => {
+    const markers = mountView().vm.buildSpanEventMarkers(spanWithEvents, 400);
+
+    expect(markers).toHaveLength(2);
+  });
+
+  it("returns no markers for a span with no events", () => {
+    const markers = mountView().vm.buildSpanEventMarkers({ ...spanWithEvents, events: [] }, 400);
+
+    expect(markers).toEqual([]);
+  });
+
+  // Below the legibility floor, positioning inside a block whose width is
+  // already floored at 0.1% would be an invented position.
+  it("collapses to a single leading-edge flag on a narrow block", () => {
+    const markers = mountView().vm.buildSpanEventMarkers(spanWithEvents, 10);
+
+    expect(markers).toHaveLength(1);
+    expect(markers[0].isFlag).toBe(true);
+    expect(markers[0].count).toBe(2);
+  });
+
+  // renderItem is where markers actually reach the canvas: they must be
+  // children of the block's group so they share its coordinate system.
+  const renderBlock = (wrapper: any, blockWidth: number) => {
+    const renderItem = wrapper.vm.chartOptions.series[0].renderItem;
+    const api = {
+      value: (i: number) => [0, 0, blockWidth, 100][i],
+      coord: ([xPct]: number[]) => [xPct * 10, 0],
+      style: (s: any) => s,
+    };
+    return renderItem({ dataIndex: 0 }, api);
+  };
+
+  it("returns the block and its markers as one group", () => {
+    const result = renderBlock(mountView(), 100);
+
+    expect(result.type).toBe("group");
+    expect(result.children[0].type).toBe("rect");
+    expect(result.children.length).toBeGreaterThan(1);
+  });
+
+  it("leaves markers silent so hover and click stay on the block", () => {
+    const result = renderBlock(mountView(), 100);
+
+    expect(result.children.slice(1).every((c: any) => c.silent)).toBe(true);
+  });
+
+  it("returns a bare rect for a span with no events", () => {
+    const wrapper = mount(FlameGraphView, {
+      props: {
+        spans: [{ ...spanWithEvents, events: [] }],
+        traceDuration: 100,
+        selectedSpanId: null,
+      },
+    });
+
+    expect(renderBlock(wrapper, 100).type).toBe("rect");
+  });
+
+  it("gives the flag the highest severity present", () => {
+    const withError = {
+      ...spanWithEvents,
+      events: [
+        { name: "a", level: "INFO", _timestamp: spanStartNs },
+        { name: "b", level: "ERROR", _timestamp: spanStartNs + 40_000_000 },
+      ],
+    };
+
+    expect(mountView().vm.buildSpanEventMarkers(withError, 10)[0].severity).toBe("error");
+  });
+
+  // Regression: this surface read the events payload with no timestamp column,
+  // so it saw only `_timestamp`. The waterfall and the sidebar both pass the
+  // configured column, and an event carrying only that column was silently
+  // dropped here while showing up on the other two.
+  it("reads events through the configured timestamp column", () => {
+    const configuredColumnOnly = {
+      ...spanWithEvents,
+      events: [{ name: "a", "@timestamp": spanStartNs + 40_000_000 }],
+    };
+
+    expect(mountView().vm.buildSpanEventMarkers(configuredColumnOnly, 400)).toHaveLength(1);
+  });
+
+  const mountWithErrorEvent = () =>
+    mount(FlameGraphView, {
+      props: {
+        spans: [
+          {
+            ...spanWithEvents,
+            events: [{ name: "boom", level: "ERROR", _timestamp: spanStartNs + 40_000_000 }],
+          },
+        ],
+        traceDuration: 100,
+        selectedSpanId: null,
+      },
+    });
+
+  // No tier carries a halo on any surface — a ring was 40% of a 3px tick's width
+  // and out-shouted the fill. This surface must agree, or the canvas and the DOM
+  // drift the way a hardcoded #ffffff once made them drift. Both tiers are
+  // checked because the halo previously applied to error but not info.
+  it("strokes no marker on any tier", () => {
+    for (const wrapper of [mountView(), mountWithErrorEvent()]) {
+      const marker = renderBlock(wrapper, 100).children[1];
+
+      expect(marker.style.fill).toBeDefined();
+      expect(marker.style.stroke).toBeUndefined();
+      expect(marker.style.lineWidth).toBeUndefined();
+    }
+  });
+
+  // 3px matches the DOM surfaces' `w-0.75`; a canvas cannot take the class, so
+  // the number is restated there and must not drift from it.
+  //
+  // NOTE on the argument: renderBlock's second parameter is the series' width
+  // *percentage*, which the api stub's `coord` scales by 10 to reach pixels. So
+  // `2` is a 20px block — under MARKER_LEGIBILITY_FLOOR_PX (24), which is what
+  // collapses the markers to a single leading-edge flag — while `100` is 1000px.
+  it("draws positioned markers at the shared 3px width and the flag wider", () => {
+    const positioned = renderBlock(mountView(), 100).children[1];
+    expect(positioned.shape.width).toBe(3);
+
+    const flag = renderBlock(mountView(), 2).children[1];
+    expect(flag.shape.width).toBe(4);
+  });
+
+  // Markers used to sit inset inside the block, which left them wholly on an
+  // arbitrary service colour with no outline and no overhang — this was the one
+  // surface carrying neither channel the marker vocabulary relies on. They now
+  // overhang by 1px on each side, exactly as the waterfall tick overhangs its
+  // bar, so part of every mark lands on the chart background.
+  it("overhangs its block by 1px top and bottom", () => {
+    const group = renderBlock(mountView(), 100);
+    const block = group.children[0];
+    const marker = group.children[1];
+
+    expect(marker.shape.y).toBe(block.shape.y - 1);
+    expect(marker.shape.y + marker.shape.height).toBe(block.shape.y + block.shape.height + 1);
+  });
+
+  // The overhang has to fit the gutter it borrows from. Rows are pitched
+  // BLOCK_HEIGHT + BLOCK_PADDING apart, so a 1px overhang on each side leaves
+  // 1px of the 2px gutter clear and never reaches the neighbouring block.
+  it("keeps the overhang inside the inter-row gutter", () => {
+    const group = renderBlock(mountView(), 100);
+    const marker = group.children[1];
+    const block = group.children[0];
+    const rowPitch = 24 + 2;
+
+    const overhangEachSide = (marker.shape.height - block.shape.height) / 2;
+    expect(overhangEachSide * 2).toBeLessThan(rowPitch - block.shape.height + 1);
+  });
+
+  // The root row sits at depth 0. Without a row origin offset its top overhang
+  // would land at canvas y = -1 — off the top edge, and the custom series sets
+  // no `clip`, so nothing would catch it.
+  it("keeps the root row's overhang on the canvas", () => {
+    const marker = renderBlock(mountView(), 100).children[1];
+
+    expect(marker.shape.y).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe("FlameGraphView severity colours", () => {
+  // renderItem returns raw ECharts shapes, which cannot take Tailwind classes,
+  // so this surface resolves token values at draw time via getComputedStyle.
+  // jsdom returns "" for custom properties, so the resolved colour can't be
+  // asserted here. Instead this spies on the property lookup itself and
+  // asserts severityColor requests the shared token name — proving it reads
+  // SEVERITY_MARKER_TOKEN rather than a local, independently-drifting copy.
+  const mountView = () =>
+    mount(FlameGraphView, {
+      props: { spans: [], traceDuration: 100, selectedSpanId: null },
+    });
+
+  it("requests the shared info token, not a local literal", () => {
+    const spy = vi.spyOn(CSSStyleDeclaration.prototype, "getPropertyValue");
+    try {
+      mountView().vm.severityColor("info");
+      expect(spy).toHaveBeenCalledWith(SEVERITY_MARKER_TOKEN.info);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("requests the shared error token, not a local literal", () => {
+    const spy = vi.spyOn(CSSStyleDeclaration.prototype, "getPropertyValue");
+    try {
+      mountView().vm.severityColor("error");
+      expect(spy).toHaveBeenCalledWith(SEVERITY_MARKER_TOKEN.error);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

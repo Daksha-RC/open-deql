@@ -15,71 +15,66 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="aws-integration-grid">
-    <div class="tw:mb-4">
-      <q-input
+  <div class="aws-integration-grid w-full">
+    <div class="mb-4">
+      <OSearchInput
         v-model="searchQuery"
-        placeholder="Search AWS services..."
-        dense
-        outlined
+        :placeholder="t('ingestion.awsSetup.searchPlaceholder')"
         clearable
-        class="tw:max-w-md"
+        class="max-w-md"
         data-test="aws-integration-search"
-      >
-        <template #prepend>
-          <q-icon name="search" />
-        </template>
-      </q-input>
+      />
     </div>
 
-    <div class="tw:mb-6">
-      <q-tabs
-        v-model="activeCategory"
-        dense
-        inline-label
-        class="text-grey-7"
-        active-color="primary"
-        indicator-color="primary"
-        data-test="aws-integration-category-tabs"
-      >
-        <q-tab name="all" label="All Services" />
-        <q-tab name="logs" label="Logs" />
-        <q-tab name="metrics" label="Metrics" />
-        <q-tab name="security" label="Security" />
-        <q-tab name="networking" label="Networking" />
-      </q-tabs>
+    <div class="mb-6">
+      <OTabs v-model="activeCategory" dense data-test="aws-integration-category-tabs">
+        <OTab name="all" :label="t('ingestion.awsSetup.categoryAll')" />
+        <OTab name="logs" :label="t('ingestion.awsSetup.categoryLogs')" />
+        <OTab name="metrics" :label="t('ingestion.awsSetup.categoryMetrics')" />
+        <OTab name="security" :label="t('ingestion.awsSetup.categorySecurity')" />
+        <OTab name="networking" :label="t('ingestion.awsSetup.categoryNetworking')" />
+      </OTabs>
     </div>
 
+    <div v-if="filteredIntegrations.length === 0" class="text-text-secondary py-12 text-center">
+      <OIcon name="search-off" class="mb-2 h-12 w-12" />
+      <div class="text-base">{{ t("ingestion.awsSetup.noResults") }}</div>
+    </div>
+
+    <!-- Responsive columns via Tailwind utilities — replaces a scoped-style
+         block whose px media queries leaked to every page in the app. -->
     <div
-      v-if="filteredIntegrations.length === 0"
-      class="tw:text-center tw:py-12 empty-state"
+      class="integrations-grid grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+      v-else
     >
-      <q-icon name="search_off" size="3rem" class="tw:mb-2" />
-      <div class="tw:text-base">No integrations found matching your search</div>
-    </div>
-
-    <div class="row q-col-gutter-md" v-else>
-      <div
+      <AWSIntegrationTile
         v-for="integration in filteredIntegrations"
         :key="integration.id"
-        class="col-12 col-sm-6 col-md-4 col-lg-3"
-      >
-        <AWSIntegrationTile :integration="integration" />
-      </div>
+        :integration="integration"
+      />
     </div>
   </div>
 </template>
 
 <script lang="ts">
+import OTabs from "@/lib/navigation/Tabs/OTabs.vue";
+import OTab from "@/lib/navigation/Tabs/OTab.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
 import { defineComponent, ref, computed, watch } from "vue";
+import { useI18nTyped } from "@/types/i18n";
 import { useRoute } from "vue-router";
 import { awsIntegrations } from "@/utils/awsIntegrations";
 import AWSIntegrationTile from "./AWSIntegrationTile.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
 
 export default defineComponent({
   name: "AWSIndividualServices",
   components: {
+    OTabs,
+    OTab,
     AWSIntegrationTile,
+    OSearchInput,
+    OIcon,
   },
   props: {
     initialSearch: {
@@ -88,26 +83,33 @@ export default defineComponent({
     },
   },
   setup(props) {
+    const { t } = useI18nTyped();
     const route = useRoute();
     const searchQuery = ref((route.query.search as string) || props.initialSearch || "");
     const activeCategory = ref("all");
 
     // Watch for changes in route query parameter
-    watch(() => route.query.search, (newSearch) => {
-      if (newSearch && typeof newSearch === 'string') {
-        searchQuery.value = newSearch;
-      } else if (newSearch === undefined) {
-        // Clear search when query param is removed
-        searchQuery.value = "";
-      }
-    });
+    watch(
+      () => route.query.search,
+      (newSearch) => {
+        if (newSearch && typeof newSearch === "string") {
+          searchQuery.value = newSearch;
+        } else if (newSearch === undefined) {
+          // Clear search when query param is removed
+          searchQuery.value = "";
+        }
+      },
+    );
 
     // Watch for changes in initialSearch prop
-    watch(() => props.initialSearch, (newSearch) => {
-      if (newSearch !== undefined) {
-        searchQuery.value = newSearch;
-      }
-    });
+    watch(
+      () => props.initialSearch,
+      (newSearch) => {
+        if (newSearch !== undefined) {
+          searchQuery.value = newSearch;
+        }
+      },
+    );
 
     const filteredIntegrations = computed(() => {
       let filtered = [...awsIntegrations];
@@ -118,16 +120,14 @@ export default defineComponent({
         filtered = filtered.filter(
           (integration) =>
             integration.displayName.toLowerCase().includes(query) ||
-            integration.description.toLowerCase().includes(query) ||
-            integration.name.toLowerCase().includes(query)
+            t(integration.descriptionKey).toLowerCase().includes(query) ||
+            integration.name.toLowerCase().includes(query),
         );
       }
 
       // Filter by category
       if (activeCategory.value !== "all") {
-        filtered = filtered.filter(
-          (integration) => integration.category === activeCategory.value
-        );
+        filtered = filtered.filter((integration) => integration.category === activeCategory.value);
       }
 
       // Sort by name
@@ -137,6 +137,7 @@ export default defineComponent({
     });
 
     return {
+      t,
       searchQuery,
       activeCategory,
       filteredIntegrations,
@@ -144,19 +145,3 @@ export default defineComponent({
   },
 });
 </script>
-
-<style scoped lang="scss">
-.aws-integration-grid {
-  width: 100%;
-
-  .empty-state {
-    .body--light & {
-      color: #666;
-    }
-
-    .body--dark & {
-      color: #999;
-    }
-  }
-}
-</style>

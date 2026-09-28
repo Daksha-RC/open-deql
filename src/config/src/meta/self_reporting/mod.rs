@@ -16,6 +16,7 @@
 use std::fmt;
 
 use error::ErrorData;
+use redaction::RedactionEvidence;
 use tokio::{
     sync::{mpsc, oneshot},
     time,
@@ -23,6 +24,10 @@ use tokio::{
 use usage::{TriggerData, UsageData};
 
 pub mod error;
+pub mod evaluator;
+pub mod llm_experiments;
+pub mod llm_scores;
+pub mod redaction;
 pub mod usage;
 
 #[derive(Debug)]
@@ -42,6 +47,7 @@ pub enum ReportingData {
     Usage(Box<UsageData>),
     Trigger(Box<TriggerData>),
     Error(Box<ErrorData>),
+    Redaction(Box<RedactionEvidence>),
 }
 
 /// Error type for enqueue operations with timeout
@@ -89,6 +95,7 @@ impl ReportingQueue {
             ReportingData::Usage(_) => "Usage",
             ReportingData::Trigger(_) => "Trigger",
             ReportingData::Error(_) => "Error",
+            ReportingData::Redaction(_) => "Redaction",
         };
 
         log::trace!(
@@ -130,6 +137,7 @@ impl ReportingQueue {
             ReportingData::Usage(_) => "Usage",
             ReportingData::Trigger(_) => "Trigger",
             ReportingData::Error(_) => "Error",
+            ReportingData::Redaction(_) => "Redaction",
         };
 
         match self
@@ -173,6 +181,7 @@ impl ReportingQueue {
             ReportingData::Usage(_) => "Usage",
             ReportingData::Trigger(_) => "Trigger",
             ReportingData::Error(_) => "Error",
+            ReportingData::Redaction(_) => "Redaction",
         };
 
         log::trace!(
@@ -275,7 +284,7 @@ impl ReportingRunner {
 #[cfg(test)]
 mod tests {
     use tokio::time::Duration;
-    use usage::{TriggerData, TriggerDataStatus, TriggerDataType, UsageData, UsageEvent};
+    use usage::{RunOutcome, TriggerData, TriggerDataType, UsageData, UsageEvent};
 
     use super::*;
 
@@ -326,6 +335,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         let result = queue
@@ -359,7 +369,7 @@ mod tests {
             next_run_at: 1234567890,
             is_realtime: true,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 1234567890,
             end_time: 1234567890,
             retries: 0,
@@ -378,6 +388,14 @@ mod tests {
             dedup_count: None,
             grouped: None,
             group_size: None,
+            actual_value: None,
+            threshold_value: None,
+            threshold_operator: None,
+            level: None,
+            group_label: None,
+            value_is_lower_bound: None,
+            synthetics_error_source: None,
+            synthetics_location: None,
         };
 
         let result = queue
@@ -393,7 +411,7 @@ mod tests {
                 assert_eq!(data.org, "test_org");
                 assert_eq!(data.module, TriggerDataType::Alert);
                 assert_eq!(data.key, "test_key");
-                assert_eq!(data.status, TriggerDataStatus::Completed);
+                assert_eq!(data.status, RunOutcome::Succeeded);
             }
             _ => panic!("Expected Trigger data"),
         }
@@ -520,6 +538,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         runner.push(ReportingData::Usage(Box::new(usage_data)));
@@ -577,6 +596,7 @@ mod tests {
                 node_name: None,
                 dashboard_info: None,
                 peak_memory_usage: None,
+                region: None,
             };
             runner.push(ReportingData::Usage(Box::new(usage_data)));
         }
@@ -624,6 +644,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
         runner.push(ReportingData::Usage(Box::new(usage_data)));
 
@@ -677,6 +698,7 @@ mod tests {
                 node_name: None,
                 dashboard_info: None,
                 peak_memory_usage: None,
+                region: None,
             };
             runner.push(ReportingData::Usage(Box::new(usage_data)));
         }
@@ -736,6 +758,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         let message = ReportingMessage::Data(ReportingData::Usage(Box::new(usage_data)));
@@ -780,6 +803,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         let data = ReportingData::Usage(Box::new(usage_data));
@@ -829,6 +853,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         // First message should succeed
@@ -883,6 +908,7 @@ mod tests {
             node_name: None,
             dashboard_info: None,
             peak_memory_usage: None,
+            region: None,
         };
 
         let trigger_data = TriggerData {
@@ -893,7 +919,7 @@ mod tests {
             next_run_at: 1234567890,
             is_realtime: true,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 1234567890,
             end_time: 1234567890,
             retries: 0,
@@ -912,6 +938,14 @@ mod tests {
             dedup_count: None,
             grouped: None,
             group_size: None,
+            actual_value: None,
+            threshold_value: None,
+            threshold_operator: None,
+            level: None,
+            group_label: None,
+            value_is_lower_bound: None,
+            synthetics_error_source: None,
+            synthetics_location: None,
         };
 
         let error_data = error::ErrorData {
@@ -923,28 +957,33 @@ mod tests {
         runner.push(ReportingData::Usage(Box::new(usage_data)));
         runner.push(ReportingData::Trigger(Box::new(trigger_data)));
         runner.push(ReportingData::Error(Box::new(error_data)));
+        runner.push(ReportingData::Redaction(Box::new(
+            RedactionEvidence::init_for_reflection(),
+        )));
 
-        assert_eq!(runner.pending.len(), 3);
+        assert_eq!(runner.pending.len(), 4);
 
         let batch = runner.take_batch();
-        assert_eq!(batch.len(), 3);
+        assert_eq!(batch.len(), 4);
 
-        // Verify we have all three types
         let mut usage_count = 0;
         let mut trigger_count = 0;
         let mut error_count = 0;
+        let mut redaction_count = 0;
 
         for data in batch {
             match data {
                 ReportingData::Usage(_) => usage_count += 1,
                 ReportingData::Trigger(_) => trigger_count += 1,
                 ReportingData::Error(_) => error_count += 1,
+                ReportingData::Redaction(_) => redaction_count += 1,
             }
         }
 
         assert_eq!(usage_count, 1);
         assert_eq!(trigger_count, 1);
         assert_eq!(error_count, 1);
+        assert_eq!(redaction_count, 1);
     }
 
     #[tokio::test]
@@ -961,7 +1000,7 @@ mod tests {
             next_run_at: 1234567890,
             is_realtime: true,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 1234567890,
             end_time: 1234567890,
             retries: 0,
@@ -980,6 +1019,14 @@ mod tests {
             dedup_count: None,
             grouped: None,
             group_size: None,
+            actual_value: None,
+            threshold_value: None,
+            threshold_operator: None,
+            level: None,
+            group_label: None,
+            value_is_lower_bound: None,
+            synthetics_error_source: None,
+            synthetics_location: None,
         };
 
         let trigger_data2 = TriggerData {
@@ -1019,7 +1066,7 @@ mod tests {
             next_run_at: 1234567890,
             is_realtime: true,
             is_silenced: false,
-            status: TriggerDataStatus::Completed,
+            status: RunOutcome::Succeeded,
             start_time: 1234567890,
             end_time: 1234567890,
             retries: 0,
@@ -1038,6 +1085,14 @@ mod tests {
             dedup_count: None,
             grouped: None,
             group_size: None,
+            actual_value: None,
+            threshold_value: None,
+            threshold_operator: None,
+            level: None,
+            group_label: None,
+            value_is_lower_bound: None,
+            synthetics_error_source: None,
+            synthetics_location: None,
         };
 
         // Should succeed when queue has space

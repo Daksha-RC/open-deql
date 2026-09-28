@@ -15,8 +15,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
-import { Quasar } from "quasar";
-import { nextTick } from "vue";
+import { nextTick, reactive } from "vue";
 import VariablesValueSelector from "./VariablesValueSelector.vue";
 
 // Mock external dependencies
@@ -40,18 +39,20 @@ vi.mock("vuex", () => ({
 }));
 
 // Mock stream service
-vi.mock("../../services/stream", () => ({
-  default: {
-    fieldValues: vi.fn(),
-  },
-}));
+vi.mock("../../services/stream", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      fieldValues: vi.fn(),
+    },
+  });
+});
 
 // Mock child components
 vi.mock("./settings/VariableQueryValueSelector.vue", () => ({
   default: {
     name: "VariableQueryValueSelector",
-    template:
-      '<div data-test="variable-query-value-selector-mock">Query Value Selector</div>',
+    template: '<div data-test="variable-query-value-selector-mock">Query Value Selector</div>',
     props: ["modelValue", "variableItem", "loadOptions"],
     emits: ["update:modelValue", "search"],
   },
@@ -60,8 +61,7 @@ vi.mock("./settings/VariableQueryValueSelector.vue", () => ({
 vi.mock("./settings/VariableCustomValueSelector.vue", () => ({
   default: {
     name: "VariableCustomValueSelector",
-    template:
-      '<div data-test="variable-custom-value-selector-mock">Custom Value Selector</div>',
+    template: '<div data-test="variable-custom-value-selector-mock">Custom Value Selector</div>',
     props: ["modelValue", "variableItem"],
     emits: ["update:modelValue"],
   },
@@ -70,8 +70,7 @@ vi.mock("./settings/VariableCustomValueSelector.vue", () => ({
 vi.mock("./settings/VariableAdHocValueSelector.vue", () => ({
   default: {
     name: "VariableAdHocValueSelector",
-    template:
-      '<div data-test="variable-adhoc-value-selector-mock">AdHoc Value Selector</div>',
+    template: '<div data-test="variable-adhoc-value-selector-mock">AdHoc Value Selector</div>',
     props: ["modelValue", "variableItem"],
   },
 }));
@@ -82,20 +81,23 @@ vi.mock("@/utils/date", () => ({
 }));
 
 vi.mock("@/utils/query/sqlUtils", () => ({
-  addLabelsToSQlQuery: vi.fn((query: string, filters: any[]) =>
-    Promise.resolve(query),
-  ),
+  addLabelsToSQlQuery: vi.fn((query: string) => Promise.resolve(query)),
 }));
 
 vi.mock("@/utils/zincutils", () => ({
   b64EncodeUnicode: vi.fn((str: string) => btoa(str)),
   escapeSingleQuotes: vi.fn((str: string) => str.replace(/'/g, "''")),
   generateTraceContext: vi.fn(() => ({ traceId: "test-trace-id" })),
-  isStreamingEnabled: vi.fn((state: any) => false),
-  isWebSocketEnabled: vi.fn((state: any) => false),
+  isStreamingEnabled: vi.fn(() => false),
+  isWebSocketEnabled: vi.fn(() => false),
 }));
 
-vi.mock("@/utils/dashboard/variables/variablesDependencyUtils", () => ({
+// Partial: the real variables manager builds the SCOPED graph from this module,
+// so replacing the whole module leaves it without the chain it is being tested on.
+vi.mock("@/utils/dashboard/variables/variablesDependencyUtils", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("@/utils/dashboard/variables/variablesDependencyUtils")
+  >()),
   buildVariablesDependencyGraph: vi.fn((variables: any[]) => {
     const graph: any = {};
     variables.forEach((variable) => {
@@ -136,8 +138,7 @@ describe("VariablesValueSelector", () => {
   let wrapper: VueWrapper;
 
   // Helper function to get mocked stream service
-  const getStreamService = async () =>
-    (await import("../../services/stream")).default;
+  const getStreamService = async () => (await import("../../services/stream")).default;
 
   const mockVariablesConfig = {
     list: [
@@ -229,16 +230,8 @@ describe("VariablesValueSelector", () => {
         ...props,
       },
       global: {
-        plugins: [Quasar],
-        stubs: {
-          "q-input": {
-            name: "QInput",
-            template:
-              '<input v-model="modelValue" @input="$emit(\'update:modelValue\', $event.target.value)" />',
-            props: ["modelValue", "label", "dense", "outlined", "readonly"],
-            emits: ["update:modelValue"],
-          },
-        },
+        plugins: [],
+        stubs: {},
       },
     });
   };
@@ -261,7 +254,7 @@ describe("VariablesValueSelector", () => {
       // Poll until loading completes or timeout
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
 
@@ -307,9 +300,8 @@ describe("VariablesValueSelector", () => {
       wrapper = createWrapper();
       await nextTick();
 
-      const { buildVariablesDependencyGraph } = await import(
-        "@/utils/dashboard/variables/variablesDependencyUtils"
-      );
+      const { buildVariablesDependencyGraph } =
+        await import("@/utils/dashboard/variables/variablesDependencyUtils");
       expect(buildVariablesDependencyGraph).toHaveBeenCalled();
     });
   });
@@ -323,7 +315,7 @@ describe("VariablesValueSelector", () => {
       const vm = wrapper.vm as any;
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
 
@@ -337,41 +329,39 @@ describe("VariablesValueSelector", () => {
       const vm = wrapper.vm as any;
 
       // Verify variable exists
-      const queryVariable = vm.variablesData.values.find((v: any) => v.type === 'query_values');
+      const queryVariable = vm.variablesData.values.find((v: any) => v.type === "query_values");
       expect(queryVariable).toBeDefined();
-      expect(queryVariable.type).toBe('query_values');
+      expect(queryVariable.type).toBe("query_values");
 
       // The component renders, just check that it's in the internal state
       // The mocked child component might not render the exact data-test attribute
-      expect(vm.variablesData.values.some((v: any) => v.type === 'query_values')).toBe(true);
+      expect(vm.variablesData.values.some((v: any) => v.type === "query_values")).toBe(true);
     });
 
     it("should render constant variable correctly", () => {
       const vm = wrapper.vm as any;
-      const constantVariable = vm.variablesData.values.find((v: any) => v.type === 'constant');
+      const constantVariable = vm.variablesData.values.find((v: any) => v.type === "constant");
       expect(constantVariable).toBeDefined();
-      expect(constantVariable.type).toBe('constant');
+      expect(constantVariable.type).toBe("constant");
     });
 
     it("should render textbox variable correctly", () => {
       const vm = wrapper.vm as any;
-      const textboxVariable = vm.variablesData.values.find((v: any) => v.type === 'textbox');
+      const textboxVariable = vm.variablesData.values.find((v: any) => v.type === "textbox");
       expect(textboxVariable).toBeDefined();
-      expect(textboxVariable.type).toBe('textbox');
+      expect(textboxVariable.type).toBe("textbox");
     });
 
     it("should render custom variable correctly", () => {
       const vm = wrapper.vm as any;
-      const customVariable = vm.variablesData.values.find((v: any) => v.type === 'custom');
+      const customVariable = vm.variablesData.values.find((v: any) => v.type === "custom");
       expect(customVariable).toBeDefined();
-      expect(customVariable.type).toBe('custom');
+      expect(customVariable.type).toBe("custom");
     });
 
     it("should handle multiSelect variables", async () => {
       const vm = wrapper.vm as any;
-      const multiSelectVariable = vm.variablesData.values.find(
-        (v: any) => v.multiSelect,
-      );
+      const multiSelectVariable = vm.variablesData.values.find((v: any) => v.multiSelect);
 
       expect(multiSelectVariable).toBeDefined();
       expect(Array.isArray(multiSelectVariable.value)).toBe(true);
@@ -379,9 +369,7 @@ describe("VariablesValueSelector", () => {
 
     it("should handle single select variables", async () => {
       const vm = wrapper.vm as any;
-      const singleSelectVariable = vm.variablesData.values.find(
-        (v: any) => !v.multiSelect,
-      );
+      const singleSelectVariable = vm.variablesData.values.find((v: any) => !v.multiSelect);
 
       expect(singleSelectVariable).toBeDefined();
       expect(Array.isArray(singleSelectVariable.value)).toBe(false);
@@ -389,12 +377,8 @@ describe("VariablesValueSelector", () => {
 
     it("should initialize variables with initial values", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
-      const envVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "environment",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
+      const envVariable = vm.variablesData.values.find((v: any) => v.name === "environment");
 
       expect(regionVariable.value).toBe("us-east-1");
       expect(envVariable.value).toBe("production");
@@ -407,9 +391,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const serviceVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "service",
-      );
+      const serviceVariable = vm.variablesData.values.find((v: any) => v.name === "service");
 
       expect(serviceVariable.value).toBe("");
     });
@@ -435,11 +417,95 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const testVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "test",
-      );
+      const testVariable = vm.variablesData.values.find((v: any) => v.name === "test");
 
       expect(testVariable.value).toEqual(["value1", "value2"]);
+    });
+
+    it("should select the option marked as default (selected) for single-select custom variables", async () => {
+      // Regression: previously the first option was always used on initial load,
+      // ignoring the per-option "Default" checkbox (option.selected).
+      const customConfig = {
+        list: [
+          {
+            name: "custom_stream",
+            type: "custom",
+            multiSelect: false,
+            options: [
+              { label: "e2e_automate", value: "e2e_automate", selected: false },
+              { label: "default", value: "default", selected: true },
+            ],
+          },
+        ],
+      };
+
+      wrapper = createWrapper({
+        variablesConfig: customConfig,
+        initialVariableValues: { value: {} },
+      });
+      await nextTick();
+
+      const vm = wrapper.vm as any;
+      const testVariable = vm.variablesData.values.find((v: any) => v.name === "custom_stream");
+
+      // Should pick the default-marked option ("default"), not the first option
+      expect(testVariable.value).toBe("default");
+    });
+
+    it("should select the options marked as default (selected) for multiSelect custom variables", async () => {
+      const customConfig = {
+        list: [
+          {
+            name: "custom_multi",
+            type: "custom",
+            multiSelect: true,
+            options: [
+              { label: "one", value: "one", selected: false },
+              { label: "two", value: "two", selected: true },
+              { label: "three", value: "three", selected: true },
+            ],
+          },
+        ],
+      };
+
+      wrapper = createWrapper({
+        variablesConfig: customConfig,
+        initialVariableValues: { value: {} },
+      });
+      await nextTick();
+
+      const vm = wrapper.vm as any;
+      const testVariable = vm.variablesData.values.find((v: any) => v.name === "custom_multi");
+
+      // Should pick all default-marked options, not just the first
+      expect(testVariable.value).toEqual(["two", "three"]);
+    });
+
+    it("should fall back to first option for custom variables when none are marked default", async () => {
+      const customConfig = {
+        list: [
+          {
+            name: "custom_no_default",
+            type: "custom",
+            multiSelect: false,
+            options: [
+              { label: "alpha", value: "alpha", selected: false },
+              { label: "beta", value: "beta", selected: false },
+            ],
+          },
+        ],
+      };
+
+      wrapper = createWrapper({
+        variablesConfig: customConfig,
+        initialVariableValues: { value: {} },
+      });
+      await nextTick();
+
+      const vm = wrapper.vm as any;
+      const testVariable = vm.variablesData.values.find((v: any) => v.name === "custom_no_default");
+
+      expect(testVariable.value).toBe("alpha");
     });
 
     it("should handle SELECT_ALL value for multiSelect variables", async () => {
@@ -467,16 +533,14 @@ describe("VariablesValueSelector", () => {
       // Wait for initialization
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
       if (vm.variablesData.isVariablesLoading) {
         vm.variablesData.isVariablesLoading = false;
       }
 
-      const testVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "test",
-      );
+      const testVariable = vm.variablesData.values.find((v: any) => v.name === "test");
 
       // Check that the variable maintains SELECT_ALL value
       expect(testVariable.multiSelect).toBe(true);
@@ -495,9 +559,7 @@ describe("VariablesValueSelector", () => {
   describe("Data Loading and API Integration", () => {
     beforeEach(async () => {
       // Re-setup the streaming mock after clearAllMocks
-      mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
-        () => {},
-      );
+      mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(() => {});
 
       wrapper = createWrapper();
       await nextTick();
@@ -506,7 +568,7 @@ describe("VariablesValueSelector", () => {
       const vm = wrapper.vm as any;
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
 
@@ -518,9 +580,7 @@ describe("VariablesValueSelector", () => {
 
     it("should load variable options using REST API by default", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is in a state that allows loading
       regionVariable.isLoading = false;
@@ -541,16 +601,12 @@ describe("VariablesValueSelector", () => {
       await vm.loadVariableOptions(regionVariable);
 
       // Verify the streaming method was called (the component uses HTTP streaming by default)
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should handle API response correctly", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is in a state that allows loading
       regionVariable.isLoading = false;
@@ -603,13 +659,9 @@ describe("VariablesValueSelector", () => {
       streamService.fieldValues.mockRejectedValue(new Error("API Error"));
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
-      await expect(
-        vm.loadVariableOptions(regionVariable),
-      ).resolves.not.toThrow();
+      await expect(vm.loadVariableOptions(regionVariable)).resolves.not.toThrow();
     });
 
     it("should skip loading for invalid date ranges", async () => {
@@ -622,9 +674,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Since loadSingleVariableDataByName is private, we test through the public loadVariableOptions
       await vm.loadVariableOptions(regionVariable);
@@ -636,9 +686,7 @@ describe("VariablesValueSelector", () => {
 
     it("should set loading states correctly during API calls", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable starts in a state that allows loading
       regionVariable.isLoading = false;
@@ -700,9 +748,7 @@ describe("VariablesValueSelector", () => {
       );
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Reset the variable state
       regionVariable.options = [];
@@ -729,9 +775,7 @@ describe("VariablesValueSelector", () => {
       });
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Reset the variable to initial state
       regionVariable.options = [];
@@ -745,9 +789,7 @@ describe("VariablesValueSelector", () => {
 
     it("should preserve selected values when they exist in new options", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
       regionVariable.value = "us-east-1";
 
       await vm.loadVariableOptions(regionVariable);
@@ -757,9 +799,7 @@ describe("VariablesValueSelector", () => {
 
     it("should handle variables without query_data", async () => {
       const vm = wrapper.vm as any;
-      const constantVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "environment",
-      );
+      const constantVariable = vm.variablesData.values.find((v: any) => v.name === "environment");
 
       // Test through public API - loadVariableOptions
       await vm.loadVariableOptions(constantVariable);
@@ -774,9 +814,7 @@ describe("VariablesValueSelector", () => {
 
     it("should build correct query context", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is in a state that allows loading
       regionVariable.isLoading = false;
@@ -797,16 +835,12 @@ describe("VariablesValueSelector", () => {
       await vm.loadVariableOptions(regionVariable);
 
       // Verify streaming was called (which means query context was built)
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should include search text in query context", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is in a state that allows loading
       regionVariable.isLoading = false;
@@ -830,13 +864,10 @@ describe("VariablesValueSelector", () => {
       });
 
       // Verify streaming was called with search context
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
 
       // Verify the payload includes the search context in the SQL query
-      const callArgs =
-        mockStreamingComposable.fetchQueryDataWithHttpStream.mock.calls[0];
+      const callArgs = mockStreamingComposable.fetchQueryDataWithHttpStream.mock.calls[0];
       const payload = callArgs[0];
       expect(payload.queryReq.sql).toBeDefined();
     });
@@ -870,9 +901,8 @@ describe("VariablesValueSelector", () => {
       wrapper = createWrapper({ variablesConfig: dependentVariablesConfig });
       await nextTick();
 
-      const { buildVariablesDependencyGraph } = await import(
-        "@/utils/dashboard/variables/variablesDependencyUtils"
-      );
+      const { buildVariablesDependencyGraph } =
+        await import("@/utils/dashboard/variables/variablesDependencyUtils");
       expect(buildVariablesDependencyGraph).toHaveBeenCalled();
     });
 
@@ -890,12 +920,8 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const serviceVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "service",
-      );
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const serviceVariable = vm.variablesData.values.find((v: any) => v.name === "service");
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Region is still loading (not ready yet), service should wait
       // When parent is still loading (isVariablePartialLoaded = false but has a value),
@@ -922,19 +948,15 @@ describe("VariablesValueSelector", () => {
       // Wait for initialization
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
       if (vm.variablesData.isVariablesLoading) {
         vm.variablesData.isVariablesLoading = false;
       }
 
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
-      const serviceVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "service",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
+      const serviceVariable = vm.variablesData.values.find((v: any) => v.name === "service");
 
       // Ensure region is in a fully loaded state
       regionVariable.isLoading = false;
@@ -966,9 +988,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       // Should trigger loading of dependent variables via streaming
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should reset child variables when parent value changes", async () => {
@@ -976,18 +996,12 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
-      const serviceVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "service",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
+      const serviceVariable = vm.variablesData.values.find((v: any) => v.name === "service");
 
       // Set initial service value and options
       serviceVariable.value = "old-service";
-      serviceVariable.options = [
-        { label: "old-service", value: "old-service" },
-      ];
+      serviceVariable.options = [{ label: "old-service", value: "old-service" }];
 
       // Change parent value
       regionVariable.value = "new-region";
@@ -1011,7 +1025,7 @@ describe("VariablesValueSelector", () => {
       const vm = wrapper.vm as any;
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
 
@@ -1023,9 +1037,7 @@ describe("VariablesValueSelector", () => {
 
     it("should handle variable search", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is in a state that allows loading
       regionVariable.isLoading = false;
@@ -1048,16 +1060,12 @@ describe("VariablesValueSelector", () => {
       });
 
       // Should trigger streaming for search
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should cancel previous search operations", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Mock streaming to populate options with west results
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
@@ -1069,10 +1077,7 @@ describe("VariablesValueSelector", () => {
                 hits: [
                   {
                     field: "region",
-                    values: [
-                      { zo_sql_key: "us-west-1" },
-                      { zo_sql_key: "us-west-2" },
-                    ],
+                    values: [{ zo_sql_key: "us-west-1" }, { zo_sql_key: "us-west-2" }],
                   },
                 ],
               },
@@ -1102,18 +1107,14 @@ describe("VariablesValueSelector", () => {
       expect(Array.isArray(regionVariable.options)).toBe(true);
       if (regionVariable.options.length > 0) {
         expect(
-          regionVariable.options.some((opt: any) =>
-            opt.label.toLowerCase().includes("west"),
-          ),
+          regionVariable.options.some((opt: any) => opt.label.toLowerCase().includes("west")),
         ).toBe(true);
       }
     });
 
     it("should ignore search for non-query_values variables", async () => {
       const vm = wrapper.vm as any;
-      const constantVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "environment",
-      );
+      const constantVariable = vm.variablesData.values.find((v: any) => v.name === "environment");
 
       await vm.onVariableSearch(1, {
         variableItem: constantVariable,
@@ -1127,9 +1128,7 @@ describe("VariablesValueSelector", () => {
 
     it("should handle search with empty filter text", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Clear any previous calls
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockClear();
@@ -1140,9 +1139,7 @@ describe("VariablesValueSelector", () => {
       });
 
       // Should trigger streaming even with empty filter
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
   });
 
@@ -1173,9 +1170,7 @@ describe("VariablesValueSelector", () => {
 
     it("should update variable value correctly", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
       const originalValue = regionVariable.value;
 
       regionVariable.value = "new-region";
@@ -1187,9 +1182,7 @@ describe("VariablesValueSelector", () => {
 
     it("should filter multiSelect values against options when fully loaded", async () => {
       const vm = wrapper.vm as any;
-      const statusVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "status",
-      );
+      const statusVariable = vm.variablesData.values.find((v: any) => v.name === "status");
 
       statusVariable.isLoading = false;
       statusVariable.isVariableLoadingPending = false;
@@ -1212,9 +1205,7 @@ describe("VariablesValueSelector", () => {
 
     it("should preserve custom typed values in multiSelect", async () => {
       const vm = wrapper.vm as any;
-      const statusVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "status",
-      );
+      const statusVariable = vm.variablesData.values.find((v: any) => v.name === "status");
 
       statusVariable.isLoading = false;
       statusVariable.isVariableLoadingPending = false;
@@ -1228,9 +1219,6 @@ describe("VariablesValueSelector", () => {
 
     it("should not update if value has not changed", async () => {
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
 
       const emittedEventsBefore = wrapper.emitted("variablesData")?.length || 0;
 
@@ -1257,9 +1245,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Clear any previous calls from initialization
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockClear();
@@ -1267,9 +1253,7 @@ describe("VariablesValueSelector", () => {
       await vm.loadVariableOptions(regionVariable);
 
       // The component always uses HTTP streaming, regardless of WebSocket flag
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should use HTTP streaming when enabled", async () => {
@@ -1280,21 +1264,15 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       await vm.loadVariableOptions(regionVariable);
 
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should generate trace IDs for WebSocket requests", async () => {
-      const { isWebSocketEnabled, generateTraceContext } = await import(
-        "@/utils/zincutils"
-      );
+      const { isWebSocketEnabled, generateTraceContext } = await import("@/utils/zincutils");
       vi.mocked(isWebSocketEnabled).mockReturnValue(true);
       vi.mocked(generateTraceContext).mockReturnValue({
         traceId: "test-trace-123",
@@ -1304,9 +1282,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       await vm.loadVariableOptions(regionVariable);
 
@@ -1321,9 +1297,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Simulate WebSocket connection error
       mockWebSocketComposable.fetchQueryDataWithWebSocket.mockRejectedValue(
@@ -1350,9 +1324,7 @@ describe("VariablesValueSelector", () => {
 
       // Start a WebSocket operation
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
       await vm.loadVariableOptions(regionVariable);
 
       wrapper.unmount();
@@ -1369,16 +1341,12 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Test streaming functionality through loadVariableOptions
       await vm.loadVariableOptions(regionVariable);
 
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should handle streaming completion events", async () => {
@@ -1389,9 +1357,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Test through public API - simulate stream completion by loading options
       const streamService = await getStreamService();
@@ -1452,10 +1418,7 @@ describe("VariablesValueSelector", () => {
       });
       await nextTick();
 
-      expect(manager.getAllVisibleVariables).toHaveBeenCalledWith(
-        "tab1",
-        "panel1",
-      );
+      expect(manager.getAllVisibleVariables).toHaveBeenCalledWith("tab1", "panel1");
     });
 
     it("should handle tab-scoped variables", async () => {
@@ -1560,6 +1523,50 @@ describe("VariablesValueSelector", () => {
         );
       }
     });
+
+    it("should not snap an emptied 'all'-default multiSelect variable back to SELECT_ALL", async () => {
+      const nodeVar: any = {
+        name: "node",
+        type: "query_values",
+        multiSelect: true,
+        selectAllValueForMultiSelect: "all",
+        value: ["__SELECT_ALL__"],
+        options: [
+          { label: "n1", value: "n1" },
+          { label: "n2", value: "n2" },
+        ],
+        scope: "global",
+        isLoading: false,
+        isVariableLoadingPending: false,
+        isVariablePartialLoaded: true,
+      };
+
+      const manager = {
+        ...mockVariablesManager,
+        variablesData: { global: [nodeVar], tabs: {}, panels: {} },
+        getAllVisibleVariables: vi.fn(() => [nodeVar]),
+        // Mirror the real manager: store whatever value it's handed.
+        updateVariableValue: vi.fn((_name, _scope, _tabId, _panelId, value) => {
+          nodeVar.value = value;
+        }),
+      };
+
+      wrapper = createWrapper({ variablesManager: manager, scope: "global" });
+      await nextTick();
+
+      const vm = wrapper.vm as any;
+      expect(vm.variablesData.values[0].value).toEqual(["__SELECT_ALL__"]);
+
+      // Simulate the child emitting an empty selection (v-model sets the value),
+      // immediately followed by the update handler — same tick, no await between.
+      vm.variablesData.values[0].value = [];
+      await vm.onVariablesValueUpdated(0);
+      await nextTick();
+      await nextTick();
+
+      // Value must remain empty, not revert to SELECT_ALL.
+      expect(vm.variablesData.values[0].value).toEqual([]);
+    });
   });
 
   describe("Add Variable Button", () => {
@@ -1601,6 +1608,253 @@ describe("VariablesValueSelector", () => {
     });
   });
 
+  // An all-sentinel parent keeps its `_o2_all_` value across its OWN fetch, so
+  // its value never changes when the options arrive. Gating the manager
+  // notification on a changed VALUE therefore never fires for such a parent, and
+  // onVariablePartiallyLoaded is the only thing that marks a dependent child
+  // pending — so the child never loads and its picker stays permanently empty.
+  // Completion, not change, is what a child waits on.
+  describe("a chained child is notified when its all-sentinel parent finishes loading", () => {
+    const chainedConfig = {
+      list: [
+        {
+          name: "namespace",
+          type: "query_values",
+          label: "Namespace",
+          multiSelect: true,
+          selectAllValueForMultiSelect: "all",
+          loadOptionsWithAllDefault: true,
+          query_data: {
+            field: "k8s_namespace_name",
+            stream: "k8s_pod_memory_usage",
+            stream_type: "metrics",
+            max_record_size: 100,
+            filter: [],
+          },
+        },
+        {
+          name: "pod",
+          type: "query_values",
+          label: "Pod",
+          multiSelect: true,
+          selectAllValueForMultiSelect: "all",
+          loadOptionsWithAllDefault: true,
+          query_data: {
+            field: "k8s_pod_name",
+            stream: "k8s_pod_memory_usage",
+            stream_type: "metrics",
+            max_record_size: 100,
+            filter: [{ name: "k8s_namespace_name", operator: "IN", value: "$namespace" }],
+          },
+        },
+      ],
+    };
+
+    it("notifies the manager on completion even though the parent value never changed", async () => {
+      const { useVariablesManager } = await import("@/composables/dashboard/useVariablesManager");
+      const manager = useVariablesManager(((key: string) => key) as never);
+      await manager.initialize(chainedConfig.list as any, {});
+
+      const parent = manager.variablesData.global.find((v: any) => v.name === "namespace") as any;
+      const child = manager.variablesData.global.find((v: any) => v.name === "pod") as any;
+      // The premise of the whole test: the child is NOT already pending, so the
+      // only way it ever loads is the notification under test.
+      expect(child.isVariableLoadingPending).toBe(false);
+      const valueBefore = JSON.stringify(parent.value);
+
+      wrapper = createWrapper({
+        variablesConfig: chainedConfig,
+        variablesManager: manager,
+        scope: "global",
+      });
+      await nextTick();
+
+      const vm = wrapper.vm as any;
+      const parentVariable = vm.variablesData.values.find((v: any) => v.name === "namespace");
+
+      // The parent's own fetch completes and returns options, but an all-sentinel
+      // parent holds `_o2_all_` throughout — so its VALUE is unchanged. `end` on
+      // the data channel is the completion signal the component acts on.
+      mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
+        (payload: any, handlers: any) => {
+          handlers.data(payload, {
+            type: "search_response_hits",
+            content: {
+              results: {
+                hits: [
+                  {
+                    field: "k8s_namespace_name",
+                    values: [{ zo_sql_key: "argocd" }, { zo_sql_key: "monitor" }],
+                  },
+                ],
+              },
+            },
+          });
+          handlers.data(payload, { type: "end", content: {} });
+        },
+      );
+
+      await vm.loadVariableOptions(parentVariable);
+      // The child's own fetch is dispatched asynchronously once it is told.
+      await nextTick();
+      await new Promise((r) => setTimeout(r, 0));
+      await nextTick();
+
+      expect(JSON.stringify(parent.value), "parent value must be unchanged").toBe(valueBefore);
+
+      // The observable consequence, and the one the user sees: the child issues
+      // its own values query. Before the fix it was never notified, never became
+      // pending, never fetched, and its picker stayed empty forever.
+      const podCall = mockStreamingComposable.fetchQueryDataWithHttpStream.mock.calls.find(
+        (call: any) => JSON.stringify(call[0]).includes("k8s_pod_name"),
+      );
+      expect(podCall, "child never issued its values query").toBeTruthy();
+      expect(JSON.stringify(podCall[0])).not.toContain("$namespace");
+    });
+  });
+
+  // In manager mode the rendered set comes from the MANAGER's scope arrays, not
+  // from variablesConfig, so a filter on the config prop alone is ignored and
+  // every global variable renders on every tab. The narrowing must gate RENDERING
+  // only: filtering the managed list itself also removed the picker from
+  // variablesData.values, which is what checkAndLoadPendingVariables walks — so
+  // the pod picker was never loaded at all and stayed permanently empty.
+  describe("curatedTabs narrows the rendered set in manager mode", () => {
+    const managerWith = (vars: any[]) => ({
+      variablesData: { global: vars, tabs: {}, panels: {} },
+      getAllVisibleVariables: vi.fn(() => vars),
+      updateVariableValue: vi.fn(),
+      onVariablePartiallyLoaded: vi.fn(),
+    });
+
+    const scopedVars = () => [
+      {
+        name: "cluster",
+        type: "query_values",
+        scope: "global",
+        value: [],
+        curatedTabs: ["overview"],
+      },
+      { name: "pod", type: "query_values", scope: "global", value: [], curatedTabs: ["workloads"] },
+      { name: "always", type: "query_values", scope: "global", value: [] },
+    ];
+
+    const mountOn = async (tabId: string) => {
+      wrapper = createWrapper({
+        variablesManager: managerWith(scopedVars()),
+        scope: "global",
+        tabId,
+      });
+      await nextTick();
+      return wrapper;
+    };
+
+    /** Names whose container is actually shown (v-show sets display:none). */
+    const visibleNames = (w: any) =>
+      w
+        .findAll('[data-test^="dashboard-variable-"][data-test$="-container"]')
+        .filter((el: any) => (el.attributes("style") || "").indexOf("display: none") === -1)
+        .map((el: any) =>
+          el
+            .attributes("data-test")
+            .replace(/^dashboard-variable-/, "")
+            .replace(/-container$/, ""),
+        );
+
+    it("renders only the pickers the ACTIVE tab declares", async () => {
+      expect(visibleNames(await mountOn("overview"))).toEqual(["cluster", "always"]);
+    });
+
+    it("renders a different set on another tab — the tab-switch case", async () => {
+      expect(visibleNames(await mountOn("workloads"))).toEqual(["pod", "always"]);
+    });
+
+    // The bug this guards: an off-tab picker must still LOAD, because a curated
+    // panel on another tab substitutes its value. Narrowing the managed list
+    // instead of the rendering removed it from the loading walk entirely.
+    it("keeps every picker in the loading list regardless of tab", async () => {
+      const w = await mountOn("overview");
+      expect((w.vm as any).variablesData.values.map((v: any) => v.name)).toEqual([
+        "cluster",
+        "pod",
+        "always",
+      ]);
+    });
+  });
+
+  // When a parent finishes, the manager resets each chained child — value to [],
+  // options cleared, isVariableLoadingPending = true — so the child reloads under
+  // the new parent value. syncManagerVariablesToLocal then saw an all-sentinel
+  // child sitting at an "empty" value and helpfully restored `_o2_all_`, marked it
+  // partially loaded and CLEARED the pending flag — cancelling the very load the
+  // manager had just scheduled. The child then never queried and stayed empty.
+  describe("the local sync must not cancel a load the manager just scheduled", () => {
+    it("leaves a manager-reset child pending so it still fetches", async () => {
+      // Starts with a REAL previous value, so the first sync records it in
+      // oldVariablesData. That prior value is the precondition for the sync
+      // classifying the manager's later reset as "restore the all-default".
+      const child: any = {
+        name: "pod",
+        type: "query_values",
+        scope: "global",
+        multiSelect: true,
+        selectAllValueForMultiSelect: "all",
+        loadOptionsWithAllDefault: true,
+        value: ["pod-a"],
+        options: [{ label: "pod-a", value: "pod-a" }],
+        isLoading: false,
+        isVariableLoadingPending: false,
+        isVariablePartialLoaded: true,
+        query_data: {
+          field: "k8s_pod_name",
+          stream: "k8s_pod_memory_usage",
+          stream_type: "metrics",
+          max_record_size: 100,
+          filter: [{ name: "k8s_namespace_name", operator: "IN", value: "$namespace" }],
+        },
+      };
+      // reactive() so the component's deep watcher actually sees the manager
+      // mutate the child, exactly as the real manager does.
+      const state = reactive({ global: [child], tabs: {}, panels: {} });
+      const manager = {
+        variablesData: state,
+        getAllVisibleVariables: vi.fn(() => state.global),
+        updateVariableValue: vi.fn(),
+        onVariablePartiallyLoaded: vi.fn(),
+      };
+
+      wrapper = createWrapper({ variablesManager: manager, scope: "global" });
+      await nextTick();
+      const vm = wrapper.vm as any;
+      mockStreamingComposable.fetchQueryDataWithHttpStream.mockClear();
+
+      // Now the parent finishes and the manager resets the child exactly as
+      // onVariablePartiallyLoaded does: cleared value/options, pending again.
+      const managed: any = state.global[0];
+      managed.value = [];
+      managed.options = [];
+      managed.isVariablePartialLoaded = false;
+      managed.isVariableLoadingPending = true;
+      await nextTick();
+      await nextTick();
+      await new Promise((r) => setTimeout(r, 0));
+      await nextTick();
+
+      const pod = vm.variablesData.values.find((v: any) => v.name === "pod");
+      // Either still queued, or already picked up and loading — both mean the
+      // scheduled load survived. What must NOT happen is being declared loaded
+      // while empty, which silently cancels it.
+      void pod;
+      // The observable consequence, and the only order-independent one: pod
+      // actually goes to the wire. Before the fix the sync declared it loaded
+      // and cleared its pending flag, so it never queried at all.
+      const podCall = mockStreamingComposable.fetchQueryDataWithHttpStream.mock.calls.find(
+        (call: any) => JSON.stringify(call?.[0] ?? {}).includes("k8s_pod_name"),
+      );
+      expect(podCall, "pod never issued its values query").toBeTruthy();
+    });
+  });
+
   describe("Streaming Response Handlers", () => {
     beforeEach(() => {
       vi.clearAllMocks();
@@ -1611,9 +1865,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Mock streaming error
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
@@ -1640,9 +1892,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Mock streaming cancel
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
@@ -1668,9 +1918,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Mock streaming close with error code
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
@@ -1694,9 +1942,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Mock streaming progress
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
@@ -1730,9 +1976,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Mock streaming with blank values
       mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
@@ -1744,11 +1988,7 @@ describe("VariablesValueSelector", () => {
                 hits: [
                   {
                     field: "region",
-                    values: [
-                      { zo_sql_key: "" },
-                      { zo_sql_key: "us-east-1" },
-                      { zo_sql_key: "" },
-                    ],
+                    values: [{ zo_sql_key: "" }, { zo_sql_key: "us-east-1" }, { zo_sql_key: "" }],
                   },
                 ],
               },
@@ -1779,9 +2019,7 @@ describe("VariablesValueSelector", () => {
       // Set variables as loading
       vm.variablesData.isVariablesLoading = true;
 
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       if (regionVariable) {
         regionVariable.isLoading = true;
@@ -1796,9 +2034,7 @@ describe("VariablesValueSelector", () => {
         });
 
         // Should not call API immediately
-        expect(
-          mockStreamingComposable.fetchQueryDataWithHttpStream,
-        ).not.toHaveBeenCalled();
+        expect(mockStreamingComposable.fetchQueryDataWithHttpStream).not.toHaveBeenCalled();
 
         // Complete the loading
         regionVariable.isLoading = false;
@@ -1814,9 +2050,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is ready
       regionVariable.isLoading = false;
@@ -1831,9 +2065,7 @@ describe("VariablesValueSelector", () => {
       });
 
       // Should trigger load
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
   });
 
@@ -1868,9 +2100,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       try {
         await vm.loadVariableOptions(regionVariable);
@@ -1919,17 +2149,12 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       if (regionVariable) {
         // Mock empty response with blank values
         const streamService = await getStreamService();
-        streamService.fieldValues.mockResolvedValueOnce([
-          { region: "" },
-          { region: null },
-        ]);
+        streamService.fieldValues.mockResolvedValueOnce([{ region: "" }, { region: null }]);
 
         await vm.loadVariableOptions(regionVariable);
 
@@ -1947,9 +2172,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       if (regionVariable) {
         // Mock promise rejection
@@ -1984,9 +2207,7 @@ describe("VariablesValueSelector", () => {
       const vm = wrapper.vm as any;
 
       // Start a variable loading operation
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
       const loadPromise = vm.loadVariableOptions(regionVariable);
 
       // Unmount component immediately
@@ -2006,9 +2227,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Test through public API - should handle invalid time gracefully
       try {
@@ -2037,14 +2256,10 @@ describe("VariablesValueSelector", () => {
       );
       expect(dynamicFiltersVar).toBeDefined();
 
-      dynamicFiltersVar.value = [
-        { name: "host", operator: "=", value: "localhost", streams: [] },
-      ];
+      dynamicFiltersVar.value = [{ name: "host", operator: "=", value: "localhost", streams: [] }];
 
       // 3. Trigger loadVariableOptions for another variable ('region')
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Ensure variable is in a state that allows loading
       regionVariable.isLoading = false;
@@ -2064,9 +2279,7 @@ describe("VariablesValueSelector", () => {
       // 4. Assert that fetchQueryDataWithHttpStream IS called
       await vm.loadVariableOptions(regionVariable);
 
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
     });
 
     it("should clear options when API returns empty hits", async () => {
@@ -2074,9 +2287,7 @@ describe("VariablesValueSelector", () => {
       await nextTick();
 
       const vm = wrapper.vm as any;
-      const regionVariable = vm.variablesData.values.find(
-        (v: any) => v.name === "region",
-      );
+      const regionVariable = vm.variablesData.values.find((v: any) => v.name === "region");
 
       // Pre-set options and value to simulate stale state
       regionVariable.options = [{ label: "stale_value", value: "stale_value" }];
@@ -2172,25 +2383,19 @@ describe("VariablesValueSelector", () => {
       // Wait for initialization
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
       if (vm.variablesData.isVariablesLoading) {
         vm.variablesData.isVariablesLoading = false;
       }
 
-      const dynamicQueryVar = vm.variablesData.values.find(
-        (v: any) => v.name === "dynamicQuery",
-      );
+      const dynamicQueryVar = vm.variablesData.values.find((v: any) => v.name === "dynamicQuery");
       expect(dynamicQueryVar).toBeDefined();
 
       // Ensure variables have their values set
-      const streamVarItem = vm.variablesData.values.find(
-        (v: any) => v.name === "streamVar",
-      );
-      const fieldVarItem = vm.variablesData.values.find(
-        (v: any) => v.name === "fieldVar",
-      );
+      const streamVarItem = vm.variablesData.values.find((v: any) => v.name === "streamVar");
+      const fieldVarItem = vm.variablesData.values.find((v: any) => v.name === "fieldVar");
       expect(streamVarItem.value).toBe("my-logs-stream");
       expect(fieldVarItem.value).toBe("response_code");
 
@@ -2212,9 +2417,7 @@ describe("VariablesValueSelector", () => {
       await vm.loadVariableOptions(dynamicQueryVar);
 
       // Streaming should have been called
-      expect(
-        mockStreamingComposable.fetchQueryDataWithHttpStream,
-      ).toHaveBeenCalled();
+      expect(mockStreamingComposable.fetchQueryDataWithHttpStream).toHaveBeenCalled();
 
       // The payload should contain the resolved stream name
       if (capturedPayload) {
@@ -2250,9 +2453,7 @@ describe("VariablesValueSelector", () => {
       expect(wrapper.exists()).toBe(true);
 
       const vm = wrapper.vm as any;
-      const queryVar = vm.variablesData.values.find(
-        (v: any) => v.name === "queryVar",
-      );
+      const queryVar = vm.variablesData.values.find((v: any) => v.name === "queryVar");
       expect(queryVar).toBeDefined();
     });
 
@@ -2300,9 +2501,7 @@ describe("VariablesValueSelector", () => {
       expect(wrapper.exists()).toBe(true);
 
       const vm = wrapper.vm as any;
-      const multiVar = vm.variablesData.values.find(
-        (v: any) => v.name === "multiVar",
-      );
+      const multiVar = vm.variablesData.values.find((v: any) => v.name === "multiVar");
       expect(multiVar).toBeDefined();
       expect(Array.isArray(multiVar.value)).toBe(true);
     });
@@ -2345,16 +2544,14 @@ describe("VariablesValueSelector", () => {
       // Wait for initialization
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
       if (vm.variablesData.isVariablesLoading) {
         vm.variablesData.isVariablesLoading = false;
       }
 
-      const plainVar = vm.variablesData.values.find(
-        (v: any) => v.name === "plainQueryVar",
-      );
+      const plainVar = vm.variablesData.values.find((v: any) => v.name === "plainQueryVar");
 
       if (plainVar) {
         plainVar.isLoading = false;
@@ -2413,10 +2610,7 @@ describe("VariablesValueSelector", () => {
                 hits: [
                   {
                     field: "actual_field_name",
-                    values: [
-                      { zo_sql_key: "value1" },
-                      { zo_sql_key: "value2" },
-                    ],
+                    values: [{ zo_sql_key: "value1" }, { zo_sql_key: "value2" }],
                   },
                 ],
               },
@@ -2443,16 +2637,14 @@ describe("VariablesValueSelector", () => {
       // Wait for initialization
       let attempts = 0;
       while (vm.variablesData.isVariablesLoading && attempts < 20) {
-        await new Promise(resolve => setTimeout(resolve, 50));
+        await new Promise((resolve) => setTimeout(resolve, 50));
         attempts++;
       }
       if (vm.variablesData.isVariablesLoading) {
         vm.variablesData.isVariablesLoading = false;
       }
 
-      const queryWithRef = vm.variablesData.values.find(
-        (v: any) => v.name === "queryWithRef",
-      );
+      const queryWithRef = vm.variablesData.values.find((v: any) => v.name === "queryWithRef");
 
       if (queryWithRef) {
         queryWithRef.isLoading = false;
@@ -2469,10 +2661,7 @@ describe("VariablesValueSelector", () => {
                   hits: [
                     {
                       field: "actual_field_name",
-                      values: [
-                        { zo_sql_key: "value1" },
-                        { zo_sql_key: "value2" },
-                      ],
+                      values: [{ zo_sql_key: "value1" }, { zo_sql_key: "value2" }],
                     },
                   ],
                 },
@@ -2524,19 +2713,83 @@ describe("VariablesValueSelector", () => {
       });
       await nextTick();
 
-      const { buildVariablesDependencyGraph } = await import(
-        "@/utils/dashboard/variables/variablesDependencyUtils"
-      );
+      const { buildVariablesDependencyGraph } =
+        await import("@/utils/dashboard/variables/variablesDependencyUtils");
       expect(buildVariablesDependencyGraph).toHaveBeenCalled();
 
       const vm = wrapper.vm as any;
-      const dynamicQueryVar = vm.variablesData.values.find(
-        (v: any) => v.name === "dynamicQuery",
-      );
+      const dynamicQueryVar = vm.variablesData.values.find((v: any) => v.name === "dynamicQuery");
       expect(dynamicQueryVar).toBeDefined();
       // The variable should have stream and field pointing to variable references
       expect(dynamicQueryVar.query_data.stream).toBe("$streamVar");
       expect(dynamicQueryVar.query_data.field).toBe("$fieldVar");
+    });
+  });
+
+  describe("Variable filters sharing a name prefix", () => {
+    afterEach(async () => {
+      const { addLabelsToSQlQuery } = await import("@/utils/query/sqlUtils");
+      vi.mocked(addLabelsToSQlQuery).mockImplementation((query: string) => Promise.resolve(query));
+    });
+
+    it("resolves each filter placeholder to its own variable", async () => {
+      const { addLabelsToSQlQuery } = await import("@/utils/query/sqlUtils");
+      vi.mocked(addLabelsToSQlQuery).mockImplementation(
+        async (query: string, labels: any[]) =>
+          `${query} WHERE ${labels.map((l: any) => `${l.name} = '${l.value}'`).join(" AND ")}`,
+      );
+
+      wrapper = createWrapper({
+        variablesConfig: {
+          list: [
+            { name: "traceid", type: "constant", label: "traceid", value: "abc123" },
+            { name: "traceid_sql", type: "constant", label: "traceid_sql", value: "xyz789" },
+            { name: "svc", type: "constant", label: "svc", value: "api" },
+            {
+              name: "spans",
+              type: "query_values",
+              label: "spans",
+              multiSelect: false,
+              query_data: {
+                field: "span_id",
+                stream: "default",
+                stream_type: "logs",
+                max_record_size: 10,
+                filter: [
+                  { name: "a", operator: "=", value: "$traceid_sql" },
+                  { name: "b", operator: "=", value: "${traceid}" },
+                  { name: "c", operator: "=", value: "$svc" },
+                ],
+              },
+            },
+          ],
+        },
+        initialVariableValues: { value: {} },
+      });
+      await nextTick();
+
+      const vm = wrapper.vm as any;
+      const byName = (name: string) => vm.variablesData.values.find((v: any) => v.name === name);
+      ["traceid", "traceid_sql", "svc"].forEach((name) => {
+        byName(name).isVariablePartialLoaded = true;
+      });
+      byName("svc").value = ["api", "web"];
+
+      let capturedSql = "";
+      mockStreamingComposable.fetchQueryDataWithHttpStream.mockImplementation(
+        (payload: any, handlers: any) => {
+          capturedSql = atob(payload.queryReq.sql);
+          handlers.complete(payload, { type: "end" });
+        },
+      );
+
+      const spans = byName("spans");
+      spans.isLoading = false;
+      spans.isVariablePartialLoaded = true;
+      spans.isVariableLoadingPending = false;
+      await vm.loadVariableOptions(spans);
+
+      expect(capturedSql).toContain("WHERE a = 'xyz789' AND b = 'abc123' AND c = 'api', 'web'");
     });
   });
 });

@@ -19,7 +19,12 @@ const testLogger = require('../utils/test-logger.js');
 const { ensureMetricsIngested } = require('../utils/shared-metrics-setup.js');
 const path = require('path');
 
-test.describe.configure({ mode: "serial" });
+// Parallel-safe: each test uses a unique per-test source stream
+// (generateUniqueMetricsStreamName) and its own destination stream, has no
+// order dependency, and the beforeAll/beforeEach hooks are idempotent and
+// non-destructive. Running in parallel lets these tests use idle workers instead
+// of monopolising a single worker serially (the file was the slowest pole at ~6m).
+test.describe.configure({ mode: "parallel" });
 
 // Use stored authentication state from global setup instead of logging in each test
 const authFile = path.join(__dirname, '../utils/auth/user.json');
@@ -136,12 +141,12 @@ test.describe("Metrics Pipeline Tests", { tag: ['@all', '@pipelines', '@metrics'
     expect(isMetricsVisible).toBe(true);
     testLogger.info('Metrics option found in stream type dropdown');
 
-    // Close dialog by pressing Escape
-    await page.keyboard.press('Escape');
+    // Close dialog by clicking outside
+    await pageManager.pipelinesPage.clickBodyCorner();
     await page.waitForTimeout(500);
 
     // Navigate back to pipelines list
-    await page.keyboard.press('Escape');
+    await pageManager.pipelinesPage.clickBodyCorner();
 
     testLogger.info('Test completed: Metrics stream type visibility check');
   });
@@ -393,10 +398,10 @@ test.describe("Metrics Pipeline Tests", { tag: ['@all', '@pipelines', '@metrics'
     testLogger.info('Query generated with metrics stream name', { streamName: METRICS_STREAM });
 
     // The scheduled pipeline has a nested dialog overlay that intercepts clicks
-    // Try pressing Escape multiple times and use force click for the cancel button
-    await page.keyboard.press('Escape');
+    // Dismiss dialogs by clicking outside and use force click for the cancel button
+    await pageManager.pipelinesPage.clickBodyCorner();
     await page.waitForTimeout(500);
-    await page.keyboard.press('Escape');
+    await pageManager.pipelinesPage.clickBodyCorner();
     await page.waitForTimeout(500);
 
     // Use force click to bypass the dialog overlay
@@ -456,10 +461,10 @@ test.describe("Metrics Pipeline Tests", { tag: ['@all', '@pipelines', '@metrics'
       testLogger.info('Second metrics stream not available, skipping stream change test');
     }
 
-    // Clean up - use force click and escape to dismiss dialogs
-    await page.keyboard.press('Escape');
+    // Clean up - dismiss dialogs by clicking outside
+    await pageManager.pipelinesPage.clickBodyCorner();
     await page.waitForTimeout(500);
-    await page.keyboard.press('Escape');
+    await pageManager.pipelinesPage.clickBodyCorner();
     await page.waitForTimeout(500);
     await pageManager.pipelinesPage.clickCancelPipelineBtnForce();
 
@@ -524,7 +529,7 @@ test.describe("Metrics Pipeline Tests", { tag: ['@all', '@pipelines', '@metrics'
     }
 
     // Cancel and close
-    await page.keyboard.press('Escape');
+    await pageManager.pipelinesPage.clickBodyCorner();
 
     testLogger.info('Test completed: After flattening toggle check');
   });
@@ -594,19 +599,17 @@ test.describe("Metrics Pipeline Tests", { tag: ['@all', '@pipelines', '@metrics'
     await pageManager.pipelinesPage.searchPipeline(pipelineName);
     await page.waitForTimeout(1000);
 
-    // Find and click the toggle switch using POM
-    const toggleSwitch = pageManager.pipelinesPage.getPipelineToggle(pipelineName).first();
-    const isToggleVisible = await toggleSwitch.isVisible().catch(() => false);
-    expect(isToggleVisible).toBe(true);
-
-    // Click to toggle
+    let toggleSwitch = await pageManager.pipelinesPage.openPipelineRowMenuAndGetToggle(pipelineName);
     await toggleSwitch.click();
     await page.waitForTimeout(1000);
-    testLogger.info('Pipeline toggle clicked');
+    testLogger.info('Pipeline paused');
 
-    // Toggle back
+    // Second toggle: resume → ResumePipelineDialog opens asking "from now" vs
+    // "from where paused". Click the primary button to confirm resume; without
+    // this, the dialog stays open and blocks subsequent UI clicks (cleanup).
+    toggleSwitch = await pageManager.pipelinesPage.openPipelineRowMenuAndGetToggle(pipelineName);
     await toggleSwitch.click();
-    await page.waitForTimeout(1000);
+    await pageManager.pipelinesPage.confirmResumePipelineDialog();
     testLogger.info('Pipeline toggled back');
 
     // Cleanup using helper

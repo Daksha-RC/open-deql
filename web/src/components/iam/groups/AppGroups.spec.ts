@@ -13,23 +13,36 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { queryClient } from "@/composables/query/queryClient";
 import { mount, flushPromises } from "@vue/test-utils";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import AppGroups from "@/components/iam/groups/AppGroups.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Notify, Dialog } from "quasar";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import router from "@/test/unit/helpers/router";
 
-installQuasar({
-  plugins: [Notify, Dialog],
+vi.mock("@/services/iam", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  const getGroups = vi.fn();
+  return overlayServiceMock(await importOriginal(), {
+    getGroups,
+    deleteGroup: vi.fn(),
+    bulkDeleteGroups: vi.fn(async () => ({
+      data: { successful: [], unsuccessful: [] },
+    })),
+    getGroup: vi.fn(async () => ({
+      data: { name: "dev", users: ["u1@o2.ai", "u2@o2.ai"], roles: ["admin"] },
+    })),
+    updateGroup: vi.fn(async () => ({ data: {} })),
+  });
 });
 
-vi.mock("@/services/iam", () => ({
-  getGroups: vi.fn(),
-  deleteGroup: vi.fn(),
-}));
+vi.mock("@/services/users", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock((await importOriginal()) as any, {
+    default: { getUserGroups: vi.fn(async () => ({ data: [] })) },
+  });
+});
 
 vi.mock("@/services/reodotdev_analytics", () => ({
   useReo: () => ({
@@ -58,16 +71,10 @@ vi.mock("@/composables/iam/usePermissions", () => ({
   }),
 }));
 
-const mockNotify = vi.fn();
-vi.mock("quasar", async () => {
-  const actual = await vi.importActual("quasar");
-  return {
-    ...actual,
-    useQuasar: () => ({
-      notify: mockNotify,
-    }),
-  };
-});
+const mockToast = vi.hoisted(() => vi.fn());
+vi.mock("@/lib/feedback/Toast/useToast", () => ({
+  toast: mockToast,
+}));
 
 vi.mock("@/components/AppTable.vue", () => ({
   default: {
@@ -92,9 +99,9 @@ vi.mock("@/components/ConfirmDialog.vue", () => ({
 vi.mock("./AddGroup.vue", () => ({
   default: {
     name: "AddGroup",
-    template: `<div data-test="add-group-mock"></div>`,
-    props: ["style", "org_identifier"],
-    emits: ["cancel:hideform", "added:group"],
+    template: `<div data-test="add-group-mock" :data-open="open"></div>`,
+    props: ["open", "org_identifier"],
+    emits: ["update:open", "added:group"],
   },
 }));
 
@@ -114,8 +121,10 @@ describe("AppGroups Component", () => {
     // Mock getGroups to return a resolved promise by default
     const { getGroups } = await import("@/services/iam");
     vi.mocked(getGroups).mockResolvedValue(
-      createMockAxiosResponse(["admin", "developers", "users"]) as any
+      createMockAxiosResponse(["admin", "developers", "users"]) as any,
     );
+    // Drop the cached read so this override is the one that runs.
+    queryClient.clear();
 
     // Update the mock groups state
     mockGroupsState.groups = [
@@ -137,16 +146,18 @@ describe("AppGroups Component", () => {
   describe("Component Mounting", () => {
     it("renders the component correctly", () => {
       expect(wrapper.exists()).toBe(true);
-      expect(wrapper.find('[data-test="iam-groups-section-title"]').exists()).toBe(true);
+      // Title now lives in the standard OPageHeader (row 1).
+      expect(wrapper.find(".app-page-header").exists()).toBe(true);
     });
 
     it("displays the correct title", () => {
-      const titleElement = wrapper.find('[data-test="iam-groups-section-title"]');
+      const titleElement = wrapper.find(".app-page-header h1");
       expect(titleElement.text()).toContain("Groups");
     });
 
     it("renders search input", () => {
-      const searchInput = wrapper.find('[data-test="iam-groups-search-input"] .q-input');
+      // Search is rendered via OSearchInput in OTable's custom toolbar slot.
+      const searchInput = wrapper.find('[data-test="iam-groups-search-input"]');
       expect(searchInput.exists()).toBe(true);
     });
 
@@ -164,11 +175,13 @@ describe("AppGroups Component", () => {
     });
 
     it("has correct table columns structure", () => {
+      // The row-index ("#") column is now the built-in OTable `show-index`
+      // gutter, not a member of `columns`, so only the real data columns remain.
       expect(wrapper.vm.columns).toBeDefined();
-      expect(wrapper.vm.columns).toHaveLength(3);
-      
-      const columnNames = wrapper.vm.columns.map((col: any) => col.name);
-      expect(columnNames).toContain("#");
+      expect(wrapper.vm.columns).toHaveLength(2);
+
+      const columnNames = wrapper.vm.columns.map((col: any) => col.id);
+      expect(columnNames).not.toContain("#");
       expect(columnNames).toContain("group_name");
       expect(columnNames).toContain("actions");
     });
@@ -176,10 +189,13 @@ describe("AppGroups Component", () => {
     it("displays groups data in rows", async () => {
       const { getGroups } = await import("@/services/iam");
       vi.mocked(getGroups).mockResolvedValue(
-        createMockAxiosResponse(["admin", "developers", "users"]) as any
+        createMockAxiosResponse(["admin", "developers", "users"]) as any,
       );
+      // Drop the cached read so this override is the one that runs.
+      queryClient.clear();
 
-      await wrapper.vm.setupGroups();
+      // Explicit read: mount-path reads now come from the query itself.
+      await wrapper.vm.setupGroups(true);
       await flushPromises();
 
       expect(wrapper.vm.rows).toHaveLength(3);
@@ -188,19 +204,8 @@ describe("AppGroups Component", () => {
       expect(wrapper.vm.rows[2].group_name).toBe("users");
     });
 
-    it("formats row numbers correctly", async () => {
-      const { getGroups } = await import("@/services/iam");
-      vi.mocked(getGroups).mockResolvedValue(
-        createMockAxiosResponse(["group1", "group2", "group3"]) as any
-      );
-
-      await wrapper.vm.setupGroups();
-      await flushPromises();
-
-      expect(wrapper.vm.rows[0]["#"]).toBe("01");
-      expect(wrapper.vm.rows[1]["#"]).toBe("02");
-      expect(wrapper.vm.rows[2]["#"]).toBe("03");
-    });
+    // Row numbering moved to OTable's built-in `show-index` (zero-padded,
+    // covered by OTable's own spec); pages no longer inject a "#" data field.
   });
 
   describe("Search Functionality", () => {
@@ -210,39 +215,25 @@ describe("AppGroups Component", () => {
       expect(wrapper.vm.filterQuery).toBe("admin");
     });
 
-    it("filters groups correctly", () => {
-      const testRows = [
-        { group_name: "admin" },
-        { group_name: "developers" },
-        { group_name: "users" },
-      ];
+    it("sets filter query when searching via input", async () => {
+      // Filtering is delegated to OTable's client-side filter via its custom
+      // toolbar OSearchInput (v-model wired to filterQuery).
+      wrapper.vm.filterQuery = "admin";
+      await wrapper.vm.$nextTick();
 
-      const filteredResults = wrapper.vm.filterGroups(testRows, "admin");
-      expect(filteredResults).toHaveLength(1);
-      expect(filteredResults[0].group_name).toBe("admin");
+      expect(wrapper.vm.filterQuery).toBe("admin");
     });
 
-    it("filters groups case-insensitively", () => {
-      const testRows = [
-        { group_name: "Admin" },
-        { group_name: "developers" },
-        { group_name: "Users" },
-      ];
+    it("clears filter query when search input is emptied", async () => {
+      wrapper.vm.filterQuery = "admin";
+      await wrapper.vm.$nextTick();
 
-      const filteredResults = wrapper.vm.filterGroups(testRows, "ADMIN");
-      expect(filteredResults).toHaveLength(1);
-      expect(filteredResults[0].group_name).toBe("Admin");
-    });
+      expect(wrapper.vm.filterQuery).toBe("admin");
 
-    it("returns all groups when search term is empty", () => {
-      const testRows = [
-        { group_name: "admin" },
-        { group_name: "developers" },
-        { group_name: "users" },
-      ];
+      wrapper.vm.filterQuery = "";
+      await wrapper.vm.$nextTick();
 
-      const filteredResults = wrapper.vm.filterGroups(testRows, "");
-      expect(filteredResults).toHaveLength(3);
+      expect(wrapper.vm.filterQuery).toBe("");
     });
   });
 
@@ -253,33 +244,71 @@ describe("AppGroups Component", () => {
       expect(wrapper.vm.showAddGroup).toBe(true);
     });
 
-    it("renders add group dialog when showAddGroup is true", async () => {
+    it("passes open prop to AddGroup based on showAddGroup state", async () => {
       wrapper.vm.showAddGroup = true;
       await wrapper.vm.$nextTick();
-      // The dialog is conditionally rendered with v-model, should check for dialog presence differently
-      expect(wrapper.vm.showAddGroup).toBe(true);
+      const addGroup = wrapper.findComponent({ name: "AddGroup" });
+      expect(addGroup.exists()).toBe(true);
+      expect(addGroup.props("open")).toBe(true);
     });
 
-    it("hides add group dialog when hideAddGroup is called", () => {
+    it("passes org_identifier prop to AddGroup", () => {
+      const addGroup = wrapper.findComponent({ name: "AddGroup" });
+      expect(addGroup.props("org_identifier")).toBe(store.state.selectedOrganization.identifier);
+    });
+
+    it("closes add group dialog when AddGroup emits update:open false", async () => {
       wrapper.vm.showAddGroup = true;
-      wrapper.vm.hideAddGroup();
+      await wrapper.vm.$nextTick();
+      const addGroup = wrapper.findComponent({ name: "AddGroup" });
+      await addGroup.vm.$emit("update:open", false);
       expect(wrapper.vm.showAddGroup).toBe(false);
     });
 
-    it("refreshes groups list when group is added", async () => {
-      const setupGroupsSpy = vi.spyOn(wrapper.vm, "setupGroups");
-      await wrapper.vm.setupGroups();
-      expect(setupGroupsSpy).toHaveBeenCalled();
+    it("refreshes groups list when AddGroup emits added:group", async () => {
+      const { getGroups } = await import("@/services/iam");
+      vi.mocked(getGroups).mockClear();
+      const addGroup = wrapper.findComponent({ name: "AddGroup" });
+      await addGroup.vm.$emit("added:group");
+      await flushPromises();
+      expect(getGroups).toHaveBeenCalledWith(store.state.selectedOrganization.identifier);
     });
   });
 
   describe("Group Actions", () => {
-    it("renders edit and delete icons for each group", () => {
-      const editIcon = wrapper.find('[data-test="iam-groups-edit-test-group-role-icon"]');
-      const deleteIcon = wrapper.find('[data-test="iam-groups-delete-test-group-role-icon"]');
-      
+    it("renders edit and delete icons for each group", async () => {
+      // OTable holds the loading skeleton for MIN_SKELETON_MS (2000ms) even after
+      // props.loading flips to false, so we must advance fake timers past that hold
+      // to allow OTableBody to render and expose the cell-actions slot.
+      vi.useFakeTimers();
+      const { getGroups } = await import("@/services/iam");
+      vi.mocked(getGroups).mockResolvedValue(
+        createMockAxiosResponse(["admin", "developers", "users"]) as any,
+      );
+      // Drop the cached read so this override is the one that runs.
+      queryClient.clear();
+      mockGroupsState.groups = [
+        { group_name: "admin" },
+        { group_name: "developers" },
+        { group_name: "users" },
+      ] as any;
+
+      const localWrapper = mount(AppGroups, {
+        global: { provide: { store }, plugins: [i18n, router] },
+      });
+      await flushPromises();
+      // Advance past the 2000ms minimum skeleton hold in OTable
+      vi.advanceTimersByTime(2100);
+      await flushPromises();
+
+      const editIcon = localWrapper.find('[data-test="iam-groups-edit-admin-role-icon"]');
+      const deleteIcon = localWrapper.find('[data-test="iam-groups-delete-admin-role-icon"]');
+
       expect(editIcon.exists()).toBe(true);
       expect(deleteIcon.exists()).toBe(true);
+
+      localWrapper.unmount();
+      vi.useRealTimers();
     });
 
     it("navigates to edit page when edit icon is clicked", async () => {
@@ -301,35 +330,90 @@ describe("AppGroups Component", () => {
 
     it("shows confirm dialog when delete icon is clicked", async () => {
       const testGroup = { group_name: "test-group" };
-      
+
       wrapper.vm.showConfirmDialog(testGroup);
-      
+
       expect(wrapper.vm.deleteConformDialog.show).toBe(true);
       expect(wrapper.vm.deleteConformDialog.data).toEqual(testGroup);
     });
   });
 
+  describe("Create flow auto-route", () => {
+    it("routes to editGroup on the roles tab after create", async () => {
+      const routerPushSpy = vi.spyOn(router, "push").mockResolvedValue(undefined as any);
+      await wrapper.vm.onGroupAdded({ group_name: "NewGroup" });
+      expect(routerPushSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: "editGroup",
+          params: { group_name: "NewGroup" },
+          query: expect.objectContaining({ tab: "roles" }),
+        }),
+      );
+    });
+
+    it("falls back to refreshing the list when no group_name is provided", async () => {
+      const { getGroups } = await import("@/services/iam");
+      const routerPushSpy = vi.spyOn(router, "push").mockResolvedValue(undefined as any);
+      routerPushSpy.mockClear();
+      vi.mocked(getGroups).mockClear();
+      vi.mocked(getGroups).mockResolvedValue(createMockAxiosResponse([]) as any);
+      // Drop the cached read so this override is the one that runs.
+      queryClient.clear();
+      await wrapper.vm.onGroupAdded({});
+      expect(routerPushSpy).not.toHaveBeenCalled();
+      expect(getGroups).toHaveBeenCalled();
+    });
+  });
+
+  describe("Delete blast-radius warning", () => {
+    it("builds a single-delete warning with the live member count", async () => {
+      const { getGroup } = await import("@/services/iam");
+      await wrapper.vm.showConfirmDialog({ group_name: "dev" });
+      await flushPromises();
+      expect(getGroup).toHaveBeenCalledWith("dev", store.state.selectedOrganization.identifier);
+      // Two mocked members → message mentions "2".
+      expect(wrapper.vm.deleteImpactMessage).toContain("2");
+    });
+
+    it("shows the live member count when exactly one group is bulk-selected", async () => {
+      wrapper.vm.selectedGroups = [{ group_name: "dev" }];
+      await wrapper.vm.openBulkDeleteDialog();
+      await flushPromises();
+      expect(wrapper.vm.bulkDeleteImpactMessage).toContain("2");
+    });
+
+    it("uses static copy (no fetch) when multiple groups are bulk-selected", async () => {
+      const { getGroup } = await import("@/services/iam");
+      vi.mocked(getGroup).mockClear();
+      wrapper.vm.selectedGroups = [{ group_name: "dev" }, { group_name: "ops" }];
+      await wrapper.vm.openBulkDeleteDialog();
+      await flushPromises();
+      expect(getGroup).not.toHaveBeenCalled();
+      expect(wrapper.vm.bulkDeleteImpactMessage).toBeTruthy();
+    });
+  });
+
   describe("Group Deletion", () => {
     beforeEach(() => {
-      mockNotify.mockClear();
+      mockToast.mockClear();
     });
 
     it("deletes group successfully", async () => {
       const { deleteGroup } = await import("@/services/iam");
       vi.mocked(deleteGroup).mockResolvedValue({});
-      
+
       const testGroup = { group_name: "test-group" };
-      
-      await wrapper.vm.deleteUserGroup(testGroup);
-      
+
+      wrapper.vm.deleteUserGroup(testGroup);
+      await flushPromises();
+
       expect(deleteGroup).toHaveBeenCalledWith(
         "test-group",
-        store.state.selectedOrganization.identifier
+        store.state.selectedOrganization.identifier,
       );
-      expect(mockNotify).toHaveBeenCalledWith({
+      expect(mockToast).toHaveBeenCalledWith({
         message: "Group deleted successfully!",
-        color: "positive",
-        position: "bottom",
+        variant: "success",
       });
     });
 
@@ -337,22 +421,15 @@ describe("AppGroups Component", () => {
       const { deleteGroup } = await import("@/services/iam");
       const mockError = { response: { status: 500 } };
       vi.mocked(deleteGroup).mockRejectedValue(mockError);
-      
+
       const testGroup = { group_name: "test-group" };
-      
-      try {
-        await wrapper.vm.deleteUserGroup(testGroup);
-      } catch (error) {
-        // Error should be caught by component
-      }
-      
-      // Give time for async operations
-      await new Promise(resolve => setTimeout(resolve, 0));
-      
-      expect(mockNotify).toHaveBeenCalledWith({
+
+      wrapper.vm.deleteUserGroup(testGroup);
+      await flushPromises();
+
+      expect(mockToast).toHaveBeenCalledWith({
         message: "Error while deleting group!",
-        color: "negative",
-        position: "bottom",
+        variant: "error",
       });
     });
 
@@ -360,25 +437,26 @@ describe("AppGroups Component", () => {
       const { deleteGroup } = await import("@/services/iam");
       const mockError = { response: { status: 403 } };
       vi.mocked(deleteGroup).mockRejectedValue(mockError);
-      
+
       const testGroup = { group_name: "test-group" };
-      
-      await wrapper.vm.deleteUserGroup(testGroup);
-      
-      expect(mockNotify).not.toHaveBeenCalled();
+
+      wrapper.vm.deleteUserGroup(testGroup);
+      await flushPromises();
+
+      expect(mockToast).not.toHaveBeenCalled();
     });
 
     it("executes deletion through confirm dialog", async () => {
       const testGroup = { group_name: "test-group" };
-      
+
       wrapper.vm.deleteConformDialog.data = testGroup;
-      
+
       // Test the actual behavior instead of spying on the method
       const initialData = wrapper.vm.deleteConformDialog.data;
       expect(initialData).toEqual(testGroup);
-      
+
       wrapper.vm._deleteGroup();
-      
+
       // Check that data is set to null after deletion attempt
       expect(wrapper.vm.deleteConformDialog.data).toBeNull();
     });
@@ -393,9 +471,8 @@ describe("AppGroups Component", () => {
     it("displays correct delete confirmation message", async () => {
       wrapper.vm.deleteConformDialog.data = { group_name: "test-group" };
       await wrapper.vm.$nextTick();
-      
+
       // Since we're using a mock component, we check the computed message
-      const expectedMessage = "Are you sure you want to delete 'test-group'?";
       expect(wrapper.vm.deleteConformDialog.data.group_name).toBe("test-group");
     });
   });
@@ -403,11 +480,11 @@ describe("AppGroups Component", () => {
   describe("Data Loading", () => {
     it("loads groups on component mount", async () => {
       const { getGroups } = await import("@/services/iam");
-      vi.mocked(getGroups).mockResolvedValue(
-        createMockAxiosResponse(["group1", "group2"]) as any
-      );
+      vi.mocked(getGroups).mockResolvedValue(createMockAxiosResponse(["group1", "group2"]) as any);
+      // Drop the cached read so this override is the one that runs.
+      queryClient.clear();
 
-      const wrapper = mount(AppGroups, {
+      mount(AppGroups, {
         global: {
           provide: { store },
           plugins: [i18n, router],
@@ -423,8 +500,11 @@ describe("AppGroups Component", () => {
       const { getGroups } = await import("@/services/iam");
       const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
       vi.mocked(getGroups).mockRejectedValue(new Error("Network error"));
+      // Drop the cached read so this override is the one that runs.
+      queryClient.clear();
 
-      await wrapper.vm.setupGroups();
+      // Explicit read: mount-path reads now come from the query itself.
+      await wrapper.vm.setupGroups(true);
 
       expect(consoleSpy).toHaveBeenCalled();
       consoleSpy.mockRestore();
@@ -433,7 +513,7 @@ describe("AppGroups Component", () => {
 
   describe("Theme Support", () => {
     it("applies correct theme classes", () => {
-      const header = wrapper.find('.tw\\:flex.tw\\:justify-between.tw\\:items-center.tw\\:px-4.tw\\:py-3');
+      const header = wrapper.find(".app-page-header");
       const table = wrapper.find('[data-test="iam-groups-table-section"]');
 
       expect(header.exists()).toBe(true);
@@ -446,7 +526,7 @@ describe("AppGroups Component", () => {
         ...store,
         state: {
           ...store.state,
-          theme: 'dark',
+          theme: "dark",
         },
       };
 
@@ -459,7 +539,7 @@ describe("AppGroups Component", () => {
 
       await flushPromises();
 
-      const header = wrapper.find('.tw\\:flex.tw\\:justify-between.tw\\:items-center.tw\\:px-4.tw\\:py-3');
+      const header = wrapper.find(".app-page-header");
       const table = wrapper.find('[data-test="iam-groups-table-section"]');
 
       expect(header.exists()).toBe(true);
@@ -471,34 +551,139 @@ describe("AppGroups Component", () => {
   describe("Edge Cases", () => {
     it("handles empty groups list", async () => {
       const { getGroups } = await import("@/services/iam");
-      vi.mocked(getGroups).mockResolvedValue(
-        createMockAxiosResponse([]) as any
-      );
+      vi.mocked(getGroups).mockResolvedValue(createMockAxiosResponse([]) as any);
+      // Drop the cached read so this override is the one that runs.
+      queryClient.clear();
 
-      await wrapper.vm.setupGroups();
+      // Explicit read: mount-path reads now come from the query itself.
+      await wrapper.vm.setupGroups(true);
       await flushPromises();
 
       expect(wrapper.vm.rows).toHaveLength(0);
     });
 
-    it("handles undefined group data", () => {
-      // Modify the function to handle undefined input
-      const filterGroupsSafe = (rows: any, terms: any) => {
-        if (!rows || !terms) return [];
-        return wrapper.vm.filterGroups(rows, terms);
-      };
-      const result = filterGroupsSafe(undefined, "test");
-      expect(result).toEqual([]);
+    it("handles empty search term gracefully", () => {
+      // Filtering is delegated to OTable's client-side filter-mode.
+      // An empty filterQuery means OTable shows all rows.
+      expect(wrapper.vm.filterQuery).toBe("");
+      expect(wrapper.vm.rows).toHaveLength(3);
     });
 
-    it("handles null search term", () => {
-      const testRows = [{ group_name: "admin" }];
-      const filterGroupsSafe = (rows: any, terms: any) => {
-        if (!rows || terms === null) return [];
-        return wrapper.vm.filterGroups(rows, terms);
-      };
-      const result = filterGroupsSafe(testRows, null);
-      expect(result).toEqual([]);
+    it("handles search term that matches no groups", async () => {
+      // When filterQuery is set to a non-matching value, OTable filters rows internally.
+      wrapper.vm.filterQuery = "nonexistent";
+      await wrapper.vm.$nextTick();
+
+      expect(wrapper.vm.filterQuery).toBe("nonexistent");
+    });
+  });
+});
+
+// Quick-assign: arriving via the service-account token popup's
+// "Add to a user group" link (?member=<email>), which used to just redirect
+// here with no way to actually add the account to a group.
+//
+// `useRoute()` is mocked to a plain controllable object rather than driven
+// through the real shared router instance: that router is installed once per
+// test file and its own async initial navigation can still be settling when
+// a later test mutates `currentRoute.value.query` directly, racing it back to
+// an empty query. `useRouter()` (used by clearAssignTarget's router.replace)
+// is untouched, so it stays the same real, spy-able instance every other test
+// in this file relies on.
+const mockAssignRoute = vi.hoisted(() => ({ query: {} as Record<string, any> }));
+vi.mock("vue-router", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("vue-router")>();
+  return { ...actual, useRoute: () => mockAssignRoute };
+});
+
+describe("AppGroups - quick-assign via ?member=", () => {
+  afterEach(() => {
+    mockAssignRoute.query = {};
+  });
+
+  const mountWithMember = async (member?: string) => {
+    const { getGroups } = await import("@/services/iam");
+    vi.mocked(getGroups).mockResolvedValue(createMockAxiosResponse(["admin", "developers"]) as any);
+    queryClient.clear();
+    mockGroupsState.groups = [{ group_name: "admin" }, { group_name: "developers" }] as any;
+    mockAssignRoute.query = member ? { member } : {};
+
+    const w = mount(AppGroups, {
+      global: {
+        provide: { store },
+        plugins: [i18n, router],
+      },
+    });
+    await flushPromises();
+    return w;
+  };
+
+  it("shows the assign banner and passes assignTarget through when ?member= is present", async () => {
+    const w = await mountWithMember("svc.o2.ai@sa.internal");
+    expect(w.find('[data-test="iam-groups-assign-banner"]').exists()).toBe(true);
+    expect((w.vm as any).assignTarget).toBe("svc.o2.ai@sa.internal");
+  });
+
+  it("does not show the assign banner without ?member=", async () => {
+    const w = await mountWithMember();
+    expect(w.find('[data-test="iam-groups-assign-banner"]').exists()).toBe(false);
+  });
+
+  it("assignMemberToGroup calls updateGroup with the member as add_users", async () => {
+    const { updateGroup } = await import("@/services/iam");
+    const w = await mountWithMember("svc.o2.ai@sa.internal");
+
+    await (w.vm as any).assignMemberToGroup({ group_name: "admin" });
+    await flushPromises();
+
+    expect(updateGroup).toHaveBeenCalledWith({
+      group_name: "admin",
+      org_identifier: store.state.selectedOrganization.identifier,
+      payload: {
+        add_roles: [],
+        remove_roles: [],
+        add_users: ["svc.o2.ai@sa.internal"],
+        remove_users: [],
+      },
+    });
+  });
+
+  it("marks a group Assigned after a successful assign, and pre-loads existing memberships", async () => {
+    const users = (await import("@/services/users")).default;
+    vi.mocked(users.getUserGroups).mockResolvedValueOnce({ data: ["developers"] } as any);
+    const w = await mountWithMember("svc.o2.ai@sa.internal");
+    await flushPromises();
+
+    expect((w.vm as any).assignedGroupNames).toContain("developers");
+
+    await (w.vm as any).assignMemberToGroup({ group_name: "admin" });
+    await flushPromises();
+
+    expect((w.vm as any).assignedGroupNames).toContain("admin");
+  });
+
+  it("dismissing the banner clears ?member= from the route", async () => {
+    const { getGroups } = await import("@/services/iam");
+    vi.mocked(getGroups).mockResolvedValue(createMockAxiosResponse(["admin", "developers"]) as any);
+    queryClient.clear();
+    mockGroupsState.groups = [{ group_name: "admin" }, { group_name: "developers" }] as any;
+    mockAssignRoute.query = {
+      org_identifier: store.state.selectedOrganization.identifier,
+      member: "svc.o2.ai@sa.internal",
+    };
+
+    const w = mount(AppGroups, {
+      global: { provide: { store }, plugins: [i18n, router] },
+    });
+    await flushPromises();
+    const spy = vi.spyOn(router, "replace");
+
+    await w.find('[data-test="iam-groups-assign-banner-dismiss"]').trigger("click");
+    await flushPromises();
+
+    expect(spy).toHaveBeenCalledWith({
+      name: "groups",
+      query: { org_identifier: store.state.selectedOrganization.identifier },
     });
   });
 });

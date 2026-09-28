@@ -4,6 +4,7 @@
 
 import { expect } from "@playwright/test";
 import { waitForValuesStreamComplete } from "../../playwright-tests/utils/streaming-helpers.js";
+import testLogger from "../../playwright-tests/utils/test-logger.js";
 import {
   SELECTORS,
   getVariableSelector,
@@ -12,6 +13,7 @@ import {
   getVariableLoadingIndicator,
   getPanelRefreshBtn,
   getMenuItemByText,
+  getTabSelector,
 } from "./dashboard-selectors.js";
 import {
   selectStreamFromDropdown,
@@ -31,6 +33,9 @@ export default class DashboardVariablesScoped {
   // Common UI Helper Methods
   // These replace raw selectors in spec files
   // ==========================================
+
+  // Note: getVariableSelectorLocator() and getEditVariableBtnLocator() are
+  // defined once further below (canonical copies).
 
   /**
    * Wait for dialog to be visible
@@ -91,6 +96,36 @@ export default class DashboardVariablesScoped {
   }
 
   /**
+   * Wait for a specific variable's inner popover to be visible
+   * @param {string} variableName - Variable name/label
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 5000)
+   * @returns {Promise<import('@playwright/test').Locator>}
+   */
+  async waitForVariablePopoverVisible(variableName, options = {}) {
+    const { timeout = 5000 } = options;
+    const popover = this.page.locator(
+      `[data-test="variable-selector-${variableName}-inner-popover"]`
+    );
+    await popover.waitFor({ state: "visible", timeout });
+    return popover;
+  }
+
+  /**
+   * Wait for a specific variable's inner popover to be hidden
+   * @param {string} variableName - Variable name/label
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 3000)
+   * @returns {Promise<void>}
+   */
+  async waitForVariablePopoverHidden(variableName, options = {}) {
+    const { timeout = 3000 } = options;
+    await this.page
+      .locator(`[data-test="variable-selector-${variableName}-inner-popover"]`)
+      .waitFor({ state: "hidden", timeout });
+  }
+
+  /**
    * Change a variable's selected value by clicking the dropdown and selecting an option
    * @param {string} variableName - Variable name/label
    * @param {Object} options - Options
@@ -118,43 +153,44 @@ export default class DashboardVariablesScoped {
       apiMonitor = monitorVariableAPICalls(this.page, { expectedCount: expectedApiCalls, timeout: 15000 });
     }
 
-    // Wait for variable dropdown to be visible and ready
-    const varDropdown = this.page.getByLabel(variableName, { exact: true });
-    await varDropdown.waitFor({ state: "visible", timeout });
+    // Wait for variable dropdown trigger to be visible and ready
+    const varTrigger = this.page.locator(`[data-test="variable-selector-${variableName}-inner-trigger"]`);
+    await varTrigger.waitFor({ state: "visible", timeout });
 
     // Ensure network is idle before clicking
     try {
       await this.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
     } catch { /* acceptable if timeout */ }
 
-    await varDropdown.click();
+    // Opening the dropdown mid-load is a silent no-op — see waitForVariableIdle.
+    await this.waitForVariableIdle(variableName);
 
-    // Wait for dropdown menu to open - use last() to target the most recently opened menu
-    await this.page.locator(SELECTORS.MENU).last().waitFor({ state: "visible", timeout });
+    await varTrigger.click();
 
-    // Build the target option locator - prefer text-based selection for reliability
-    const menu = this.page.locator(SELECTORS.MENU).last();
+    // Wait for the variable's own inner popover to open
+    const popoverSelector = `[data-test="variable-selector-${variableName}-inner-popover"]`;
+    await this.page.locator(popoverSelector).waitFor({ state: "visible", timeout });
+
+    // Build the target option locator scoped to this variable's popover
+    const menu = this.page.locator(popoverSelector);
     let targetOption;
     if (optionText) {
-      // Text-based selection: more reliable than index-based, avoids wrong option in CI
-      targetOption = menu.getByRole("option", { name: optionText, exact: true });
+      targetOption = menu.locator(`[data-test-value="${optionText}"]`);
     } else {
-      // Index-based selection: scope to visible menu to avoid matching stale options
+      // Use the option locator scoped to the menu popover, indexed by position
       targetOption = menu.locator(SELECTORS.OPTION).nth(optionIndex);
     }
     const optionTimeout = Math.max(timeout, 15000); // At least 15s for options under load
 
-    // Retry mechanism: if option not visible, reopen dropdown
+    // Retry mechanism: if option not visible, close and reopen dropdown
     try {
       await targetOption.waitFor({ state: "visible", timeout: optionTimeout });
     } catch (e) {
-      // Option not visible - may need to wait for data to load
-      // Close and reopen dropdown to trigger fresh load
+      // Close by pressing Escape, then reopen
       await this.page.keyboard.press('Escape');
       await this.waitForMenuHidden({ timeout: 3000 });
-      await this.page.waitForTimeout(500); // Brief pause
-      await varDropdown.click();
-      await this.page.locator(SELECTORS.MENU).last().waitFor({ state: "visible", timeout });
+      await varTrigger.click();
+      await this.page.locator(popoverSelector).waitFor({ state: "visible", timeout });
       await targetOption.waitFor({ state: "visible", timeout: optionTimeout });
     }
 
@@ -164,6 +200,10 @@ export default class DashboardVariablesScoped {
       selectedValue = await targetOption.textContent();
       selectedValue = selectedValue?.trim() || null;
     }
+
+    // Nothing may be mid-load when the value commits, or the dependent's reload is
+    // silently dropped and callers asserting on it see nothing — see waitForValuesQuiet.
+    await this.waitForValuesQuiet({ timeout: Math.max(10000, timeout) });
 
     // Click the specified option
     await targetOption.click();
@@ -180,8 +220,8 @@ export default class DashboardVariablesScoped {
       result.apiResult = await apiMonitor;
     }
 
-    // Return result if we have anything to return
-    if (Object.keys(result).length > 0) {
+    // Return result - always return an object when called with options
+    if (Object.keys(result).length > 0 || returnSelectedValue || monitorApi) {
       return result;
     }
   }
@@ -195,8 +235,8 @@ export default class DashboardVariablesScoped {
    */
   async selectMenuItem(text, options = {}) {
     const { exact = true, timeout = 5000 } = options;
-    // Use Playwright's getByText for safe text matching (avoids regex metacharacter issues)
-    const item = this.page.locator(SELECTORS.MENU_ITEM).getByText(text, { exact });
+    // Use data-test-label for items whose value may be a UUID but label is text
+    const item = this.page.locator(`[data-test$="-option"][data-test-label="${text}"]`);
     await item.waitFor({ state: "visible", timeout });
     await item.click();
   }
@@ -230,8 +270,8 @@ export default class DashboardVariablesScoped {
         }
       } catch (e) {
         lastError = e;
-        // Wait briefly and retry
-        await this.page.waitForTimeout(1000); // Increased from 500ms to 1s
+        // Wait for DOM to settle and retry
+        await this.page.waitForLoadState('domcontentloaded');
       }
     }
 
@@ -277,11 +317,15 @@ export default class DashboardVariablesScoped {
 
   /**
    * Wait for add panel button (empty dashboard state)
+   *
+   * 30s to match setupTestDashboard(): renders only after the dashboard GET and
+   * variables init, well after the header createDashboard() waits on.
+   *
    * @param {Object} options - Wait options
-   * @param {number} options.timeout - Timeout in ms (default: 10000)
+   * @param {number} options.timeout - Timeout in ms (default: 30000)
    */
   async waitForAddPanelBtn(options = {}) {
-    const { timeout = 10000 } = options;
+    const { timeout = 30000 } = options;
     await this.page.locator(SELECTORS.ADD_PANEL_BTN).waitFor({ state: "visible", timeout });
   }
 
@@ -312,12 +356,574 @@ export default class DashboardVariablesScoped {
   }
 
   /**
+   * Wait for a variable selector to stop moving: OSelect renders a spinner while
+   * the variable's values query runs, and until it resolves the selector shows
+   * the "(No Data Found)" placeholder (VariableQueryValueSelector falls back to
+   * it whenever there are no options and nothing selected). A value read before
+   * then captures the placeholder rather than what the variable settles on —
+   * which may legitimately be the placeholder itself, so this waits for the
+   * rendered value to hold rather than for any particular value.
+   * @param {string} variableName - Variable name
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 20000)
+   * @param {number} options.quietMs - How long the value must hold (default: 1500)
+   * @returns {Promise<import('@playwright/test').Locator>}
+   */
+  async waitForVariableValueSettled(variableName, options = {}) {
+    const { timeout = 20000, quietMs = 1500 } = options;
+    const selector = this.getVariableSelectorLocator(variableName);
+    await selector.waitFor({ state: "visible", timeout });
+    const spinner = this.getVariableDropdown(variableName).locator('[role="status"]');
+
+    const deadline = Date.now() + timeout;
+    let lastText = null;
+    let stableSince = Date.now();
+    while (Date.now() < deadline) {
+      const isLoading = (await spinner.count().catch(() => 0)) > 0;
+      const text = await selector.innerText().catch(() => null);
+      if (isLoading || text === null || text !== lastText) {
+        lastText = text;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= quietMs) {
+        return selector;
+      }
+      await this.page.waitForTimeout(250);
+    }
+    return selector;
+  }
+
+  /**
    * Get variable loading indicator
    * @param {string} variableName - Variable name
    * @returns {import('@playwright/test').Locator}
    */
   getVariableLoadingIndicator(variableName) {
     return this.page.locator(getVariableLoadingIndicator(variableName));
+  }
+
+  /**
+   * Get variable selector locator on the dashboard by name
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableSelectorLocator(variableName) {
+    return this.page.locator(getVariableSelector(variableName));
+  }
+
+  /**
+   * Get an any-panel locator (matches any dashboard panel) by index
+   * @param {number} index - 0-based index (default 0)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getAnyPanel(index = 0) {
+    return this.page.locator(SELECTORS.PANEL_ANY).nth(index);
+  }
+
+  /**
+   * Get a panel's grid slot by index. Present for every panel, including
+   * off-screen ones that only render a lazy placeholder.
+   * @param {number} index - 0-based index
+   * @returns {import('@playwright/test').Locator}
+   */
+  getGridStackItem(index = 0) {
+    return this.page.locator(SELECTORS.GRID_STACK_ITEM).nth(index);
+  }
+
+  // ==========================================
+  // Locator getters (behavior-preserving relocation of raw spec selectors)
+  // ==========================================
+
+  /**
+   * Get the "add panel" (empty dashboard) button locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getAddPanelBtnLocator() {
+    return this.page.locator(SELECTORS.ADD_PANEL_BTN);
+  }
+
+  /**
+   * Get the dashboard settings button locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getSettingBtnLocator() {
+    return this.page.locator(SELECTORS.SETTING_BTN);
+  }
+
+  /**
+   * Get the settings/dialog overlay locator (matches legacy dialog + ODrawer/ODialog)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getDialogLocator() {
+    return this.page.locator(SELECTORS.DIALOG);
+  }
+
+  /**
+   * Get the dashboard settings drawer locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getSettingsDrawerLocator() {
+    return this.page.locator(SELECTORS.DIALOG_CARD);
+  }
+
+  /**
+   * Get the "Add Variable" button locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getAddVariableBtnLocator() {
+    return this.page.locator(SELECTORS.ADD_VARIABLE_BTN);
+  }
+
+  /**
+   * Get the variable settings draggable container locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableDragLocator() {
+    return this.page.locator(SELECTORS.VARIABLE_DRAG);
+  }
+
+  /**
+   * Get the variable "scope" select locator (edit-variable form)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableScopeSelectLocator() {
+    return this.page.locator(SELECTORS.VARIABLE_SCOPE_SELECT);
+  }
+
+  /**
+   * Get the variable "save" button locator (variable form)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableSaveBtnLocator() {
+    return this.page.locator(SELECTORS.VARIABLE_SAVE_BTN);
+  }
+
+  /**
+   * Get the variable "cancel" button locator (variable form)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableCancelBtnLocator() {
+    return this.page.locator('[data-test="dashboard-variable-cancel-btn"]');
+  }
+
+  /**
+   * Get the variable stream-type select locator (variable form)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableStreamTypeSelectLocator() {
+    return this.page.locator(SELECTORS.VARIABLE_STREAM_TYPE_SELECT);
+  }
+
+  /**
+   * Get the constant-value field locator (constant variable form)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableConstantValueFieldLocator() {
+    return this.page.locator('[data-test="dashboard-variable-constant-value-field"]');
+  }
+
+  /**
+   * Get a dashboard-list entry locator by its title text
+   * @param {string} title - Dashboard title
+   * @returns {import('@playwright/test').Locator}
+   */
+  getDashboardTitleLocator(title) {
+    return this.page.getByTitle(title, { exact: true });
+  }
+
+  /**
+   * Get the (unscoped) dashboard panel container locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getPanelContainerLocator() {
+    return this.page.locator(SELECTORS.PANEL_CONTAINER);
+  }
+
+  /**
+   * Get the variable-name form field locator (dashboard-variable-name)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableNameLocator() {
+    return this.page.locator(SELECTORS.VARIABLE_NAME);
+  }
+
+  /**
+   * Get the "No Data Found" indicator locator for a variable query-value selector
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableNoDataLocator() {
+    return this.page.locator('[data-test="variable-query-value-selector-no-data"]');
+  }
+
+  /**
+   * Get the Query Inspector executed-query editor locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getQueryEditorLocator() {
+    return this.page.locator(SELECTORS.QUERY_EDITOR);
+  }
+
+  /**
+   * Get the global dashboard refresh button locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getDashboardRefreshBtnLocator() {
+    return this.page.locator(SELECTORS.REFRESH_BTN);
+  }
+
+  /**
+   * Get the Query Inspector dialog locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getQueryInspectorDialogLocator() {
+    return this.page.locator('[data-test="query-inspector-dialog"]');
+  }
+
+  /**
+   * Get the Query Inspector dialog close button locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getQueryInspectorCloseBtn() {
+    return this.page.locator(
+      '[data-test="query-inspector-dialog"] [data-test="o-dialog-close-btn"]'
+    );
+  }
+
+  /**
+   * Get generic ARIA-role option locators ([role="option"])
+   * @returns {import('@playwright/test').Locator}
+   */
+  getAriaRoleOptions() {
+    return this.page.locator('[role="option"]');
+  }
+
+  /**
+   * Get the inner selected-value element locator scoped to a variable selector
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableInnerValueLocator(variableName) {
+    return this.page
+      .locator(getVariableSelector(variableName))
+      .locator('[data-test$="-inner-value"]');
+  }
+
+  /**
+   * Get the dashboard list search input locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getDashboardSearchLocator() {
+    return this.page.locator(SELECTORS.SEARCH);
+  }
+
+  /**
+   * Get a dashboard tab locator by title
+   * @param {string} tabTitle - Tab title (e.g., "Tab1")
+   * @returns {import('@playwright/test').Locator}
+   */
+  getTabLocator(tabTitle) {
+    return this.page.locator(getTabSelector(tabTitle));
+  }
+
+  /**
+   * Get the edit-variable button locator (in settings) by variable name
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getEditVariableBtnLocator(variableName) {
+    return this.page.locator(getEditVariableBtn(variableName));
+  }
+
+  /**
+   * Get a variable dropdown inner trigger locator by name
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableTriggerLocator(variableName) {
+    return this.page.locator(
+      `[data-test="variable-selector-${variableName}-inner-trigger"]`
+    );
+  }
+
+  /**
+   * Get a variable's inner popover locator by name
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariablePopoverLocator(variableName) {
+    return this.page.locator(
+      `[data-test="variable-selector-${variableName}-inner-popover"]`
+    );
+  }
+
+  /**
+   * Get a variable's inner option locators by name
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableInnerOption(variableName) {
+    return this.page.locator(
+      `[data-test="variable-selector-${variableName}-inner-option"]`
+    );
+  }
+
+  /**
+   * Get the generic OSelect option locators (any `*-option`)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getRoleOptionLocator() {
+    return this.page.locator(SELECTORS.ROLE_OPTION);
+  }
+
+  /**
+   * Get the generic OSelect option locators (alias of getRoleOptionLocator)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getOptionLocator() {
+    return this.page.locator(SELECTORS.OPTION);
+  }
+
+  /**
+   * Get the generic popover/menu locators (any `*-popover`)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getMenuLocator() {
+    return this.page.locator(SELECTORS.MENU);
+  }
+
+  /**
+   * Get the panel refresh button locators
+   * @returns {import('@playwright/test').Locator}
+   */
+  getPanelRefreshBtnLocator() {
+    return this.page.locator(SELECTORS.PANEL_REFRESH_BTN);
+  }
+
+  /**
+   * Get the variable-name field input locator (variable form)
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableNameField() {
+    return this.page.locator('[data-test="dashboard-variable-name-field"]');
+  }
+
+  /**
+   * Get a variable element scoped within a numbered panel (`dashboard-panel-{n}`)
+   * @param {number|string} panelNumber - Panel data-test number
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableInPanelNumber(panelNumber, variableName) {
+    return this.page
+      .locator(`[data-test="dashboard-panel-${panelNumber}"]`)
+      .locator(`[data-test="dashboard-variable-${variableName}"]`);
+  }
+
+  /**
+   * Get a variable selector scoped within a panel container matched by title
+   * @param {string} panelTitle - Panel title (data-test-panel-title)
+   * @param {string} variableName - Variable name
+   * @returns {import('@playwright/test').Locator}
+   */
+  getVariableSelectorWithinPanelTitle(panelTitle, variableName) {
+    return this.page
+      .locator(
+        `[data-test="dashboard-panel-container"][data-test-panel-title="${panelTitle}"]`
+      )
+      .locator(getVariableSelector(variableName));
+  }
+
+  /**
+   * Wait for a dashboard tab (by title) to be visible
+   * @param {string} tabTitle - Tab title (e.g., "Tab1")
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 10000)
+   */
+  async waitForTabVisible(tabTitle, options = {}) {
+    const { timeout = 10000 } = options;
+    await this.page.locator(getTabSelector(tabTitle)).waitFor({ state: "visible", timeout });
+  }
+
+  /**
+   * Click a dashboard tab by title
+   * @param {string} tabTitle - Tab title (e.g., "Tab1")
+   */
+  async clickTab(tabTitle) {
+    await this.page.locator(getTabSelector(tabTitle)).click();
+  }
+
+  /**
+   * Wait for tab content to load (empty add-panel button OR any panel visible)
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 5000)
+   */
+  async waitForTabContentLoaded(options = {}) {
+    const { timeout = 5000 } = options;
+    await this.page
+      .locator(SELECTORS.ADD_PANEL_BTN)
+      .or(this.page.locator(SELECTORS.PANEL_ANY))
+      .first()
+      .waitFor({ state: "visible", timeout });
+  }
+
+  /**
+   * Wait for the panel editor to open (chart type item OR apply button visible)
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 15000)
+   */
+  async waitForPanelEditorOpen(options = {}) {
+    const { timeout = 15000 } = options;
+    await this.page
+      .locator(SELECTORS.CHART_LINE_ITEM)
+      .or(this.page.locator(SELECTORS.APPLY_BTN))
+      .first()
+      .waitFor({ state: "visible", timeout });
+  }
+
+  /**
+   * Wait for the "Add Variable" button to be visible
+   * @param {Object} options - Wait options
+   * @param {number} options.timeout - Timeout in ms (default: 10000)
+   */
+  async waitForAddVariableBtnVisible(options = {}) {
+    const { timeout = 10000 } = options;
+    await this.page.locator(SELECTORS.ADD_VARIABLE_BTN).waitFor({ state: "visible", timeout });
+  }
+
+  /**
+   * Click the "Add Variable" button
+   */
+  async clickAddVariableBtn() {
+    await this.page.locator(SELECTORS.ADD_VARIABLE_BTN).click();
+  }
+
+  /**
+   * Fill the variable name field
+   * @param {string} name - Variable name
+   */
+  async fillVariableName(name) {
+    await this.page.locator('[data-test="dashboard-variable-name-field"]').fill(name);
+  }
+
+  /**
+   * Select a variable scope (e.g. "global" | "tabs" | "panels") via the scope dropdown
+   * @param {string} scopeValue - data-test-value of the scope option
+   */
+  async selectVariableScope(scopeValue) {
+    await this.page.locator(SELECTORS.VARIABLE_SCOPE_SELECT).click();
+    await this.page
+      .locator('[data-test="dashboard-variable-scope-select-popover"]')
+      .waitFor({ state: "visible", timeout: 5000 });
+    await this.page
+      .locator(`[data-test="dashboard-variable-scope-select-option"][data-test-value="${scopeValue}"]`)
+      .click();
+    await this.page
+      .locator('[data-test="dashboard-variable-scope-select-popover"]')
+      .waitFor({ state: "hidden", timeout: 5000 });
+  }
+
+  /**
+   * Select a tab (by label) in the variable "Selected Tabs" dropdown, then close it
+   * @param {string} tabLabel - data-test-label of the tab option (e.g. "Tab2", "Default")
+   */
+  async selectVariableTab(tabLabel) {
+    const tabsSelect = this.page.locator(SELECTORS.VARIABLE_TABS_SELECT);
+    await tabsSelect.waitFor({ state: "visible" });
+    await tabsSelect.click();
+    await this.page
+      .locator('[data-test="dashboard-variable-tabs-select-popover"]')
+      .waitFor({ state: "visible", timeout: 5000 });
+    const option = this.page.locator(
+      `[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`
+    );
+    await option.waitFor({ state: "visible" });
+    await option.click();
+    await tabsSelect.click();
+    await this.page
+      .locator('[data-test="dashboard-variable-tabs-select-popover"]')
+      .waitFor({ state: "hidden", timeout: 5000 });
+  }
+
+  /**
+   * Select a panel (by label) in the variable "Selected Panels" dropdown, then close it
+   * @param {string} panelLabel - data-test-label of the panel option (e.g. "Panel1")
+   */
+  async selectVariablePanel(panelLabel) {
+    const panelsSelect = this.page.locator(SELECTORS.VARIABLE_PANELS_SELECT);
+    await panelsSelect.waitFor({ state: "visible" });
+    await panelsSelect.click();
+    await this.page
+      .locator('[data-test="dashboard-variable-panels-select-popover"]')
+      .waitFor({ state: "visible", timeout: 5000 });
+    const option = this.page.locator(
+      `[data-test="dashboard-variable-panels-select-option"][data-test-label="${panelLabel}"]`
+    );
+    await option.waitFor({ state: "visible" });
+    await option.click();
+    await panelsSelect.click();
+    await this.page
+      .locator('[data-test="dashboard-variable-panels-select-popover"]')
+      .waitFor({ state: "hidden", timeout: 5000 });
+  }
+
+  /**
+   * Click the "Add Filter" button in the variable form
+   */
+  async clickAddFilter() {
+    await this.page.locator(SELECTORS.ADD_FILTER_BTN).click();
+  }
+
+  /**
+   * Select a filter field name in the last filter row
+   * @param {string} fieldName - Field name / data-test-value of the option
+   */
+  async selectFilterName(fieldName) {
+    const filterNameSelector = this.page.locator(SELECTORS.FILTER_NAME_SELECTOR).last();
+    await filterNameSelector.waitFor({ state: "visible" });
+    await filterNameSelector.click();
+    await this.page
+      .locator('[data-test="dashboard-query-values-filter-name-selector-search"]')
+      .fill(fieldName);
+    await this.page
+      .locator(`[data-test="dashboard-query-values-filter-name-selector-option"][data-test-value="${fieldName}"]`)
+      .click();
+  }
+
+  /**
+   * Select a filter operator in the last filter row
+   * @param {string} operator - Operator data-test-value (e.g. "=")
+   */
+  async selectFilterOperator(operator) {
+    const operatorSelector = this.page.locator(SELECTORS.FILTER_OPERATOR_SELECTOR).last();
+    await operatorSelector.click();
+    await this.page
+      .locator(`[data-test="dashboard-query-values-filter-operator-selector-option"][data-test-value="${operator}"]`)
+      .click();
+  }
+
+  /**
+   * Get the last filter-value OCombobox input locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getFilterValueInput() {
+    return this.page
+      .locator('[data-test*="filter-value-selector"][data-test$="-input"]')
+      .last();
+  }
+
+  /**
+   * Get the filter-value dependency options locator
+   * @returns {import('@playwright/test').Locator}
+   */
+  getFilterValueOptions() {
+    return this.page.locator('[data-test*="filter-value-selector"][data-test$="-option"]');
+  }
+
+  /**
+   * Get all filter-value dependency option text contents
+   * @returns {Promise<string[]>}
+   */
+  async getFilterValueOptionTexts() {
+    return await this.getFilterValueOptions().allTextContents();
   }
 
   /**
@@ -422,13 +1028,13 @@ export default class DashboardVariablesScoped {
     const variableTab = this.page.locator('[data-test="dashboard-settings-variable-tab"]');
     await variableTab.waitFor({ state: "visible", timeout: 10000 });
     await variableTab.click();
-    await this.page.waitForTimeout(500);
+    await this.page.locator('[data-test="dashboard-add-variable-btn"]').waitFor({ state: 'visible', timeout: 10000 });
 
     // Click Add Variable
     await this.page.locator('[data-test="dashboard-add-variable-btn"]').click({ timeout: 5000 });
 
     // Fill variable name
-    await this.page.locator('[data-test="dashboard-variable-name"]').fill(name);
+    await this.page.locator('[data-test="dashboard-variable-name-field"]').fill(name);
 
     // Normalize scope - accept both "panel" and "panels", "tab" and "tabs"
     const normalizedScope = scope === 'panel' ? 'panels' : (scope === 'tab' ? 'tabs' : scope);
@@ -441,7 +1047,9 @@ export default class DashboardVariablesScoped {
     };
 
     await this.page.locator('[data-test="dashboard-variable-scope-select"]').click();
-    await this.page.getByRole("option", { name: scopeUIText[normalizedScope] || normalizedScope, exact: true }).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator(`[data-test="dashboard-variable-scope-select-option"][data-test-value="${normalizedScope}"]`).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Assign to tabs if tab-scoped
     if (normalizedScope === "tabs" && assignedTabs.length > 0) {
@@ -449,22 +1057,22 @@ export default class DashboardVariablesScoped {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500); // Wait for dropdown to open
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
-      // Click each tab by label text
+      // Click each tab by label text using data-test-label
       for (const tabId of assignedTabs) {
         // Convert tabId to label format (e.g., "tab1" -> "Tab1", "default" -> "Default")
         const tabLabel = tabId === 'default' ? 'Default' :
                         tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        // Use .q-item with exact text match
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page
+          .locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      // Close the dropdown by clicking outside or pressing Escape
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the dropdown by clicking the trigger again to toggle it closed
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
     }
 
     // Assign to panels if panel-scoped
@@ -477,22 +1085,22 @@ export default class DashboardVariablesScoped {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
-      // Click each tab by label text
+      // Click each tab by label text using data-test-label
       for (const tabId of tabsToSelect) {
         // Convert tabId to label format (e.g., "tab1" -> "Tab1", "default" -> "Default")
         const tabLabel = tabId === 'default' ? 'Default' :
                         tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        // Use .q-item with exact text match
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page
+          .locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      // Close the tabs dropdown
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking the trigger again to toggle it closed
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
       // Now select the panels
       if (assignedPanels.length > 0) {
@@ -500,23 +1108,21 @@ export default class DashboardVariablesScoped {
         const panelsSelect = this.page.locator('[data-test="dashboard-variable-panels-select"]');
         await panelsSelect.waitFor({ state: "visible", timeout: 10000 });
         await panelsSelect.click();
-        await this.page.waitForTimeout(1000);
 
-        // Wait for dropdown items to load
-        await this.page.waitForSelector('.q-item', { state: "visible", timeout: 5000 });
+        // Wait for panels popover to open
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: "visible", timeout: 5000 });
 
-        // Click each panel checkbox by panel name
+        // Click each panel by panel name using data-test-label
         for (const panelName of assignedPanels) {
-          // Use .q-item with exact text match for panel name
-          const panelItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${panelName}$`) });
+          const panelItem = this.page
+            .locator(`[data-test="dashboard-variable-panels-select-option"][data-test-label="${panelName}"]`);
           await panelItem.waitFor({ state: "visible", timeout: 5000 });
           await panelItem.click();
-          await this.page.waitForTimeout(500); // Wait after each selection
         }
 
-        // Close the dropdown
-        await this.page.keyboard.press('Escape');
-        await this.page.waitForTimeout(500);
+        // Close the dropdown by clicking the trigger again to toggle it closed
+        await panelsSelect.click();
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
       }
     }
 
@@ -573,7 +1179,7 @@ export default class DashboardVariablesScoped {
               // Click add button for additional values
               await this.page.locator('[data-test="dashboard-add-custom-value-btn"]').click();
             // }
-            await this.page.locator(`[data-test="dashboard-variable-custom-value-${i}"]`).fill(customValues[i]);
+            await this.page.locator(`[data-test="dashboard-variable-custom-value-${i}-field"]`).fill(customValues[i]);
           }
         }
       } else {
@@ -584,7 +1190,7 @@ export default class DashboardVariablesScoped {
 
         // Add single custom value
         if (customValues.length > 0) {
-          await this.page.locator('[data-test="dashboard-variable-custom-value-0"]').fill(customValues[0]);
+          await this.page.locator('[data-test="dashboard-variable-custom-value-0-field"]').fill(customValues[0]);
         }
       }
     }
@@ -606,7 +1212,7 @@ export default class DashboardVariablesScoped {
         .locator('[data-test="dashboard-multi-select-default-value-toggle-custom"]')
         .click();
       await this.page.locator('[data-test="dashboard-add-custom-value-btn"]').click();
-      await this.page.locator('[data-test="dashboard-variable-custom-value-0"]').fill("test");
+      await this.page.locator('[data-test="dashboard-variable-custom-value-0-field"]').fill("test");
     }
 
     // Save variable
@@ -632,8 +1238,6 @@ export default class DashboardVariablesScoped {
     } catch (e) {
       // If neither indicator appears, try network idle as fallback
       await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-      // Brief wait for DOM updates
-      await this.page.waitForTimeout(500);
     }
   }
 
@@ -656,9 +1260,9 @@ export default class DashboardVariablesScoped {
     // If no filter field is specified, try to get the current variable's field
     // This maintains backward compatibility when called from addScopedVariable with just the dependency name
     if (!filterFieldName) {
-      // Get the currently selected field value
-      const fieldInput = this.page.locator('[data-test="dashboard-variable-field-select"]');
-      filterFieldName = await fieldInput.inputValue();
+      // Get the currently selected field value from the OSelect trigger's data-test-selected-value attribute
+      const fieldTrigger = this.page.locator('[data-test="dashboard-variable-field-select-trigger"]');
+      filterFieldName = await fieldTrigger.getAttribute('data-test-selected-value') ?? '';
 
       // If still no field, default to a common field name
       if (!filterFieldName) {
@@ -669,7 +1273,6 @@ export default class DashboardVariablesScoped {
     // Dependencies are added through filters where the value references another variable using $variableName
     // Wait for any pending DOM updates to complete
     await this.page.waitForLoadState('domcontentloaded');
-    await this.page.waitForTimeout(500); // Small wait for UI to stabilize
 
     const addFilterBtn = this.page.locator('[data-test="dashboard-add-filter-btn"]');
     await addFilterBtn.waitFor({ state: "visible", timeout: 10000 });
@@ -681,9 +1284,11 @@ export default class DashboardVariablesScoped {
     const filterNameSelector = this.page.locator('[data-test="dashboard-query-values-filter-name-selector"]').last();
     await filterNameSelector.waitFor({ state: "visible", timeout: 10000 });
     await filterNameSelector.click();
-    await filterNameSelector.fill(filterFieldName);
+    const filterNameSearch = this.page.locator('[data-test="dashboard-query-values-filter-name-selector-search"]').last();
+    await filterNameSearch.waitFor({ state: "visible", timeout: 5000 });
+    await filterNameSearch.fill(filterFieldName);
 
-    const filterNameOption = this.page.getByRole("option", { name: filterFieldName, exact: true });
+    const filterNameOption = this.page.locator(`[data-test="dashboard-query-values-filter-name-selector-option"][data-test-value="${filterFieldName}"]`);
     await filterNameOption.waitFor({ state: "visible", timeout: 10000 });
     await filterNameOption.click();
 
@@ -692,58 +1297,72 @@ export default class DashboardVariablesScoped {
     await operatorSelector.waitFor({ state: "visible", timeout: 10000 });
     await operatorSelector.click();
 
-    const operatorOption = this.page.getByRole("option", { name: operator, exact: true }).locator("div").nth(2);
+    const operatorOption = this.page.locator(`[data-test="dashboard-query-values-filter-operator-selector-option"][data-test-value="${operator}"]`);
     await operatorOption.waitFor({ state: "visible", timeout: 10000 });
     await operatorOption.click();
 
-    // Set the value to reference the dependency variable using $variableName syntax
-    const autoComplete = this.page.locator('[data-test="common-auto-complete"]').last();
-    await autoComplete.waitFor({ state: "visible", timeout: 10000 });
-    await autoComplete.click();
+    // Set the value to reference the dependency variable using $variableName syntax.
+    // OCombobox renders its inner input as [data-test="${name}-input"]; we target the last filter row's input.
+    // We MUST click the input before filling so that reka-ui's openOnClick fires and opens the portal dropdown.
+    const filterValueInput = this.page.locator('[data-test*="filter-value-selector"][data-test$="-input"]').last();
+    await filterValueInput.waitFor({ state: "visible", timeout: 10000 });
 
-    // Wait for input to be focused and ready
-    await autoComplete.waitFor({ state: "attached", timeout: 5000 });
+    /**
+     * Try to find and click the option with the given label inside the OCombobox portal.
+     * Returns true on success (onSelect fires immediately, no debounce). Returns false if option not found.
+     * @param {string} label - The data-test-label value to look for
+     */
+    const tryClickDropdownOption = async (label) => {
+      try {
+        const option = this.page.locator(
+          `[data-test*="filter-value-selector"][data-test$="-option"][data-test-label="${label}"]`
+        ).first();
+        await option.waitFor({ state: 'visible', timeout: 3000 });
+        await option.click();
+        return true;
+      } catch {
+        return false;
+      }
+    };
 
-    // Clear any existing value and type the variable name to trigger autocomplete
-    await autoComplete.clear();
-    await autoComplete.fill(dependencyVariableName);
+    // Attempt 1: click to open, fill variable name (no $), click the matching option.
+    // onSelect() fires synchronously → filter.value = "$varName" with no debounce.
+    await filterValueInput.click();
+    await filterValueInput.fill(dependencyVariableName);
 
-    // Wait for dropdown options to appear
-    const dropdownAppeared = await this.page.waitForSelector('[role="listbox"]', {
-      state: "visible",
-      timeout: 3000
-    }).then(() => true).catch(() => false);
+    const optionsLocator = '[data-test*="filter-value-selector"][data-test$="-option"]';
+    const dropdownAppeared = await this.page.waitForFunction(
+      (sel) => document.querySelectorAll(sel).length > 0,
+      optionsLocator,
+      { timeout: 4000 }
+    ).then(() => true).catch(() => false);
+
+    let valueCommitted = false;
 
     if (dropdownAppeared) {
-      // Try to find and click the option - the dropdown shows variable names
-      try {
-        // Wait a bit for options to fully render
-        await this.page.waitForSelector(`[role="option"]:has-text("${dependencyVariableName}")`, {
-          state: "visible",
-          timeout: 2000
-        });
-
-        // Click the matching option
-        await this.page.getByRole("option", { name: dependencyVariableName, exact: true }).click();
-
-        // Verify the value was set correctly with $ prefix
-        const currentValue = await autoComplete.inputValue();
-        if (!currentValue.startsWith('$')) {
-          // If $ wasn't added automatically, add it manually
-          await autoComplete.clear();
-          await autoComplete.fill(`$${dependencyVariableName}`);
-        }
-      } catch (error) {
-        // If clicking option failed, manually set the value with $ prefix
-        await autoComplete.clear();
-        await autoComplete.fill(`$${dependencyVariableName}`);
-        // await this.page.keyboard.press('Escape');
-      }
-    } else {
-      // No dropdown appeared, manually set the value with $ prefix
-      await autoComplete.clear();
-      await autoComplete.fill(`$${dependencyVariableName}`);
+      valueCommitted = await tryClickDropdownOption(dependencyVariableName);
     }
+
+    // Attempt 2: fill with $ prefix — searchRegex extracts the name and the same options appear.
+    // Then click the option so onSelect fires immediately (still no debounce).
+    if (!valueCommitted) {
+      await filterValueInput.clear();
+      await filterValueInput.click();
+      await filterValueInput.fill(`$${dependencyVariableName}`);
+
+      const fallbackDropdownAppeared = await this.page.waitForFunction(
+        (sel) => document.querySelectorAll(sel).length > 0,
+        optionsLocator,
+        { timeout: 4000 }
+      ).then(() => true).catch(() => false);
+
+      if (fallbackDropdownAppeared) {
+        valueCommitted = await tryClickDropdownOption(dependencyVariableName);
+      }
+    }
+
+    // Log final result
+    const finalInputValue = await filterValueInput.inputValue().catch(() => '');
   }
 
   /**
@@ -803,9 +1422,11 @@ export default class DashboardVariablesScoped {
     const filterNameSelector = this.page.locator('[data-test="dashboard-query-values-filter-name-selector"]');
     await filterNameSelector.waitFor({ state: "visible", timeout: 10000 });
     await filterNameSelector.click();
-    await filterNameSelector.fill(filterConfig.filterName);
+    const filterNameSearchInput = this.page.locator('[data-test="dashboard-query-values-filter-name-selector-search"]');
+    await filterNameSearchInput.waitFor({ state: "visible", timeout: 5000 });
+    await filterNameSearchInput.fill(filterConfig.filterName);
 
-    const filterNameOption = this.page.getByRole("option", { name: filterConfig.filterName });
+    const filterNameOption = this.page.locator(`[data-test="dashboard-query-values-filter-name-selector-option"][data-test-value="${filterConfig.filterName}"]`);
     await filterNameOption.waitFor({ state: "visible", timeout: 10000 });
     await filterNameOption.click();
 
@@ -813,14 +1434,14 @@ export default class DashboardVariablesScoped {
     await operatorSelector.waitFor({ state: "visible", timeout: 10000 });
     await operatorSelector.click();
 
-    const operatorOption = this.page.getByRole("option", { name: filterConfig.operator, exact: true }).locator("div").nth(2);
+    const operatorOption = this.page.locator(`[data-test="dashboard-query-values-filter-operator-selector-option"][data-test-value="${filterConfig.operator}"]`);
     await operatorOption.waitFor({ state: "visible", timeout: 10000 });
     await operatorOption.click();
 
-    const autoComplete = this.page.locator('[data-test="common-auto-complete"]');
-    await autoComplete.waitFor({ state: "visible", timeout: 10000 });
-    await autoComplete.click();
-    await autoComplete.fill(filterConfig.value);
+    // OCombobox renders its inner input as [data-test="${name}-input"]; target the last filter row's input
+    const filterValueInput = this.page.locator('[data-test*="filter-value-selector"][data-test$="-input"]').last();
+    await filterValueInput.waitFor({ state: "visible", timeout: 10000 });
+    await filterValueInput.fill(filterConfig.value);
   }
 
   /**
@@ -830,7 +1451,7 @@ export default class DashboardVariablesScoped {
     await this.page
       .locator('[data-test="dashboard-multi-select-default-value-toggle-custom"]')
       .click();
-    await this.page.locator('[data-test="dashboard-variable-custom-value-0"]').fill(value);
+    await this.page.locator('[data-test="dashboard-variable-custom-value-0-field"]').fill(value);
   }
 
   /**
@@ -840,12 +1461,12 @@ export default class DashboardVariablesScoped {
    * @returns {Promise<boolean>} - Returns true if API was called successfully
    */
   async selectValueFromVariableDropDown(label, value) {
-    const input = this.page.getByLabel(label, { exact: true });
-    await input.waitFor({ state: "visible", timeout: 10000 });
+    const trigger = this.page.locator(`[data-test="variable-selector-${label}-inner-trigger"]`);
+    await trigger.waitFor({ state: "visible", timeout: 10000 });
 
     // Monitor API call when clicking dropdown
     const valuesStreamPromise = waitForValuesStreamComplete(this.page);
-    await input.click();
+    await trigger.click();
 
     try {
       await valuesStreamPromise;
@@ -853,9 +1474,14 @@ export default class DashboardVariablesScoped {
       throw new Error(`Failed to load variable values API for ${label}: ${error.message}`);
     }
 
-    await input.fill(value);
+    const searchInput = this.page.locator(`[data-test="variable-selector-${label}-inner-search"]`);
+    const hasSearch = await searchInput.count() > 0;
+    if (hasSearch) {
+      await searchInput.waitFor({ state: "visible", timeout: 5000 });
+      await searchInput.fill(value);
+    }
 
-    const option = this.page.getByRole("option", { name: value });
+    const option = this.page.locator(`[data-test="variable-selector-${label}-inner-option"][data-test-value="${value}"]`);
     await option.waitFor({ state: "visible", timeout: 10000 });
     await option.click();
 
@@ -1008,55 +1634,13 @@ export default class DashboardVariablesScoped {
    * @returns {Promise<boolean>}
    */
   async hasCircularDependencyError() {
-    // The error is displayed as red text with the message "Variables has cycle:"
-    // When there's a cycle error, the save button should still be visible (save failed)
-
-    // First, look for cycle error text directly — don't rely on save button visibility
-    // because brief DOM rerenders can temporarily hide/show the button.
-    // Strategy 1: Look for div with inline style containing "color" and text containing "cycle"
+    const errorEl = this.page.locator('[data-test="dashboard-variable-cycle-error"]');
     try {
-      const errorElement = this.page.locator('div[style*="color"]').filter({ hasText: /cycle/i });
-      await errorElement.waitFor({ state: "visible", timeout: 12000 });
-      const text = await errorElement.textContent();
-      if (text && text.toLowerCase().includes('cycle')) {
-        return true;
-      }
-    } catch {
-      // Continue to next strategy
-    }
-
-    // Strategy 2: Look for any text containing "Variables has cycle"
-    try {
-      const fallbackError = this.page.getByText(/Variables has cycle/i);
-      await fallbackError.waitFor({ state: "visible", timeout: 5000 });
+      await errorEl.waitFor({ state: 'visible', timeout: 12000 });
       return true;
     } catch {
-      // Continue to next strategy
-    }
-
-    // Strategy 3: Look for any div containing "cycle" (case insensitive)
-    try {
-      const generalError = this.page.locator('div').filter({ hasText: /cycle/i });
-      await generalError.first().waitFor({ state: "visible", timeout: 3000 });
-      const text = await generalError.first().textContent();
-      if (text && /variables.*cycle|cycle.*variable/i.test(text)) {
-        return true;
-      }
-    } catch {
-      // All strategies failed
-    }
-
-    // Fallback: check if save button is still visible (save was blocked)
-    const saveBtn = this.page.locator('[data-test="dashboard-variable-save-btn"]');
-    const isSaveBtnVisible = await saveBtn.isVisible().catch(() => false);
-
-    if (!isSaveBtnVisible) {
-      // Save succeeded (button is hidden), so there's no cycle error
       return false;
     }
-
-    // Save button is visible but no cycle text found — might be another error
-    return false;
   }
 
   /**
@@ -1094,18 +1678,129 @@ export default class DashboardVariablesScoped {
     // Normalize scope type
     const normalizedType = scopeType === 'tabs' ? 'tab' : (scopeType === 'panels' ? 'panel' : scopeType);
 
-    // Find the variable row in the variables list
-    const variableRow = this.page.locator(`[data-test="dashboard-variable-settings-draggable-row"]`);
-    await variableRow.waitFor({ state: "visible", timeout: 5000 });
+    // Find the variable's scope chip in the variables list. The list migrated
+    // to OTable, so the old per-row `dashboard-variable-settings-draggable-row`
+    // attribute is gone; the scope badge data-test is preserved, so anchor on it.
+    const scopeChip = this.page.locator('[data-test="dashboard-variable-scope-badge"]').first();
+    await scopeChip.waitFor({ state: "visible", timeout: 5000 });
 
     // Hover over the scope chip to see the tooltip showing "Deleted Tab" or "Deleted Panel"
-    const scopeChip = variableRow.locator('.q-chip, [class*="scope"]').first();
     await scopeChip.hover();
 
     // Wait for tooltip to appear and verify it contains "Deleted Tab" or "Deleted Panel"
     const expectedText = normalizedType === 'tab' ? 'Deleted Tab' : 'Deleted Panel';
-    const tooltip = this.page.locator('.q-tooltip, [role="tooltip"]').filter({ hasText: new RegExp(expectedText, 'i') });
+    const tooltip = this.page.locator('[data-test="o-tooltip-content"]');
     await expect(tooltip).toBeVisible({ timeout: 5000 });
+    await expect(tooltip).toContainText(expectedText, { ignoreCase: true });
+  }
+
+  /**
+   * Block until the variable's in-flight load has finished.
+   *
+   * loadVariableOptions() early-returns while isLoading is true, so a click landing
+   * mid-load is silently dropped. Tracked via the OSpinner (role="status"); idle must
+   * HOLD, as a cascade can start a second load just after the first clears.
+   *
+   * @param {string} variableName - Variable name
+   * @param {Object} options - Wait options
+   * @param {number} options.quietMs - How long idle must hold (default: 1000)
+   * @param {number} options.timeout - Overall budget in ms (default: 30000)
+   */
+  async waitForVariableIdle(variableName, options = {}) {
+    const { quietMs = 1000, timeout = 30000 } = options;
+    const spinner = this.page.locator(
+      `[data-test="variable-selector-${variableName}"] [role="status"]`
+    );
+    const deadline = Date.now() + timeout;
+
+    while (Date.now() < deadline) {
+      await spinner
+        .first()
+        .waitFor({ state: "detached", timeout: Math.max(1000, deadline - Date.now()) })
+        .catch(() => {});
+
+      await this.page.waitForTimeout(quietMs);
+      if ((await spinner.count()) === 0) return;
+    }
+  }
+
+  /**
+   * Arm a wait for a `_values_stream` response, optionally filtered by field.
+   *
+   * The endpoint is a POST with no query string, so field matching reads
+   * request.postData(). Arm before the triggering action, await after; resolves to
+   * null instead of rejecting so callers can branch on "did it fire".
+   *
+   * @param {string[]|null} fields - Only match calls fetching one of these fields (null = any)
+   * @param {Object} options - Options
+   * @param {number} options.timeout - Timeout in ms (default: 30000)
+   * @returns {Promise<import('@playwright/test').Response|null>}
+   */
+  waitForValuesResponse(fields = null, options = {}) {
+    const { timeout = 30000 } = options;
+    return this.page
+      .waitForResponse((response) => {
+        if (!response.url().includes("_values_stream")) return false;
+        if (!fields) return true;
+        try {
+          const body = JSON.parse(response.request().postData() || "null");
+          return (body?.fields || []).some((f) => fields.includes(f));
+        } catch {
+          return false;
+        }
+      }, { timeout })
+      .catch(() => null);
+  }
+
+  /**
+   * Resolve once no `_values_stream` request has been in flight for `quietMs`.
+   *
+   * A cascade only queues when nothing is mid-load (canVariableLoad bails on isLoading).
+   * Counting in-flight requests covers every variable, unlike the parent's spinner
+   * (hidden while its dropdown is open) or a single response wait (can match a sibling).
+   * Decrements on `response`, not `requestfinished` — these are SSE streams.
+   *
+   * @param {Object} options - Options
+   * @param {number} options.quietMs - Required quiet period in ms (default: 1000)
+   * @param {number} options.timeout - Overall budget in ms (default: 20000)
+   * @returns {Promise<boolean>} true if quiet was reached, false if it timed out
+   */
+  async waitForValuesQuiet(options = {}) {
+    const { quietMs = 1000, timeout = 20000 } = options;
+    const isValues = (url) => url.includes("_values_stream");
+
+    let inFlight = 0;
+    let lastActivity = Date.now();
+
+    const onRequest = (request) => {
+      if (isValues(request.url())) {
+        inFlight++;
+        lastActivity = Date.now();
+      }
+    };
+    const onSettled = (reqOrRes) => {
+      if (isValues(reqOrRes.url())) {
+        inFlight = Math.max(0, inFlight - 1);
+        lastActivity = Date.now();
+      }
+    };
+
+    this.page.on("request", onRequest);
+    this.page.on("response", onSettled);
+    this.page.on("requestfailed", onSettled);
+
+    try {
+      const deadline = Date.now() + timeout;
+      while (Date.now() < deadline) {
+        if (inFlight === 0 && Date.now() - lastActivity >= quietMs) return true;
+        await this.page.waitForTimeout(100);
+      }
+      return false;
+    } finally {
+      this.page.off("request", onRequest);
+      this.page.off("response", onSettled);
+      this.page.off("requestfailed", onSettled);
+    }
   }
 
   /**
@@ -1115,96 +1810,162 @@ export default class DashboardVariablesScoped {
    *
    * @param {string} variableName - Name of the variable to change
    * @param {Object} options - Configuration options
-   * @param {number} options.optionIndex - Index of option to select (default: 0 for first option)
+   * @param {number} options.optionIndex - Preferred index of option to select (default: 0).
+   *   Clamped into range, then advanced to the first option whose value differs from
+   *   the current selection — re-picking the current value does not cascade.
    * @param {number} options.expectedAPICalls - Expected number of dependent variable API calls (default: 1)
-   * @param {number} options.timeout - Timeout for API monitoring (default: 15000)
-   * @returns {Promise<Object>} - API monitoring result with actualCount, calls, success, etc.
+   * @param {number} options.timeout - Timeout for API monitoring, measured from the moment
+   *   the option is clicked (default: 15000)
+   * @param {string[]} options.dependentFields - Fields queried by the variables expected to
+   *   reload. When supplied, ONLY _values_stream calls for these fields are counted, so
+   *   `expectedAPICalls` means "number of dependent variables" and the parent's own
+   *   dropdown-open request is excluded from the tally.
+   * @param {number} options.optionsTimeout - Budget for the PARENT's own options to render
+   *   before selecting (default: 45000). Separate from `timeout` on purpose.
+   * @returns {Promise<Object>} - API monitoring result with actualCount, matchedCount, calls, success, etc.
    */
   async changeVariableValueAndMonitorDependencies(variableName, options = {}) {
     const {
       optionIndex = 0,
       expectedAPICalls = 1,
-      timeout = 15000
+      timeout = 15000,
+      dependentFields = null,
+      optionsTimeout = 45000
     } = options;
 
     // Dynamic import to avoid circular dependencies
     const { monitorVariableAPICalls } = await import('../../playwright-tests/utils/variable-helpers.js');
 
-    // Wait for variable dropdown to be visible and ready
-    const varDropdown = this.page.getByLabel(variableName, { exact: true });
+    // Wait for variable dropdown trigger to be visible and ready
+    const varDropdown = this.page.locator(`[data-test="variable-selector-${variableName}-inner-trigger"]`);
     await varDropdown.waitFor({ state: "visible", timeout: 10000 });
 
     // Ensure network is idle before clicking
     await this.page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
 
-    // Start monitoring for values stream API call BEFORE opening dropdown
-    const valuesStreamPromise = waitForValuesStreamComplete(this.page, timeout);
+    // Opening the dropdown while this variable's own load is still in flight is a
+    // silent no-op — see waitForVariableIdle.
+    await this.waitForVariableIdle(variableName);
 
-    // Start monitoring for dependent variable API calls BEFORE opening dropdown
-    // This ensures we capture any dependent variable updates
-    const apiMonitor = monitorVariableAPICalls(this.page, {
-      expectedCount: expectedAPICalls,
-      timeout: timeout
-    });
+    // Without dependentFields, keep the original semantics: monitor armed pre-open, so
+    // the parent's own request still counts toward expectedAPICalls.
+    let apiMonitor = dependentFields
+      ? null
+      : monitorVariableAPICalls(this.page, {
+          expectedCount: expectedAPICalls,
+          timeout: timeout
+        });
 
-    // Click dropdown to open menu
-    await varDropdown.click();
+    // OSelect popover exposes data-test `${parentDataTest}-popover`. The selector
+    // forwards `variable-selector-<name>-inner` to OSelect, so the popover/options
+    // carry a `variable-selector-<name>-inner-*` prefix.
+    const selectorDataTest = `variable-selector-${variableName}-inner`;
+    const dropdownMenu = this.page.locator(`[data-test="${selectorDataTest}-popover"]`).first();
+    const optionLocator = this.page.locator(`[data-test="${selectorDataTest}-option"]`);
 
-    // Wait for the values stream to complete loading options
-    try {
-      await valuesStreamPromise;
-    } catch (error) {
-      throw new Error(`Failed to load variable values for ${variableName}: ${error.message}`);
-    }
-
-    // Wait for dropdown menu to open and stabilize
-    const dropdownMenu = this.page.locator('.q-menu').first();
-    await dropdownMenu.waitFor({ state: "visible", timeout: 5000 });
-
-    // Wait for options to be present in the dropdown
-    await this.page.waitForFunction(
-      () => {
-        const options = document.querySelectorAll('[role="option"]');
-        return options.length > 0;
-      },
-      { timeout: 10000 }
-    );
-
-    // Add a small stabilization delay to ensure options are fully rendered
-    await this.page.waitForTimeout(500);
-
-    // Get the text of the target option before clicking
-    const targetOptionText = await this.page.evaluate((index) => {
-      const options = document.querySelectorAll('[role="option"]');
-      return options.length > index ? options[index].textContent.trim() : null;
-    }, optionIndex);
-
-    if (!targetOptionText) {
-      throw new Error(`Could not find option at index ${optionIndex} in dropdown for variable: ${variableName}`);
-    }
-
-    // Click the target option using evaluate to avoid detachment issues
-    await this.page.evaluate((index) => {
-      const options = document.querySelectorAll('[role="option"]');
-      if (options.length > index) {
-        options[index].click();
+    // Load the PARENT's own options first, on their own budget. Previously this awaited
+    // waitForValuesStreamComplete() on the SAME timeout as the dependency monitor; that
+    // reads the SSE body via CDP, never settles on deployed envs, and burned the whole
+    // budget before any option was clicked. waitForValuesResponse resolves on headers.
+    //
+    // Needs >= 2 options or the value cannot change and nothing cascades; freshly
+    // ingested values can lag, so reopen (forcing a new query) rather than accept one
+    // blank option.
+    const deadline = Date.now() + optionsTimeout;
+    let optionCount = 0;
+    while (Date.now() < deadline) {
+      if (!(await dropdownMenu.isVisible().catch(() => false))) {
+        // Arm the values wait BEFORE the click that triggers it, then await after.
+        const parentValues = this.waitForValuesResponse(null, {
+          timeout: Math.max(5000, deadline - Date.now())
+        });
+        await varDropdown.click();
+        await dropdownMenu.waitFor({ state: "visible", timeout: 10000 }).catch(() => {});
+        await parentValues;
       }
-    }, optionIndex);
+      await optionLocator.first().waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
+      optionCount = await optionLocator.count();
+      if (optionCount >= 2) break;
+
+      await this.page.keyboard.press('Escape');
+      await dropdownMenu.waitFor({ state: "hidden", timeout: 3000 }).catch(() => {});
+      await this.waitForVariableIdle(variableName, { timeout: 10000 });
+    }
+
+    if (optionCount < 2) {
+      throw new Error(
+        `Variable "${variableName}" loaded ${optionCount} option(s) within ${optionsTimeout}ms; ` +
+        `at least 2 are needed to change its value and trigger a dependency reload.`
+      );
+    }
+
+    // Pick an option that actually CHANGES the value — re-selecting the current one does
+    // not cascade. Clamp the index, then walk forward to the first differing value.
+    // data-test-value exists only on virtualized rows, so fall back to text.
+    const currentValue = await varDropdown.getAttribute('data-test-selected-value').catch(() => null);
+    const optionValueAt = async (i) => {
+      const option = optionLocator.nth(i);
+      const value = await option.getAttribute('data-test-value').catch(() => null);
+      if (value !== null) return value;
+      const text = await option.textContent().catch(() => null);
+      return text ? text.trim() : null;
+    };
+
+    let targetIdx = Math.min(Math.max(optionIndex, 0), optionCount - 1);
+    for (let i = 0; i < optionCount; i++) {
+      const idx = (targetIdx + i) % optionCount;
+      if ((await optionValueAt(idx)) !== currentValue) {
+        targetIdx = idx;
+        break;
+      }
+    }
+
+    const targetOption = optionLocator.nth(targetIdx);
+    const targetOptionText = await targetOption.textContent().then((t) => (t ? t.trim() : null)).catch(() => null);
+
+    // Nothing may still be loading when the new value is committed, or the cascade is
+    // silently dropped (see waitForValuesQuiet). Sibling variables on the dashboard can
+    // still be settling at this point, so gate on all values traffic being quiet rather
+    // than on this variable alone.
+    await this.waitForValuesQuiet({ timeout: Math.max(10000, Math.floor(optionsTimeout / 2)) });
+
+    // Arm before the click so we sync on the values API, not the DOM. The monitor counts
+    // how many dependents fired; this waiter makes the first one a deterministic signal.
+    const dependentResponse = dependentFields
+      ? this.waitForValuesResponse(dependentFields, { timeout })
+      : Promise.resolve(null);
+
+    // When dependentFields is supplied, start monitoring only now so the whole budget
+    // belongs to the cascade and the tally counts dependents rather than the parent's
+    // own request. (Otherwise the monitor was already armed above, pre-open.)
+    if (!apiMonitor) {
+      apiMonitor = monitorVariableAPICalls(this.page, {
+        expectedCount: expectedAPICalls,
+        timeout: timeout,
+        matchFn: (call) => dependentFields.includes(call.field)
+      });
+    }
+
+    // Click the target option
+    await targetOption.click();
 
     // Wait for dropdown to close
     await dropdownMenu.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
 
     // Wait for any dependent variable API calls to complete
+    const firstDependentResponse = await dependentResponse;
     const apiResult = await apiMonitor;
 
-    // Verify the value actually changed by checking the input value
-    await this.page.waitForTimeout(500);
-    const currentValue = await varDropdown.inputValue().catch(() => '');
+    // Verify the value actually changed by checking the trigger's selected value
+    const currentValueAfter = await varDropdown.getAttribute('data-test-selected-value').catch(() => '');
 
     return {
       ...apiResult,
+      // True when a dependent variable actually re-queried after the change — the
+      // deterministic "the cascade happened" signal, independent of the call tally.
+      dependentResponded: firstDependentResponse !== null,
       selectedValue: targetOptionText,
-      currentValue: currentValue,
+      currentValue: currentValueAfter,
       variableName: variableName
     };
   }
@@ -1238,42 +1999,37 @@ export default class DashboardVariablesScoped {
     const isActive = await variableTab.getAttribute('aria-selected');
     if (isActive !== 'true') {
       await variableTab.click();
-      await this.page.waitForTimeout(500);
-    } else {
-      await this.page.waitForTimeout(300);
+      await this.page.locator('[data-test="dashboard-add-variable-btn"]').waitFor({ state: 'visible', timeout: 10000 });
     }
 
     // Click Add Variable button
     await this.page.locator(SELECTORS.ADD_VARIABLE_BTN).click();
-    await this.page.waitForTimeout(500);
 
     // Select scope first (before filling other fields)
     const normalizedScope = scope === 'panel' ? 'panels' : (scope === 'tab' ? 'tabs' : scope);
-    const scopeUIText = {
-      'global': 'Global',
-      'tabs': 'Selected Tabs',
-      'panels': 'Selected Panels'
-    };
 
     await this.page.locator('[data-test="dashboard-variable-scope-select"]').click();
-    await this.page.getByRole("option", { name: scopeUIText[normalizedScope] || normalizedScope, exact: true }).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator(`[data-test="dashboard-variable-scope-select-option"][data-test-value="${normalizedScope}"]`).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Assign to tabs if needed
     if (normalizedScope === "tabs" && assignedTabs.length > 0) {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
       for (const tabId of assignedTabs) {
         const tabLabel = tabId === 'default' ? 'Default' : tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page.locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
     }
 
     // Assign to panels if needed
@@ -1283,46 +2039,47 @@ export default class DashboardVariablesScoped {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
       for (const tabId of tabsToSelect) {
         const tabLabel = tabId === 'default' ? 'Default' : tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page.locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
       if (assignedPanels.length > 0) {
         const panelsSelect = this.page.locator('[data-test="dashboard-variable-panels-select"]');
         await panelsSelect.waitFor({ state: "visible", timeout: 10000 });
         await panelsSelect.click();
-        await this.page.waitForTimeout(1000);
 
-        await this.page.waitForSelector('.q-item', { state: "visible", timeout: 5000 });
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: "visible", timeout: 5000 });
 
         for (const panelName of assignedPanels) {
-          const panelItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${panelName}$`) });
+          const panelItem = this.page.locator(`[data-test="dashboard-variable-panels-select-option"][data-test-label="${panelName}"]`);
           await panelItem.waitFor({ state: "visible", timeout: 5000 });
           await panelItem.click();
-          await this.page.waitForTimeout(500);
         }
 
-        await this.page.keyboard.press('Escape');
-        await this.page.waitForTimeout(500);
+        // Close the panels dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+        await panelsSelect.click();
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
       }
     }
 
     // Select variable type - Custom
     await this.page.locator('[data-test="dashboard-variable-type-select"]').click();
-    await this.page.getByRole("option", { name: "Custom", exact: true }).click();
-    await this.page.waitForTimeout(500);
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator('[data-test="dashboard-variable-type-select-option"][data-test-value="custom"]').click();
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Fill name and label
-    await this.page.locator('[data-test="dashboard-variable-name"]').fill(name);
-    await this.page.locator('[data-test="dashboard-variable-label"]').fill(label);
+    await this.page.locator('[data-test="dashboard-variable-name-field"]').fill(name);
+    await this.page.locator('[data-test="dashboard-variable-label-field"]').fill(label);
 
     // Add custom options - the first option already exists by default
     if (values.length > 0) {
@@ -1332,15 +2089,22 @@ export default class DashboardVariablesScoped {
         const valueValue = typeof value === 'string' ? value : value.value;
         const isDefault = typeof value === 'object' && value.selected === true;
 
-        // If this is not the first item, add a new option
+        // If this is not the first item, add a new option and wait for it to appear.
+        // The field's bottom validation div permanently intercepts pointer events over
+        // the button, blocking both regular and force clicks. Use evaluate() to call the DOM
+        // native click() which fires the full event sequence and bypasses CSS pointer-events.
         if (i > 0) {
-          await this.page.locator('button:has-text("Add Option")').click();
-          await this.page.waitForTimeout(300);
+          const addOptionBtn = this.page.locator('[data-test="dashboard-add-option-btn"]');
+          await addOptionBtn.waitFor({ state: "visible", timeout: 10000 });
+          await addOptionBtn.scrollIntoViewIfNeeded();
+          await addOptionBtn.evaluate(btn => btn.click());
+          // Wait for the new option row to appear in the DOM before proceeding
+          await this.page.locator(`[data-test="dashboard-custom-variable-${i}-label-field"]`).waitFor({ state: "visible", timeout: 10000 });
         }
 
         // Fill label and value for this option
-        await this.page.locator(`[data-test="dashboard-custom-variable-${i}-label"]`).fill(valueLabel);
-        await this.page.locator(`[data-test="dashboard-custom-variable-${i}-value"]`).fill(valueValue);
+        await this.page.locator(`[data-test="dashboard-custom-variable-${i}-label-field"]`).fill(valueLabel);
+        await this.page.locator(`[data-test="dashboard-custom-variable-${i}-value-field"]`).fill(valueValue);
 
         // Set as default if specified
         if (isDefault) {
@@ -1376,7 +2140,6 @@ export default class DashboardVariablesScoped {
       ]);
     } catch (e) {
       await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-      await this.page.waitForTimeout(500);
     }
   }
 
@@ -1407,42 +2170,37 @@ export default class DashboardVariablesScoped {
     const isActive = await variableTab.getAttribute('aria-selected');
     if (isActive !== 'true') {
       await variableTab.click();
-      await this.page.waitForTimeout(500);
-    } else {
-      await this.page.waitForTimeout(300);
+      await this.page.locator('[data-test="dashboard-add-variable-btn"]').waitFor({ state: 'visible', timeout: 10000 });
     }
 
     // Click Add Variable button
     await this.page.locator(SELECTORS.ADD_VARIABLE_BTN).click();
-    await this.page.waitForTimeout(500);
 
     // Select scope first
     const normalizedScope = scope === 'panel' ? 'panels' : (scope === 'tab' ? 'tabs' : scope);
-    const scopeUIText = {
-      'global': 'Global',
-      'tabs': 'Selected Tabs',
-      'panels': 'Selected Panels'
-    };
 
     await this.page.locator('[data-test="dashboard-variable-scope-select"]').click();
-    await this.page.getByRole("option", { name: scopeUIText[normalizedScope] || normalizedScope, exact: true }).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator(`[data-test="dashboard-variable-scope-select-option"][data-test-value="${normalizedScope}"]`).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Assign to tabs if needed
     if (normalizedScope === "tabs" && assignedTabs.length > 0) {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
       for (const tabId of assignedTabs) {
         const tabLabel = tabId === 'default' ? 'Default' : tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page.locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
     }
 
     // Assign to panels if needed
@@ -1452,49 +2210,50 @@ export default class DashboardVariablesScoped {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
       for (const tabId of tabsToSelect) {
         const tabLabel = tabId === 'default' ? 'Default' : tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page.locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
       if (assignedPanels.length > 0) {
         const panelsSelect = this.page.locator('[data-test="dashboard-variable-panels-select"]');
         await panelsSelect.waitFor({ state: "visible", timeout: 10000 });
         await panelsSelect.click();
-        await this.page.waitForTimeout(1000);
 
-        await this.page.waitForSelector('.q-item', { state: "visible", timeout: 5000 });
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: "visible", timeout: 5000 });
 
         for (const panelName of assignedPanels) {
-          const panelItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${panelName}$`) });
+          const panelItem = this.page.locator(`[data-test="dashboard-variable-panels-select-option"][data-test-label="${panelName}"]`);
           await panelItem.waitFor({ state: "visible", timeout: 5000 });
           await panelItem.click();
-          await this.page.waitForTimeout(500);
         }
 
-        await this.page.keyboard.press('Escape');
-        await this.page.waitForTimeout(500);
+        // Close the panels dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+        await panelsSelect.click();
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
       }
     }
 
     // Select variable type - Constant
     await this.page.locator('[data-test="dashboard-variable-type-select"]').click();
-    await this.page.getByRole("option", { name: "Constant", exact: true }).click();
-    await this.page.waitForTimeout(500);
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator('[data-test="dashboard-variable-type-select-option"][data-test-value="constant"]').click();
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Fill name and label
-    await this.page.locator('[data-test="dashboard-variable-name"]').fill(name);
-    await this.page.locator('[data-test="dashboard-variable-label"]').fill(label);
+    await this.page.locator('[data-test="dashboard-variable-name-field"]').fill(name);
+    await this.page.locator('[data-test="dashboard-variable-label-field"]').fill(label);
 
     // Set constant value
-    await this.page.locator('[data-test="dashboard-variable-constant-value"]').fill(value);
+    await this.page.locator('[data-test="dashboard-variable-constant-value-field"]').fill(value);
 
     // Save variable
     const saveBtn = this.page.locator('[data-test="dashboard-variable-save-btn"]');
@@ -1514,7 +2273,6 @@ export default class DashboardVariablesScoped {
       ]);
     } catch (e) {
       await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-      await this.page.waitForTimeout(500);
     }
   }
 
@@ -1545,42 +2303,37 @@ export default class DashboardVariablesScoped {
     const isActive = await variableTab.getAttribute('aria-selected');
     if (isActive !== 'true') {
       await variableTab.click();
-      await this.page.waitForTimeout(500);
-    } else {
-      await this.page.waitForTimeout(300);
+      await this.page.locator('[data-test="dashboard-add-variable-btn"]').waitFor({ state: 'visible', timeout: 10000 });
     }
 
     // Click Add Variable button
     await this.page.locator(SELECTORS.ADD_VARIABLE_BTN).click();
-    await this.page.waitForTimeout(500);
 
     // Select scope first
     const normalizedScope = scope === 'panel' ? 'panels' : (scope === 'tab' ? 'tabs' : scope);
-    const scopeUIText = {
-      'global': 'Global',
-      'tabs': 'Selected Tabs',
-      'panels': 'Selected Panels'
-    };
 
     await this.page.locator('[data-test="dashboard-variable-scope-select"]').click();
-    await this.page.getByRole("option", { name: scopeUIText[normalizedScope] || normalizedScope, exact: true }).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator(`[data-test="dashboard-variable-scope-select-option"][data-test-value="${normalizedScope}"]`).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Assign to tabs if needed
     if (normalizedScope === "tabs" && assignedTabs.length > 0) {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
       for (const tabId of assignedTabs) {
         const tabLabel = tabId === 'default' ? 'Default' : tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page.locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
     }
 
     // Assign to panels if needed
@@ -1590,50 +2343,51 @@ export default class DashboardVariablesScoped {
       const tabsSelect = this.page.locator('[data-test="dashboard-variable-tabs-select"]');
       await tabsSelect.waitFor({ state: "visible", timeout: 10000 });
       await tabsSelect.click();
-      await this.page.waitForTimeout(500);
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
 
       for (const tabId of tabsToSelect) {
         const tabLabel = tabId === 'default' ? 'Default' : tabId.charAt(0).toUpperCase() + tabId.slice(1);
-        const tabItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${tabLabel}$`) });
+        const tabItem = this.page.locator(`[data-test="dashboard-variable-tabs-select-option"][data-test-label="${tabLabel}"]`);
         await tabItem.waitFor({ state: "visible", timeout: 5000 });
         await tabItem.click();
       }
 
-      await this.page.keyboard.press('Escape');
-      await this.page.waitForTimeout(300);
+      // Close the tabs dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+      await tabsSelect.click();
+      await this.page.locator('[data-test="dashboard-variable-tabs-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
       if (assignedPanels.length > 0) {
         const panelsSelect = this.page.locator('[data-test="dashboard-variable-panels-select"]');
         await panelsSelect.waitFor({ state: "visible", timeout: 10000 });
         await panelsSelect.click();
-        await this.page.waitForTimeout(1000);
 
-        await this.page.waitForSelector('.q-item', { state: "visible", timeout: 5000 });
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: "visible", timeout: 5000 });
 
         for (const panelName of assignedPanels) {
-          const panelItem = this.page.locator('.q-item').filter({ hasText: new RegExp(`^${panelName}$`) });
+          const panelItem = this.page.locator(`[data-test="dashboard-variable-panels-select-option"][data-test-label="${panelName}"]`);
           await panelItem.waitFor({ state: "visible", timeout: 5000 });
           await panelItem.click();
-          await this.page.waitForTimeout(500);
         }
 
-        await this.page.keyboard.press('Escape');
-        await this.page.waitForTimeout(500);
+        // Close the panels dropdown by clicking trigger again (toggle — Escape does not close OSelect multi-select)
+        await panelsSelect.click();
+        await this.page.locator('[data-test="dashboard-variable-panels-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
       }
     }
 
     // Select variable type - Textbox
     await this.page.locator('[data-test="dashboard-variable-type-select"]').click();
-    await this.page.getByRole("option", { name: "Textbox", exact: true }).click();
-    await this.page.waitForTimeout(500);
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator('[data-test="dashboard-variable-type-select-option"][data-test-value="textbox"]').click();
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Fill name and label
-    await this.page.locator('[data-test="dashboard-variable-name"]').fill(name);
-    await this.page.locator('[data-test="dashboard-variable-label"]').fill(label);
+    await this.page.locator('[data-test="dashboard-variable-name-field"]').fill(name);
+    await this.page.locator('[data-test="dashboard-variable-label-field"]').fill(label);
 
     // Set default value
     if (defaultValue) {
-      await this.page.locator('[data-test="dashboard-variable-textbox-default-value"]').fill(defaultValue);
+      await this.page.locator('[data-test="dashboard-variable-textbox-default-value-field"]').fill(defaultValue);
     }
 
     // Save variable
@@ -1654,7 +2408,6 @@ export default class DashboardVariablesScoped {
       ]);
     } catch (e) {
       await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-      await this.page.waitForTimeout(500);
     }
   }
 
@@ -1665,9 +2418,10 @@ export default class DashboardVariablesScoped {
    * @param {string} newValue - New value to set
    */
   async changeTextboxVariableValue(variableName, newValue) {
-    const selector = await this.waitForVariableSelectorVisible(variableName);
-    await selector.clear();
-    await selector.fill(newValue);
+    const field = this.page.locator(`[data-test="variable-selector-${variableName}-field"]`);
+    await field.waitFor({ state: 'visible', timeout: 15000 });
+    await field.clear();
+    await field.fill(newValue);
     await this.page.keyboard.press('Enter');
   }
 
@@ -1681,8 +2435,10 @@ export default class DashboardVariablesScoped {
   async verifyVariableHasOptions(variableName, options = {}) {
     const { timeout = 10000 } = options;
 
-    // Open variable dropdown
-    const selector = this.page.locator(`[data-test="variable-selector-${variableName}"]`);
+    // Open variable dropdown via the OSelect trigger. Gate on idle first: a click
+    // landing mid-load opens the popover but never fetches (see waitForVariableIdle).
+    const selector = this.page.locator(`[data-test="variable-selector-${variableName}-inner-trigger"]`);
+    await this.waitForVariableIdle(variableName);
     await selector.click();
 
     // Wait for dropdown menu
@@ -1693,9 +2449,9 @@ export default class DashboardVariablesScoped {
     await dropdown.first().waitFor({ state: "visible", timeout });
     const count = await dropdown.count();
 
-    // Close dropdown
+    // Close dropdown by pressing Escape
     await this.page.keyboard.press('Escape');
-    await this.page.locator(SELECTORS.MENU).waitFor({ state: "hidden", timeout: 3000 });
+    await this.page.locator(SELECTORS.MENU).waitFor({ state: "hidden", timeout: 3000 }).catch(() => {});
 
     return count;
   }
@@ -1772,13 +2528,15 @@ export default class DashboardVariablesScoped {
    * @param {string} variableName - Variable name
    */
   async editVariable(variableName) {
+    // The row renders only after the drawer opens AND the dashboard fetch resolves,
+    // which under parallel load lands past 10s — use the same 30s as setupTestDashboard.
     const editBtn = this.page.locator(`[data-test="dashboard-edit-variable-${variableName}"]`);
-    await editBtn.waitFor({ state: "visible", timeout: 10000 });
+    await editBtn.waitFor({ state: "visible", timeout: 30000 });
     await editBtn.click();
 
     // Wait for form to be visible
     const nameInput = this.page.locator(SELECTORS.VARIABLE_NAME);
-    await nameInput.waitFor({ state: "visible", timeout: 10000 });
+    await nameInput.waitFor({ state: "visible", timeout: 15000 });
   }
 
   /**
@@ -1786,20 +2544,12 @@ export default class DashboardVariablesScoped {
    * @returns {Promise<string|null>} The error text or null if not visible
    */
   async getCycleErrorText() {
-    // Look for red-colored text containing "cycle"
-    const errorElement = this.page.locator('div[style*="color: red"], div[style*="color:red"], .text-negative, .text-red').filter({ hasText: /cycle/i });
+    const errorEl = this.page.locator('[data-test="dashboard-variable-cycle-error"]');
     try {
-      await errorElement.waitFor({ state: "visible", timeout: 3000 });
-      return await errorElement.textContent();
+      await errorEl.waitFor({ state: 'visible', timeout: 3000 });
+      return await errorEl.textContent();
     } catch {
-      // Fallback: search for any text with "Variables has cycle"
-      const fallback = this.page.getByText(/Variables has cycle/i);
-      try {
-        await fallback.waitFor({ state: "visible", timeout: 1000 });
-        return await fallback.textContent();
-      } catch {
-        return null;
-      }
+      return null;
     }
   }
 
@@ -1838,19 +2588,20 @@ export default class DashboardVariablesScoped {
     const variableTab = this.page.locator('[data-test="dashboard-settings-variable-tab"]');
     await variableTab.waitFor({ state: "visible", timeout: 10000 });
     await variableTab.click();
-    await this.page.waitForTimeout(500);
+    await this.page.locator('[data-test="dashboard-add-variable-btn"]').waitFor({ state: 'visible', timeout: 10000 });
 
     // Click Add Variable
     await this.page.locator(SELECTORS.ADD_VARIABLE_BTN).click();
 
-    // Fill variable name
-    await this.page.locator(SELECTORS.VARIABLE_NAME).fill(name);
+    // Fill variable name (use -field suffix to target the inner input, not the OInput wrapper)
+    await this.page.locator('[data-test="dashboard-variable-name-field"]').fill(name);
 
     // Select scope
     const normalizedScope = scope === 'panel' ? 'panels' : (scope === 'tab' ? 'tabs' : scope);
-    const scopeUIText = { 'global': 'Global', 'tabs': 'Selected Tabs', 'panels': 'Selected Panels' };
     await this.page.locator(SELECTORS.VARIABLE_SCOPE_SELECT).click();
-    await this.page.getByRole("option", { name: scopeUIText[normalizedScope] || normalizedScope, exact: true }).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator(`[data-test="dashboard-variable-scope-select-option"][data-test-value="${normalizedScope}"]`).click();
+    await this.page.locator('[data-test="dashboard-variable-scope-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
 
     // Select stream type
     await selectStreamType(this.page, streamType);
@@ -1874,8 +2625,8 @@ export default class DashboardVariablesScoped {
     await saveBtn.click();
 
     if (expectCycleError) {
-      // Wait briefly for error to appear, don't expect save success
-      await this.page.waitForTimeout(1000);
+      // Wait for cycle error to appear using the data-test attribute
+      await this.page.locator('[data-test="dashboard-variable-cycle-error"]').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
       return;
     }
 
@@ -1891,7 +2642,6 @@ export default class DashboardVariablesScoped {
       ]);
     } catch {
       await this.page.waitForLoadState('networkidle', { timeout: 5000 }).catch(() => {});
-      await this.page.waitForTimeout(500);
     }
   }
 
@@ -1900,24 +2650,8 @@ export default class DashboardVariablesScoped {
    * @param {string} streamNameOrVar - New stream name or $variable reference
    */
   async updateStream(streamNameOrVar) {
-    const streamSelect = this.page.locator(SELECTORS.VARIABLE_STREAM_SELECT);
-
-    // selectStreamFromDropdown handles click, fill, and option selection.
-    // Do NOT click beforehand — that would double-click and toggle the dropdown closed.
+    // selectStreamFromDropdown handles click, popover search fill, and option selection.
     await selectStreamFromDropdown(this.page, streamNameOrVar);
-
-    // Verify the stream value was actually set
-    const inputValue = await streamSelect.inputValue().catch(() => "");
-    if (!inputValue.includes(streamNameOrVar.replace('$', ''))) {
-      // Value not set correctly, try again with direct input
-      await streamSelect.click();
-      await streamSelect.fill(streamNameOrVar);
-      await this.page.keyboard.press('Tab'); // Trigger blur event
-    }
-
-    // Wait for any validation or dependency updates to process
-    // Increased wait time to ensure UI fully updates before save
-    await this.page.waitForTimeout(1500);
     await this.page.waitForLoadState('domcontentloaded').catch(() => {});
   }
 
@@ -1926,11 +2660,7 @@ export default class DashboardVariablesScoped {
    * @param {string} fieldNameOrVar - New field name or $variable reference
    */
   async updateField(fieldNameOrVar) {
-    const fieldSelect = this.page.locator(SELECTORS.VARIABLE_FIELD_SELECT);
-    await fieldSelect.click();
-    // Clear current field
-    await this.page.keyboard.press("Control+A");
-    await this.page.keyboard.press("Backspace");
+    // selectFieldFromDropdown handles click, popover search fill, and option selection.
     await selectFieldFromDropdown(this.page, fieldNameOrVar);
   }
 
@@ -1939,8 +2669,205 @@ export default class DashboardVariablesScoped {
    * @param {string} typeName - Type name (e.g., "Constant", "Query Values", "Custom", "Textbox")
    */
   async changeVariableType(typeName) {
+    const typeValueMap = {
+      'Query Values': 'query_values',
+      'Constant': 'constant',
+      'Textbox': 'textbox',
+      'Custom': 'custom',
+    };
+    const typeValue = typeValueMap[typeName] || typeName.toLowerCase().replace(/\s+/g, '_');
     await this.page.locator('[data-test="dashboard-variable-type-select"]').click();
-    await this.page.getByRole("option", { name: typeName, exact: true }).click();
-    await this.page.waitForTimeout(500);
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'visible', timeout: 5000 });
+    await this.page.locator(`[data-test="dashboard-variable-type-select-option"][data-test-value="${typeValue}"]`).click();
+    await this.page.locator('[data-test="dashboard-variable-type-select-popover"]').waitFor({ state: 'hidden', timeout: 5000 });
+  }
+
+  // ==========================================
+  // Dashboard Refresh Without Cache
+  // ==========================================
+
+  /**
+   * Open the dashboard refresh-options dropdown (the caret beside Refresh).
+   */
+  async openDashboardRefreshOptions() {
+    const trigger = this.page.locator('[data-test="dashboard-refresh-options-btn"]');
+    await trigger.waitFor({ state: "visible", timeout: 15000 });
+    // Disabled while any panel is loading.
+    await expect(trigger).toBeEnabled({ timeout: 30000 });
+    await trigger.click();
+  }
+
+  /**
+   * Locator for the dashboard-level "Refresh Cache & Reload" menu item.
+   * @returns {import('@playwright/test').Locator}
+   */
+  getRefreshWithoutCacheMenuItem() {
+    return this.page.locator('[data-test="dashboard-refresh-without-cache-btn"]');
+  }
+
+  /**
+   * Open the refresh-options dropdown, click "Refresh Cache & Reload", and wait
+   * for the resulting _search_stream request carrying clear_cache=true. Returns
+   * the matched request URL so the caller can assert the cache flag.
+   * @returns {Promise<URL>}
+   */
+  async clickRefreshWithoutCacheAndWaitForClearCache() {
+    const item = this.getRefreshWithoutCacheMenuItem();
+    const openItem = async () => {
+      await this.openDashboardRefreshOptions();
+      await item.waitFor({ state: "visible", timeout: 10000 });
+    };
+    // Reka UI dropdowns can drop a click that lands mid-animation — retry once.
+    try {
+      await openItem();
+    } catch {
+      await this.page.keyboard.press("Escape");
+      await item.waitFor({ state: "hidden", timeout: 5000 }).catch(() => {});
+      await openItem();
+    }
+
+    const [request] = await Promise.all([
+      this.page.waitForRequest(
+        (req) => req.url().includes("_search_stream") && req.url().includes("clear_cache=true"),
+        { timeout: 30000 }
+      ),
+      item.click(),
+    ]);
+    return new URL(request.url());
+  }
+
+  /**
+   * Locator for a panel's kebab dropdown button by its title.
+   * @param {string} title - Panel title
+   * @returns {import('@playwright/test').Locator}
+   */
+  getPanelKebab(title) {
+    return this.page.locator(`[data-test="dashboard-edit-panel-${title}-dropdown"]`);
+  }
+
+  /**
+   * Locator for the panel-level "Refresh Cache & Reload" menu item.
+   * @returns {import('@playwright/test').Locator}
+   */
+  getPanelRefreshWithoutCacheItem() {
+    return this.page.locator('[data-test="dashboard-refresh-without-cache"]');
+  }
+
+  /**
+   * Open a panel's kebab dropdown, click its "Refresh Cache & Reload" item, and
+   * wait for the resulting _search_stream request carrying clear_cache=true.
+   * @param {string} title - Panel title (kebab data-test suffix)
+   * @returns {Promise<URL>}
+   */
+  async clickPanelRefreshWithoutCacheAndWaitForClearCache(title) {
+    const kebab = this.getPanelKebab(title);
+    await kebab.waitFor({ state: "visible", timeout: 15000 });
+
+    // Reka UI dropdowns can drop a click that lands mid-animation — retry once.
+    const item = this.getPanelRefreshWithoutCacheItem();
+    const openItem = async () => {
+      await kebab.click();
+      await item.waitFor({ state: "visible", timeout: 10000 });
+    };
+    const clickAndWaitForClearCache = async (timeout) => {
+      try {
+        await openItem();
+      } catch {
+        await this.page.keyboard.press("Escape");
+        await openItem();
+      }
+      const [request] = await Promise.all([
+        this.page.waitForRequest(
+          (req) => req.url().includes("_search_stream") && req.url().includes("clear_cache=true"),
+          { timeout }
+        ),
+        item.click(),
+      ]);
+      return new URL(request.url());
+    };
+
+    try {
+      return await clickAndWaitForClearCache(15000);
+    } catch {
+      // onRefreshPanel() silently ignores the request while the panel is still loading.
+      testLogger.warn(`Panel "${title}" ignored Refresh Cache & Reload, retrying once idle`);
+      await this.page.keyboard.press("Escape");
+      await this.waitForPanelIdle(title);
+      return await clickAndWaitForClearCache(30000);
+    }
+  }
+
+  /**
+   * Locator for a panel container by its title.
+   * @param {string} title - Panel title
+   * @returns {import('@playwright/test').Locator}
+   */
+  getPanelContainerByTitle(title) {
+    return this.page.locator(`${SELECTORS.PANEL_CONTAINER}[data-test-panel-title="${title}"]`);
+  }
+
+  /**
+   * Wait until the titled panel has no query in flight and stays that way for `stableMs`.
+   * @param {string} title - Panel title
+   * @param {{ timeout?: number, stableMs?: number }} [options]
+   */
+  async waitForPanelIdle(title, { timeout = 30000, stableMs = 2000 } = {}) {
+    const container = this.getPanelContainerByTitle(title);
+    await container.waitFor({ state: "visible", timeout });
+    // The panel's own refresh button is bound to :disabled="isPanelLoading".
+    const btn = container.locator(SELECTORS.PANEL_REFRESH_BTN);
+    const deadline = Date.now() + timeout;
+    let idleSince = null;
+    // A freshly mounted panel reads idle before its first query starts, so idle must hold.
+    while (idleSince === null || Date.now() - idleSince < stableMs) {
+      if (Date.now() > deadline) {
+        throw new Error(`Panel "${title}" did not settle within ${timeout}ms`);
+      }
+      const enabled = await btn.isEnabled().catch(() => false);
+      if (!enabled) idleSince = null;
+      else if (idleSince === null) idleSince = Date.now();
+      await this.page.waitForTimeout(250);
+    }
+  }
+
+  /**
+   * Record the panel_id of every search request fired during `action` plus `settleMs`.
+   * @param {() => Promise<void>} action
+   * @param {number} [settleMs=3000]
+   * @returns {Promise<string[]>} panel ids, one entry per request
+   */
+  async capturePanelQueryIds(action, settleMs = 3000) {
+    const panelIds = [];
+    const onRequest = (req) => {
+      const url = new URL(req.url());
+      const panelId = url.searchParams.get("panel_id");
+      if (url.pathname.includes("_search") && panelId) panelIds.push(panelId);
+    };
+    this.page.on("request", onRequest);
+    try {
+      await action();
+      await this.page.waitForTimeout(settleMs);
+    } finally {
+      this.page.off("request", onRequest);
+    }
+    return panelIds;
+  }
+
+  /**
+   * Click the standard dashboard Refresh (cache ON) and wait for the resulting
+   * _search_stream request, returning its URL so the caller can assert the
+   * clear_cache param is absent.
+   * @returns {Promise<URL>}
+   */
+  async clickDashboardRefreshAndWaitForSearch() {
+    await expect(this.page.locator(SELECTORS.REFRESH_BTN)).toBeEnabled({ timeout: 30000 });
+    const [request] = await Promise.all([
+      this.page.waitForRequest(
+        (req) => req.url().includes("_search_stream"),
+        { timeout: 30000 }
+      ),
+      this.clickDashboardRefresh(),
+    ]);
+    return new URL(request.url());
   }
 }

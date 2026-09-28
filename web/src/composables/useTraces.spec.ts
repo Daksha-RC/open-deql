@@ -14,7 +14,10 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { nextTick } from "vue";
+import i18nInstance from "@/locales";
+import type { TranslateFn } from "@/types/i18n";
+
+const t = (i18nInstance.global as any).t as TranslateFn;
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -34,60 +37,108 @@ vi.mock("vue-router", () => ({
   })),
 }));
 
-vi.mock("vuex", () => ({
-  useStore: vi.fn(() => ({
-    state: {
-      selectedOrganization: { identifier: "test-org" },
-      zoConfig: { timestamp_column: "_timestamp" },
-      organizationData: {
-        organizationSettings: {
-          span_id_field_name: "span_id",
-          trace_id_field_name: "trace_id",
+// The span/trace id column names are org-configurable. Kept as one stable
+// mutable object so tests can repoint them and prove the query builders read
+// settings rather than hardcoding the defaults.
+const { mockOrgSettings } = vi.hoisted(() => ({
+  mockOrgSettings: {
+    span_id_field_name: "span_id",
+    trace_id_field_name: "trace_id",
+  } as Record<string, string | undefined>,
+}));
+
+vi.mock("vuex", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...(actual as object),
+    useStore: vi.fn(() => ({
+      state: {
+        selectedOrganization: { identifier: "test-org" },
+        zoConfig: { timestamp_column: "_timestamp", sql_reserved_keywords: [] },
+        organizationData: {
+          organizationSettings: mockOrgSettings,
         },
       },
-    },
-    dispatch: vi.fn(),
-  })),
-}));
+      dispatch: vi.fn(),
+    })),
+  };
+});
 
-const { mockCopyToClipboard, mockNotify } = vi.hoisted(() => ({
-  mockCopyToClipboard: vi.fn().mockResolvedValue(undefined),
-  mockNotify: vi.fn(),
-}));
-
-vi.mock("quasar", () => ({
-  copyToClipboard: mockCopyToClipboard,
-  useQuasar: vi.fn(() => ({ notify: mockNotify })),
+vi.mock("@/utils/clipboard", () => ({
+  copyToClipboard: vi.fn().mockResolvedValue(true),
 }));
 
 // useLocalTraceFilterField behaves like a ref: called with no args it returns the
 // current value; called with an arg it writes the new value.  We simulate that
 // contract so tests can inspect what was written.
 // vi.hoisted() ensures these declarations are available when vi.mock() factories run.
-const { localTraceFilterStore, mockUseLocalTraceFilterField } = vi.hoisted(
-  () => {
-    const localTraceFilterStore = { value: {} as Record<string, any> };
-    const mockUseLocalTraceFilterField = vi.fn((newVal?: any) => {
-      if (newVal !== undefined) {
-        localTraceFilterStore.value = newVal;
-      }
-      return localTraceFilterStore;
-    });
-    return { localTraceFilterStore, mockUseLocalTraceFilterField };
-  },
-);
+const { localTraceFilterStore, mockUseLocalTraceFilterField } = vi.hoisted(() => {
+  const localTraceFilterStore = { value: {} as Record<string, any> };
+  const mockUseLocalTraceFilterField = vi.fn((newVal?: any) => {
+    if (newVal !== undefined) {
+      localTraceFilterStore.value = newVal;
+    }
+    return localTraceFilterStore;
+  });
+  return { localTraceFilterStore, mockUseLocalTraceFilterField };
+});
 
-vi.mock("@/utils/zincutils", () => ({
-  b64EncodeStandard: vi.fn((s: string) => `b64std:${s}`),
-  b64EncodeUnicode: vi.fn((s: string) => `b64uni:${s}`),
-  useLocalTraceFilterField: mockUseLocalTraceFilterField,
-}));
+vi.mock("@/utils/zincutils", async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return {
+    ...actual,
+    b64EncodeStandard: vi.fn((s: string) => `b64std:${s}`),
+    b64EncodeUnicode: vi.fn((s: string) => `b64uni:${s}`),
+    useLocalTraceFilterField: mockUseLocalTraceFilterField,
+  };
+});
 
 vi.mock("@/utils/traces/traceColors", () => ({
   getSpanColorHex: vi.fn((index: number) => `#color-${index}`),
 }));
 
+// navigateToCorrelatedLogs resolves field names through the org's semantic
+// groups; tests drive that lookup by setting mockSemanticGroups.
+const { mockLoadSemanticGroups, mockSemanticGroups } = vi.hoisted(() => {
+  const mockSemanticGroups = { value: [] as any[] };
+  const mockLoadSemanticGroups = vi.fn(async () => mockSemanticGroups.value);
+  return { mockLoadSemanticGroups, mockSemanticGroups };
+});
+
+vi.mock("@/composables/useServiceCorrelation", () => ({
+  useServiceCorrelation: vi.fn(() => ({
+    loadSemanticGroups: mockLoadSemanticGroups,
+  })),
+}));
+
+// Mock serviceColorRegistry so the singleton internal registry does not
+// leak state between tests.  The composable imports
+//   `import { getOrSetServiceColor as registryGetOrSetServiceColor }`
+// which we replace with a controlled fn that delegates to the mocked
+// getSpanColorHex.
+const { mockRegistryGetOrSetServiceColor } = vi.hoisted(() => {
+  const localRegistry = new Map<string, string>();
+  let localColorIndex = 0;
+  const mockRegistryGetOrSetServiceColor = vi.fn((name: string) => {
+    if (!name) return "";
+    if (!localRegistry.has(name)) {
+      // Delegate to the mocked getSpanColorHex — but since we can't
+      // reference it inside a hoisted factory, we use a simple formula.
+      localRegistry.set(name, `#color-${localColorIndex}`);
+      localColorIndex++;
+    }
+    return localRegistry.get(name)!;
+  });
+  return { mockRegistryGetOrSetServiceColor };
+});
+
+vi.mock("@/utils/traces/serviceColorRegistry", () => ({
+  getOrSetServiceColor: mockRegistryGetOrSetServiceColor,
+  clearServiceColorRegistry: vi.fn(),
+}));
+
 import { getSpanColorHex } from "@/utils/traces/traceColors";
+import { copyToClipboard } from "@/utils/clipboard";
 import useTraces, { DEFAULT_TRACE_COLUMNS } from "./useTraces";
 
 // ---------------------------------------------------------------------------
@@ -95,6 +146,19 @@ import useTraces, { DEFAULT_TRACE_COLUMNS } from "./useTraces";
 describe("useTraces", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // Re-implement getSpanColorHex after clearAllMocks so it still returns valid colors
+    vi.mocked(getSpanColorHex).mockImplementation((index: number) => `#color-${index}`);
+    // Re-implement registryGetOrSetServiceColor with a fresh internal state
+    const localRegistry = new Map<string, string>();
+    let localColorIndex = 0;
+    mockRegistryGetOrSetServiceColor.mockImplementation((name: string) => {
+      if (!name) return "";
+      if (!localRegistry.has(name)) {
+        localRegistry.set(name, `#color-${localColorIndex}`);
+        localColorIndex++;
+      }
+      return localRegistry.get(name)!;
+    });
     // Reset the in-memory localStorage simulation
     localTraceFilterStore.value = {};
     // Re-wire the mock after clearAllMocks so it still has the implementation
@@ -104,6 +168,10 @@ describe("useTraces", () => {
       }
       return localTraceFilterStore;
     });
+    mockSemanticGroups.value = [];
+    mockLoadSemanticGroups.mockImplementation(async () => mockSemanticGroups.value);
+    mockOrgSettings.span_id_field_name = "span_id";
+    mockOrgSettings.trace_id_field_name = "trace_id";
     // Reset shared singleton state before each test
     const { resetSearchObj } = useTraces();
     resetSearchObj();
@@ -284,7 +352,7 @@ describe("useTraces", () => {
       expect(searchObj.data.searchAround.size).toBe(10);
     });
 
-    it("meta.searchMode defaults to traces", () => {
+    it("meta.searchMode defaults to spans", () => {
       const { searchObj } = useTraces();
       expect(searchObj.meta.searchMode).toBe("spans");
     });
@@ -374,27 +442,30 @@ describe("useTraces", () => {
       expect(params.span_id).toBe("span-xyz");
     });
 
-    it("includes search_mode=spans when searchMode is spans", () => {
+    it("includes tab=spans without the legacy search_mode parameter", () => {
       const { searchObj, getUrlQueryParams, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.meta.searchMode = "spans";
       const params = getUrlQueryParams(false);
-      expect(params.search_mode).toBe("spans");
+      expect(params.tab).toBe("spans");
+      expect(params.search_mode).toBeUndefined();
     });
 
-    it("does not include search_mode when searchMode is traces", () => {
+    it("includes tab=traces when searchMode is traces", () => {
       const { searchObj, getUrlQueryParams, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.meta.searchMode = "traces";
       const params = getUrlQueryParams(false);
+      expect(params.tab).toBe("traces");
       expect(params.search_mode).toBeUndefined();
     });
 
-    it("does not include search_mode when searchMode is service-graph", () => {
+    it("includes tab=service-graph when searchMode is service-graph", () => {
       const { searchObj, getUrlQueryParams, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.meta.searchMode = "service-graph";
       const params = getUrlQueryParams(false);
+      expect(params.tab).toBe("service-graph");
       expect(params.search_mode).toBeUndefined();
     });
 
@@ -465,13 +536,71 @@ describe("useTraces", () => {
       expect(String(details.query)).toContain("b64std:");
     });
 
+    it("names the id columns from the org's configured field names", () => {
+      mockOrgSettings.span_id_field_name = "custom_span_col";
+      mockOrgSettings.trace_id_field_name = "custom_trace_col";
+      const { searchObj, buildQueryDetails, resetSearchObj } = useTraces();
+      resetSearchObj();
+      searchObj.data.traceDetails.selectedLogStreams = ["my-logs"] as any;
+      searchObj.data.traceDetails.selectedTrace = {
+        trace_id: "trace-xyz",
+        trace_start_time: 0,
+        trace_end_time: 0,
+      };
+
+      const details = buildQueryDetails({ spanId: "s1", start_time: 1000, end_time: 2000 }, true);
+
+      expect(String(details.query).replace(/^b64std:/, "")).toBe(
+        "custom_span_col='s1' AND custom_trace_col='trace-xyz'",
+      );
+    });
+
+    // Regression: an ingested span/trace id containing a literal ' must not
+    // break out of the quoted SQL literal.
+    it("escapes an embedded single quote in the span and trace ids", () => {
+      const { searchObj, buildQueryDetails, resetSearchObj } = useTraces();
+      resetSearchObj();
+      searchObj.data.traceDetails.selectedLogStreams = ["my-logs"] as any;
+      searchObj.data.traceDetails.selectedTrace = {
+        trace_id: "trace'xyz",
+        trace_start_time: 0,
+        trace_end_time: 0,
+      };
+
+      const details = buildQueryDetails({ spanId: "s'1", start_time: 1000, end_time: 2000 }, true);
+
+      expect(String(details.query).replace(/^b64std:/, "")).toBe(
+        "span_id='s''1' AND trace_id='trace''xyz'",
+      );
+    });
+
+    // Regression: the field names were previously interpolated as
+    // String(settings.span_id_field_name) with no fallback, so an org missing
+    // the setting produced a column literally named "undefined".
+    it("falls back to span_id/trace_id instead of an 'undefined' column", () => {
+      mockOrgSettings.span_id_field_name = undefined;
+      mockOrgSettings.trace_id_field_name = undefined;
+      const { searchObj, buildQueryDetails, resetSearchObj } = useTraces();
+      resetSearchObj();
+      searchObj.data.traceDetails.selectedLogStreams = ["my-logs"] as any;
+      searchObj.data.traceDetails.selectedTrace = {
+        trace_id: "trace-xyz",
+        trace_start_time: 0,
+        trace_end_time: 0,
+      };
+
+      const query = String(
+        buildQueryDetails({ spanId: "s1", start_time: 1000, end_time: 2000 }, true).query,
+      ).replace(/^b64std:/, "");
+
+      expect(query).not.toContain("undefined");
+      expect(query).toBe("span_id='s1' AND trace_id='trace-xyz'");
+    });
+
     it("joins multiple log streams with comma", () => {
       const { searchObj, buildQueryDetails, resetSearchObj } = useTraces();
       resetSearchObj();
-      searchObj.data.traceDetails.selectedLogStreams = [
-        "stream-a",
-        "stream-b",
-      ] as any;
+      searchObj.data.traceDetails.selectedLogStreams = ["stream-a", "stream-b"] as any;
       searchObj.data.traceDetails.selectedTrace = {
         trace_id: "t",
         trace_start_time: 0,
@@ -500,9 +629,7 @@ describe("useTraces", () => {
         orgIdentifier: "test-org",
       });
 
-      expect(mockRouterPush).toHaveBeenCalledWith(
-        expect.objectContaining({ path: "/logs" }),
-      );
+      expect(mockRouterPush).toHaveBeenCalledWith(expect.objectContaining({ path: "/logs" }));
     });
 
     it("passes all query parameters to router.push", async () => {
@@ -524,12 +651,107 @@ describe("useTraces", () => {
   });
 
   // -------------------------------------------------------------------------
+  // navigateToCorrelatedLogs
+  // -------------------------------------------------------------------------
+  describe("navigateToCorrelatedLogs", () => {
+    const correlationProps = (filters: Record<string, string> = {}) => ({
+      logStreams: [{ stream_name: "app-logs", filters }],
+      timeRange: { startTime: 1000, endTime: 2000 },
+    });
+
+    // b64EncodeUnicode is mocked as `b64uni:<input>`, so the pushed query param
+    // carries the raw WHERE clause.
+    const pushedQuery = () =>
+      String(mockRouterPush.mock.calls[0][0].query.query).replace(/^b64uni:/, "");
+
+    const selectSpan = (spanId: string | null, traceId: string | null) => {
+      const { searchObj } = useTraces();
+      searchObj.data.traceDetails.selectedSpanId = spanId;
+      searchObj.data.traceDetails.selectedTrace = traceId
+        ? { trace_id: traceId, trace_start_time: 0, trace_end_time: 0 }
+        : null;
+    };
+
+    it("appends span_id and trace_id conditions to the stream filter conditions", async () => {
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan("span-1", "trace-1");
+
+      await navigateToCorrelatedLogs(correlationProps({ k8s_namespace_name: "prod" }));
+
+      expect(pushedQuery()).toBe(
+        "k8s_namespace_name = 'prod' and span_id = 'span-1' and trace_id = 'trace-1'",
+      );
+    });
+
+    it("adds the id conditions when the correlated stream has no filters", async () => {
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan("span-2", "trace-2");
+
+      await navigateToCorrelatedLogs(correlationProps());
+
+      expect(pushedQuery()).toBe("span_id = 'span-2' and trace_id = 'trace-2'");
+    });
+
+    it("omits each id condition when its value is unavailable", async () => {
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan(null, "trace-3");
+
+      await navigateToCorrelatedLogs(correlationProps());
+
+      expect(pushedQuery()).toBe("trace_id = 'trace-3'");
+    });
+
+    it("escapes single quotes in id values", async () => {
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan("sp'an", null);
+
+      await navigateToCorrelatedLogs(correlationProps());
+
+      expect(pushedQuery()).toBe("span_id = 'sp''an'");
+    });
+
+    it("emits one condition when an id field shares a semantic group with a stream filter", async () => {
+      mockSemanticGroups.value = [{ id: "trace-id", fields: ["traceId", "trace_id"] }];
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan(null, "trace-4");
+
+      await navigateToCorrelatedLogs(correlationProps({ traceId: "stale-value" }));
+
+      // The exact trace id wins over the stream's alias for the same group.
+      expect(pushedQuery()).toBe("trace_id = 'trace-4'");
+    });
+
+    it("names the id columns from the org's configured field names", async () => {
+      mockOrgSettings.span_id_field_name = "custom_span_col";
+      mockOrgSettings.trace_id_field_name = "custom_trace_col";
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan("span-5", "trace-5");
+
+      await navigateToCorrelatedLogs(correlationProps());
+
+      expect(pushedQuery()).toBe("custom_span_col = 'span-5' and custom_trace_col = 'trace-5'");
+    });
+
+    it("falls back to span_id/trace_id when the org settings are absent", async () => {
+      mockOrgSettings.span_id_field_name = undefined;
+      mockOrgSettings.trace_id_field_name = undefined;
+      const { navigateToCorrelatedLogs } = useTraces();
+      selectSpan("span-6", "trace-6");
+
+      await navigateToCorrelatedLogs(correlationProps());
+
+      expect(pushedQuery()).toBe("span_id = 'span-6' and trace_id = 'trace-6'");
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // copyTracesUrl
   // -------------------------------------------------------------------------
   describe("copyTracesUrl", () => {
-    it("calls copyToClipboard with a URL string", async () => {
+    it("calls copyToClipboard with a URL string", () => {
       const { searchObj, copyTracesUrl, resetSearchObj } = useTraces();
       resetSearchObj();
+      searchObj.data.stream.selectedStream = { label: "s", value: "test-stream" };
       searchObj.data.datetime = {
         type: "relative",
         relativeTimePeriod: "15m",
@@ -537,17 +759,19 @@ describe("useTraces", () => {
         endTime: 0,
       };
 
-      await copyTracesUrl();
+      copyTracesUrl(t);
 
-      expect(mockCopyToClipboard).toHaveBeenCalledWith(
+      expect(vi.mocked(copyToClipboard)).toHaveBeenCalledWith(
         expect.stringContaining("http"),
+        expect.any(Function),
+        expect.objectContaining({ successMessage: expect.any(String) }),
       );
     });
 
-    it("shows positive notification after successful copy", async () => {
-      mockCopyToClipboard.mockResolvedValue(undefined);
+    it("passes successMessage option to copyToClipboard", () => {
       const { searchObj, copyTracesUrl, resetSearchObj } = useTraces();
       resetSearchObj();
+      searchObj.data.stream.selectedStream = { label: "s", value: "test-stream" };
       searchObj.data.datetime = {
         type: "relative",
         relativeTimePeriod: "15m",
@@ -555,19 +779,22 @@ describe("useTraces", () => {
         endTime: 0,
       };
 
-      await copyTracesUrl();
-      // Give microtasks a chance to run
-      await nextTick();
+      copyTracesUrl(t);
 
-      expect(mockNotify).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "positive" }),
+      expect(vi.mocked(copyToClipboard)).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Function),
+        expect.objectContaining({
+          successMessage: "Link Copied Successfully!",
+          timeout: 5000,
+        }),
       );
     });
 
-    it("shows negative notification on copy failure", async () => {
-      mockCopyToClipboard.mockRejectedValue(new Error("denied"));
+    it("passes errorMessage option to copyToClipboard", () => {
       const { searchObj, copyTracesUrl, resetSearchObj } = useTraces();
       resetSearchObj();
+      searchObj.data.stream.selectedStream = { label: "s", value: "test-stream" };
       searchObj.data.datetime = {
         type: "relative",
         relativeTimePeriod: "15m",
@@ -575,17 +802,21 @@ describe("useTraces", () => {
         endTime: 0,
       };
 
-      await copyTracesUrl();
-      await nextTick();
+      copyTracesUrl(t);
 
-      expect(mockNotify).toHaveBeenCalledWith(
-        expect.objectContaining({ type: "negative" }),
+      expect(vi.mocked(copyToClipboard)).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Function),
+        expect.objectContaining({
+          errorMessage: "Error while copying link.",
+        }),
       );
     });
 
     it("overrides from/to with customTimeRange when provided", () => {
       const { searchObj, copyTracesUrl, resetSearchObj } = useTraces();
       resetSearchObj();
+      searchObj.data.stream.selectedStream = { label: "s", value: "test-stream" };
       searchObj.data.datetime = {
         type: "relative",
         relativeTimePeriod: "15m",
@@ -593,9 +824,9 @@ describe("useTraces", () => {
         endTime: 0,
       };
 
-      copyTracesUrl({ from: "1000", to: "9999" });
+      copyTracesUrl(t, { from: "1000", to: "9999" });
 
-      const clipboardArg = mockCopyToClipboard.mock.calls[0][0];
+      const clipboardArg = vi.mocked(copyToClipboard).mock.calls[0][0];
       expect(clipboardArg).toContain("from=1000");
       expect(clipboardArg).toContain("to=9999");
     });
@@ -622,7 +853,7 @@ describe("useTraces", () => {
     });
 
     it("returns same number of items as input", () => {
-      const { formatTracesMetaData, searchObj } = useTraces();
+      const { formatTracesMetaData } = useTraces();
       const traces = [
         {
           trace_id: "t1",
@@ -756,18 +987,18 @@ describe("useTraces", () => {
           service_name: [],
           spans: [1, 0],
           first_event: {},
-          llm_usage_tokens_input: 100,
-          llm_usage_tokens_output: 200,
-          llm_usage_tokens_total: 300,
-          llm_usage_cost_total: 0.05,
+          gen_ai_usage_input_tokens: 100,
+          gen_ai_usage_output_tokens: 200,
+          gen_ai_usage_total_tokens: 300,
+          gen_ai_usage_cost: 0.05,
         },
       ];
 
       const [item] = formatTracesMetaData(traces);
-      expect(item.llm_usage_details_input).toBe(100);
-      expect(item.llm_usage_details_output).toBe(200);
-      expect(item.llm_usage_details_total).toBe(300);
-      expect(item.llm_cost_details_total).toBe(0.05);
+      expect(item.gen_ai_usage_input_tokens).toBe(100);
+      expect(item.gen_ai_usage_output_tokens).toBe(200);
+      expect(item.gen_ai_usage_total_tokens).toBe(300);
+      expect(item.gen_ai_usage_cost).toBe(0.05);
     });
   });
 
@@ -776,25 +1007,19 @@ describe("useTraces", () => {
   // -------------------------------------------------------------------------
   describe("DEFAULT_TRACE_COLUMNS", () => {
     it("has exactly the keys 'traces' and 'spans'", () => {
-      expect(Object.keys(DEFAULT_TRACE_COLUMNS).sort()).toEqual(
-        ["spans", "traces"].sort(),
-      );
+      expect(Object.keys(DEFAULT_TRACE_COLUMNS).sort()).toEqual(["spans", "traces"].sort());
     });
 
     it("traces columns is a non-empty array of strings", () => {
       expect(Array.isArray(DEFAULT_TRACE_COLUMNS.traces)).toBe(true);
       expect(DEFAULT_TRACE_COLUMNS.traces.length).toBeGreaterThan(0);
-      DEFAULT_TRACE_COLUMNS.traces.forEach((col) =>
-        expect(typeof col).toBe("string"),
-      );
+      DEFAULT_TRACE_COLUMNS.traces.forEach((col) => expect(typeof col).toBe("string"));
     });
 
     it("spans columns is a non-empty array of strings", () => {
       expect(Array.isArray(DEFAULT_TRACE_COLUMNS.spans)).toBe(true);
       expect(DEFAULT_TRACE_COLUMNS.spans.length).toBeGreaterThan(0);
-      DEFAULT_TRACE_COLUMNS.spans.forEach((col) =>
-        expect(typeof col).toBe("string"),
-      );
+      DEFAULT_TRACE_COLUMNS.spans.forEach((col) => expect(typeof col).toBe("string"));
     });
 
     it("traces columns contains the expected fields", () => {
@@ -828,8 +1053,7 @@ describe("useTraces", () => {
   // -------------------------------------------------------------------------
   describe("updatedLocalLogFilterField", () => {
     it("should store selectedFields under all[key][searchMode] for traces mode", () => {
-      const { searchObj, updatedLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, updatedLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org1";
       searchObj.data.stream.selectedStream = { label: "s", value: "my-stream" };
@@ -843,8 +1067,7 @@ describe("useTraces", () => {
     });
 
     it("should store selectedFields under all[key][searchMode] for spans mode", () => {
-      const { searchObj, updatedLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, updatedLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org1";
       searchObj.data.stream.selectedStream = { label: "s", value: "my-stream" };
@@ -858,8 +1081,7 @@ describe("useTraces", () => {
     });
 
     it("should default searchMode to traces when no argument is provided", () => {
-      const { searchObj, updatedLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, updatedLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "orgX";
       searchObj.data.stream.selectedStream = {
@@ -875,8 +1097,7 @@ describe("useTraces", () => {
     });
 
     it("should preserve existing sibling mode data when updating one mode", () => {
-      const { searchObj, updatedLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, updatedLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org2";
       searchObj.data.stream.selectedStream = { label: "s", value: "stream2" };
@@ -895,8 +1116,7 @@ describe("useTraces", () => {
     });
 
     it("should use 'default' as org identifier when organizationIdentifier is empty", () => {
-      const { searchObj, updatedLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, updatedLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "";
       searchObj.data.stream.selectedStream = {
@@ -916,8 +1136,7 @@ describe("useTraces", () => {
   // -------------------------------------------------------------------------
   describe("loadLocalLogFilterField", () => {
     it("should load saved traces fields from localStorage when they exist", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org1";
       searchObj.data.stream.selectedStream = {
@@ -932,15 +1151,11 @@ describe("useTraces", () => {
 
       loadLocalLogFilterField("traces");
 
-      expect(searchObj.data.stream.selectedFields).toEqual([
-        "service_name",
-        "spans",
-      ]);
+      expect(searchObj.data.stream.selectedFields).toEqual(["service_name", "spans"]);
     });
 
     it("should load saved spans fields from localStorage when they exist", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org1";
       searchObj.data.stream.selectedStream = {
@@ -954,15 +1169,11 @@ describe("useTraces", () => {
 
       loadLocalLogFilterField("spans");
 
-      expect(searchObj.data.stream.selectedFields).toEqual([
-        "operation_name",
-        "method",
-      ]);
+      expect(searchObj.data.stream.selectedFields).toEqual(["operation_name", "method"]);
     });
 
     it("should fall back to DEFAULT_TRACE_COLUMNS.traces when no saved data exists", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org-new";
       searchObj.data.stream.selectedStream = {
@@ -973,14 +1184,11 @@ describe("useTraces", () => {
       // Store is empty — no entry for this key
       loadLocalLogFilterField("traces");
 
-      expect(searchObj.data.stream.selectedFields).toEqual([
-        ...DEFAULT_TRACE_COLUMNS.traces,
-      ]);
+      expect(searchObj.data.stream.selectedFields).toEqual([...DEFAULT_TRACE_COLUMNS.traces]);
     });
 
     it("should fall back to DEFAULT_TRACE_COLUMNS.spans when no saved data exists for spans mode", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org-new";
       searchObj.data.stream.selectedStream = {
@@ -990,14 +1198,11 @@ describe("useTraces", () => {
 
       loadLocalLogFilterField("spans");
 
-      expect(searchObj.data.stream.selectedFields).toEqual([
-        ...DEFAULT_TRACE_COLUMNS.spans,
-      ]);
+      expect(searchObj.data.stream.selectedFields).toEqual([...DEFAULT_TRACE_COLUMNS.spans]);
     });
 
     it("should fall back to defaults when the saved entry exists but the mode array is empty", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org1";
       searchObj.data.stream.selectedStream = {
@@ -1010,14 +1215,11 @@ describe("useTraces", () => {
 
       loadLocalLogFilterField("traces");
 
-      expect(searchObj.data.stream.selectedFields).toEqual([
-        ...DEFAULT_TRACE_COLUMNS.traces,
-      ]);
+      expect(searchObj.data.stream.selectedFields).toEqual([...DEFAULT_TRACE_COLUMNS.traces]);
     });
 
     it("should default to traces mode when no argument is provided", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org1";
       searchObj.data.stream.selectedStream = {
@@ -1035,8 +1237,7 @@ describe("useTraces", () => {
     });
 
     it("should use 'default' as org identifier when organizationIdentifier is empty", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "";
       searchObj.data.stream.selectedStream = {
@@ -1050,15 +1251,11 @@ describe("useTraces", () => {
 
       loadLocalLogFilterField("traces");
 
-      expect(searchObj.data.stream.selectedFields).toEqual([
-        "duration",
-        "status",
-      ]);
+      expect(searchObj.data.stream.selectedFields).toEqual(["duration", "status"]);
     });
 
     it("should return a copy of the defaults so mutations do not affect DEFAULT_TRACE_COLUMNS", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org-copy";
       searchObj.data.stream.selectedStream = {
@@ -1075,9 +1272,8 @@ describe("useTraces", () => {
       expect(DEFAULT_TRACE_COLUMNS.traces).not.toContain("extra_field");
     });
 
-    it("should migrate old 'status' field to 'span_status' in spans mode", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+    it("should keep 'status' field as-is in spans mode (no migration)", () => {
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org-migrate";
       searchObj.data.stream.selectedStream = {
@@ -1085,23 +1281,23 @@ describe("useTraces", () => {
         value: "migrate-stream",
       };
 
-      // Simulate a saved preference that still has the old "status" field
+      // Simulate a saved preference that has a "status" data field
       localTraceFilterStore.value["org-migrate_migrate-stream"] = {
         spans: ["operation_name", "status", "status_code"],
       };
 
       loadLocalLogFilterField("spans");
 
+      // "status" is a regular data field in spans mode — must remain unchanged
       expect(searchObj.data.stream.selectedFields).toEqual([
         "operation_name",
-        "span_status",
+        "status",
         "status_code",
       ]);
     });
 
     it("should NOT migrate 'status' to 'span_status' in traces mode", () => {
-      const { searchObj, loadLocalLogFilterField, resetSearchObj } =
-        useTraces();
+      const { searchObj, loadLocalLogFilterField, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.organizationIdentifier = "org-no-migrate";
       searchObj.data.stream.selectedStream = {
@@ -1194,10 +1390,7 @@ describe("useTraces", () => {
       resetSearchObj();
       searchObj.meta.serviceColors = { "existing-svc": "#color-0" };
 
-      setServiceColors([
-        { service_name: "existing-svc" },
-        { service_name: "new-svc" },
-      ]);
+      setServiceColors([{ service_name: "existing-svc" }, { service_name: "new-svc" }]);
 
       // Existing color must remain unchanged
       expect(searchObj.meta.serviceColors["existing-svc"]).toBe("#color-0");
@@ -1209,7 +1402,8 @@ describe("useTraces", () => {
       // [auto-generated]
       const { setServiceColors, searchObj, resetSearchObj } = useTraces();
       resetSearchObj();
-      // Pre-populate 2 colors so colorIndex starts at 2
+      // Pre-populate 2 colors — registryGetOrSetServiceColor uses its own
+      // internal registry, so the first call for "svc-3" gets index 0.
       searchObj.meta.serviceColors = {
         "svc-1": "#color-0",
         "svc-2": "#color-1",
@@ -1218,8 +1412,8 @@ describe("useTraces", () => {
       setServiceColors([{ service_name: "svc-3" }]);
 
       // getSpanColorHex is mocked as (index) => `#color-${index}`
-      // colorIndex = Object.keys(serviceColors).length = 2 before insertion
-      expect(searchObj.meta.serviceColors["svc-3"]).toBe("#color-2");
+      // registryGetOrSetServiceColor("svc-3") calls getSpanColorHex(0)
+      expect(searchObj.meta.serviceColors["svc-3"]).toBe("#color-0");
     });
   });
 
@@ -1246,25 +1440,24 @@ describe("useTraces", () => {
       resetSearchObj();
       searchObj.meta.serviceColors = {};
 
-      // Override the mock to return a specific hex for this test
-      vi.mocked(getSpanColorHex).mockReturnValueOnce("#abcdef");
-
+      // registryGetOrSetServiceColor is mocked to return #color-0 for the
+      // first unknown service (fresh beforeEach state).
       const color = getOrSetServiceColor("new-service");
 
-      expect(color).toBe("#abcdef");
-      expect(searchObj.meta.serviceColors["new-service"]).toBe("#abcdef");
-      // Should have been called with index 0 since serviceColors was empty
-      expect(getSpanColorHex).toHaveBeenCalledWith(0);
+      expect(color).toBe("#color-0");
+      expect(searchObj.meta.serviceColors["new-service"]).toBe("#color-0");
     });
 
-    it("should return undefined for empty string input", () => {
+    it("should return empty string for empty string input", () => {
       const { getOrSetServiceColor, searchObj, resetSearchObj } = useTraces();
       resetSearchObj();
       searchObj.meta.serviceColors = {};
 
       const color = getOrSetServiceColor("");
 
-      expect(color).toBeUndefined();
+      // registryGetOrSetServiceColor("") returns "", and since serviceName
+      // is falsy no entry is added to serviceColors. The fallback returns "".
+      expect(color).toBe("");
       // Should not have added any color for empty string
       expect(Object.keys(searchObj.meta.serviceColors)).toHaveLength(0);
     });

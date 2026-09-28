@@ -24,12 +24,9 @@ use sea_orm::{
     QuerySelect, Schema, Set, entity::prelude::*,
 };
 
-use super::{
-    entity::organizations::{ActiveModel, Column, Entity, Model},
-    get_lock,
-};
+use super::entity::organizations::{ActiveModel, Column, Entity, Model};
 use crate::{
-    db::{ORM_CLIENT, connect_to_orm},
+    db::{get_orm_client_ro, get_orm_client_rw},
     errors::{self, DbError, Error},
 };
 
@@ -41,8 +38,10 @@ pub struct OrganizationRecord {
     pub identifier: String,
     pub org_name: String,
     pub org_type: OrganizationType,
+    pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub deleted_at: Option<i64>,
     #[cfg(feature = "cloud")]
     pub trial_ends_at: i64,
 }
@@ -54,8 +53,10 @@ impl OrganizationRecord {
             identifier: identifier.to_string(),
             org_name: org_name.to_string(),
             org_type,
+            status: "active".to_string(),
             created_at: now,
             updated_at: now,
+            deleted_at: None,
             #[cfg(feature = "cloud")]
             trial_ends_at: now + day_micros(14),
         }
@@ -68,8 +69,10 @@ impl From<Model> for OrganizationRecord {
             identifier: model.identifier,
             org_name: model.org_name,
             org_type: model.org_type.into(),
+            status: model.status,
             created_at: model.created_at,
             updated_at: model.updated_at,
+            deleted_at: model.deleted_at,
             #[cfg(feature = "cloud")]
             trial_ends_at: model.trial_ends_at,
         }
@@ -100,7 +103,7 @@ pub struct OrgId {
 }
 
 pub async fn create_table() -> Result<(), errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     let builder = client.get_database_backend();
 
     let schema = Schema::new(builder);
@@ -127,8 +130,10 @@ pub async fn add(
         identifier: Set(org_id.to_string()),
         org_name: Set(org_name.to_string()),
         org_type: Set(org_type.into()),
+        status: Set("active".to_string()),
         created_at: Set(now),
         updated_at: Set(now),
+        deleted_at: Set(None),
         #[cfg(feature = "cloud")]
         trial_ends_at: Set(now + day_micros(15)),
     };
@@ -137,16 +142,15 @@ pub async fn add(
         identifier: org_id.to_string(),
         org_name: org_name.to_string(),
         org_type,
+        status: "active".to_string(),
         created_at: now,
         updated_at: now,
+        deleted_at: None,
         #[cfg(feature = "cloud")]
         trial_ends_at: now + day_micros(15),
     };
 
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     match Entity::insert(record).exec(client).await {
         Ok(_) => {
             let mut cache = CACHE.write().await;
@@ -162,12 +166,9 @@ pub async fn add(
 
 #[cfg(feature = "cloud")]
 pub async fn set_trial_period_end(org_id: &str, new_end: i64) -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
     let update_time = chrono::Utc::now().timestamp_micros();
 
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     Entity::update_many()
         .col_expr(Column::TrialEndsAt, Expr::value(new_end))
         .col_expr(Column::UpdatedAt, Expr::value(update_time))
@@ -188,12 +189,9 @@ pub async fn set_trial_period_end(org_id: &str, new_end: i64) -> Result<(), erro
 }
 
 pub async fn rename(org_id: &str, new_name: &str) -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
     let update_time = chrono::Utc::now().timestamp_micros();
 
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     Entity::update_many()
         .col_expr(Column::OrgName, Expr::value(new_name.to_string()))
         .col_expr(
@@ -216,10 +214,7 @@ pub async fn rename(org_id: &str, new_name: &str) -> Result<(), errors::Error> {
 }
 
 pub async fn remove(org_id: &str) -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     Entity::delete_many()
         .filter(Column::Identifier.eq(org_id))
         .exec(client)
@@ -235,7 +230,7 @@ pub async fn remove(org_id: &str) -> Result<(), errors::Error> {
 }
 
 pub async fn get(org_id: &str) -> Result<OrganizationRecord, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     {
         let cache = CACHE.read().await;
         if let Some(v) = cache.get(org_id) {
@@ -261,7 +256,7 @@ pub async fn get(org_id: &str) -> Result<OrganizationRecord, errors::Error> {
 }
 
 pub async fn list(filter: ListFilter) -> Result<Vec<OrganizationRecord>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let mut res = Entity::find().order_by(Column::CreatedAt, Order::Desc);
     if let Some(limit) = filter.limit {
         res = res.limit(limit as u64);
@@ -284,7 +279,7 @@ pub async fn list(filter: ListFilter) -> Result<Vec<OrganizationRecord>, errors:
 }
 
 pub async fn get_by_name(org_name: &str) -> Result<Vec<OrganizationRecord>, errors::Error> {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let records = Entity::find()
         .filter(Column::OrgName.eq(org_name))
         .all(client)
@@ -298,7 +293,7 @@ pub async fn get_by_name(org_name: &str) -> Result<Vec<OrganizationRecord>, erro
 }
 
 pub async fn len() -> usize {
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_ro().await;
     let len = Entity::find().count(client).await;
 
     match len {
@@ -311,10 +306,7 @@ pub async fn len() -> usize {
 }
 
 pub async fn clear() -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     Entity::delete_many()
         .exec(client)
         .await
@@ -328,10 +320,7 @@ pub async fn is_empty() -> bool {
 }
 
 pub async fn batch_remove(org_ids: Vec<String>) -> Result<(), errors::Error> {
-    // make sure only one client is writing to the database(only for sqlite)
-    let _lock = get_lock().await;
-
-    let client = ORM_CLIENT.get_or_init(connect_to_orm).await;
+    let client = get_orm_client_rw().await;
     Entity::delete_many()
         .filter(Column::Identifier.is_in(org_ids.clone()))
         .exec(client)
@@ -346,6 +335,74 @@ pub async fn batch_remove(org_ids: Vec<String>) -> Result<(), errors::Error> {
     }
 
     Ok(())
+}
+
+pub async fn set_status(org_id: &str, status: &str) -> Result<(), errors::Error> {
+    let client = get_orm_client_rw().await;
+    let now = config::utils::time::now_micros();
+    Entity::update_many()
+        .col_expr(Column::Status, Expr::value(status))
+        .col_expr(Column::UpdatedAt, Expr::value(now))
+        .filter(Column::Identifier.eq(org_id))
+        .exec(client)
+        .await
+        .map_err(|e| errors::Error::Message(e.to_string()))?;
+    invalidate_cache(Some(org_id)).await;
+    Ok(())
+}
+
+/// CAS update: sets status to `new_status` only when current status is `expected_status`.
+/// Returns `true` if the row was updated (i.e. this caller won the race), `false` if another
+/// writer already changed the status.
+pub async fn set_status_if(
+    org_id: &str,
+    expected_status: &str,
+    new_status: &str,
+) -> Result<bool, errors::Error> {
+    let client = get_orm_client_rw().await;
+    let now = config::utils::time::now_micros();
+    let result = Entity::update_many()
+        .col_expr(Column::Status, Expr::value(new_status))
+        .col_expr(Column::UpdatedAt, Expr::value(now))
+        .filter(Column::Identifier.eq(org_id))
+        .filter(Column::Status.eq(expected_status))
+        .exec(client)
+        .await
+        .map_err(|e| errors::Error::Message(e.to_string()))?;
+    if result.rows_affected > 0 {
+        invalidate_cache(Some(org_id)).await;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// CAS update that also sets `deleted_at` in the same statement. Sets status to
+/// `new_status` (and `deleted_at` to the given value) only when the current status
+/// is `expected_status`. Returns true if a row was updated.
+pub async fn set_status_if_with_deleted_at(
+    org_id: &str,
+    expected_status: &str,
+    new_status: &str,
+    deleted_at: Option<i64>,
+) -> Result<bool, errors::Error> {
+    let client = get_orm_client_rw().await;
+    let now = config::utils::time::now_micros();
+    let result = Entity::update_many()
+        .col_expr(Column::Status, Expr::value(new_status))
+        .col_expr(Column::DeletedAt, Expr::value(deleted_at))
+        .col_expr(Column::UpdatedAt, Expr::value(now))
+        .filter(Column::Identifier.eq(org_id))
+        .filter(Column::Status.eq(expected_status))
+        .exec(client)
+        .await
+        .map_err(|e| errors::Error::Message(e.to_string()))?;
+    if result.rows_affected > 0 {
+        invalidate_cache(Some(org_id)).await;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
 }
 
 pub async fn invalidate_cache(org_id: Option<&str>) {
@@ -412,8 +469,10 @@ mod tests {
             identifier: "test-org".to_string(),
             org_name: "Test Org".to_string(),
             org_type: 0,
+            status: "active".to_string(),
             created_at: 1_000_000,
             updated_at: 2_000_000,
+            deleted_at: None,
         };
         let rec = OrganizationRecord::from(model);
         assert_eq!(rec.identifier, "test-org");
@@ -421,5 +480,22 @@ mod tests {
         assert_eq!(rec.org_type, OrganizationType::Default);
         assert_eq!(rec.created_at, 1_000_000);
         assert_eq!(rec.updated_at, 2_000_000);
+        assert!(rec.deleted_at.is_none());
+    }
+
+    #[test]
+    fn test_organization_record_has_deleted_at_field() {
+        let rec = OrganizationRecord {
+            identifier: "o".to_string(),
+            org_name: "o".to_string(),
+            org_type: OrganizationType::Default,
+            status: "active".to_string(),
+            created_at: 1,
+            updated_at: 2,
+            deleted_at: None,
+            #[cfg(feature = "cloud")]
+            trial_ends_at: 0,
+        };
+        assert!(rec.deleted_at.is_none());
     }
 }

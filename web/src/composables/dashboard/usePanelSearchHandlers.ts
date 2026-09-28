@@ -14,18 +14,15 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { toRaw, markRaw } from "vue";
-import {
-  detectChunkingDirection,
-  shouldPrependChunk,
-} from "@/utils/dashboard/chunkingDirection";
+import { gt } from "@/types/i18n";
+import { detectChunkingDirection, shouldPrependChunk } from "@/utils/dashboard/chunkingDirection";
 
 /**
  * Composable that encapsulates all streaming search response event handlers
  * for histogram / SQL panel queries.
  *
- * All handlers receive `state` by reference (it is the same reactive object
- * created in usePanelDataLoader) so mutations here are equivalent to
- * mutations in the original closure ΓÇö no behavioural change.
+ * All handlers receive `state` by reference (the same reactive object created
+ * in usePanelDataLoader), so mutations here update the caller's state directly.
  */
 export const usePanelSearchHandlers = ({
   state,
@@ -87,15 +84,9 @@ export const usePanelSearchHandlers = ({
         const shouldPrepend = shouldPrependChunk(buffer.isLTR, buffer.orderAsc);
 
         if (shouldPrepend) {
-          state.data[queryIndex] = markRaw([
-            ...allNewHits,
-            ...toRaw(state.data[queryIndex] ?? []),
-          ]);
+          state.data[queryIndex] = markRaw([...allNewHits, ...toRaw(state.data[queryIndex] ?? [])]);
         } else {
-          state.data[queryIndex] = markRaw([
-            ...toRaw(state.data[queryIndex] ?? []),
-            ...allNewHits,
-          ]);
+          state.data[queryIndex] = markRaw([...toRaw(state.data[queryIndex] ?? []), ...allNewHits]);
         }
       }
 
@@ -135,11 +126,15 @@ export const usePanelSearchHandlers = ({
       state.data[queryIndex] = [];
     }
 
+    // Initialize metadata array if not exists (mirrors the data init above).
+    // The push() below assumes this slot is an array; don't rely on the caller
+    // having pre-initialized it.
+    if (!state.resultMetaData[queryIndex]) {
+      state.resultMetaData[queryIndex] = [];
+    }
+
     // Detect chunking direction on first chunk for this query
-    if (
-      !state.resultMetaData[queryIndex] ||
-      state.resultMetaData[queryIndex].length === 0
-    ) {
+    if (!state.resultMetaData[queryIndex] || state.resultMetaData[queryIndex].length === 0) {
       // time_offset may be at content.results.time_offset (search_response)
       // or at content.time_offset (search_response_metadata format)
       const direction = detectChunkingDirection(
@@ -162,15 +157,12 @@ export const usePanelSearchHandlers = ({
     }
 
     const isLTR = chunkingLeftToRight.get(queryIndex) ?? false;
-    const orderAsc =
-      searchRes?.content?.results?.order_by?.toLowerCase() === "asc";
+    const orderAsc = searchRes?.content?.results?.order_by?.toLowerCase() === "asc";
     const shouldPrepend = shouldPrependChunk(isLTR, orderAsc);
 
     // if streaming aggs, replace the state data
     if (streaming_aggs) {
-      state.data[queryIndex] = markRaw([
-        ...(searchRes?.content?.results?.hits ?? {}),
-      ]);
+      state.data[queryIndex] = markRaw([...(searchRes?.content?.results?.hits ?? {})]);
     } else if (shouldPrepend) {
       state.data[queryIndex] = markRaw([
         ...(searchRes?.content?.results?.hits ?? {}),
@@ -243,17 +235,12 @@ export const usePanelSearchHandlers = ({
       state.data[queryIndex] = [];
     }
 
-    const lastPartitionIndex = Math.max(
-      state?.resultMetaData?.[queryIndex]?.length - 1,
-      0,
-    );
+    const lastPartitionIndex = Math.max((state?.resultMetaData?.[queryIndex]?.length ?? 0) - 1, 0);
     // is streaming aggs
     const streaming_aggs =
-      state?.resultMetaData?.[queryIndex]?.[lastPartitionIndex]
-        ?.streaming_aggs ?? false;
+      state?.resultMetaData?.[queryIndex]?.[lastPartitionIndex]?.streaming_aggs ?? false;
     const orderAsc =
-      state?.resultMetaData?.[queryIndex]?.[lastPartitionIndex]
-        ?.order_by?.toLowerCase() === "asc";
+      state?.resultMetaData?.[queryIndex]?.[lastPartitionIndex]?.order_by?.toLowerCase() === "asc";
 
     const hits = searchRes?.content?.results?.hits ?? [];
 
@@ -335,7 +322,7 @@ export const usePanelSearchHandlers = ({
       state.loadingProgressPercentage = 0;
       state.isPartialData = false;
       state.errorDetail = {
-        message: error?.message || "Unknown error in search response",
+        message: error?.message || gt("dashboard.unknownErrorInSearchResponse"),
         code: error?.code ?? "",
       };
     }
@@ -356,8 +343,7 @@ export const usePanelSearchHandlers = ({
     if (errorCodes.includes(response.code)) {
       handleSearchError(payload, {
         content: {
-          message:
-            "WebSocket connection terminated unexpectedly. Please check your network and try again",
+          message: gt("dashboard.websocketConnectionTerminated"),
           trace_id: payload.traceId,
           code: response.code,
           error_detail: "",
@@ -374,7 +360,7 @@ export const usePanelSearchHandlers = ({
     saveCurrentStateToCache();
   };
 
-  const handleSearchReset = (payload: any, traceId?: string) => {
+  const handleSearchReset = () => {
     // Save current state to cache
     saveCurrentStateToCache();
     loadData();

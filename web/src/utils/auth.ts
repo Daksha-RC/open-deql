@@ -1,0 +1,182 @@
+// Copyright 2026 OpenObserve Inc.
+
+import { orgSummaryQuery } from "@/services/organizations.queries";
+import { queryClient } from "@/composables/query/queryClient";
+import config from "../aws-exports";
+import { useStore } from "vuex";
+import type { RouteMeta } from "vue-router";
+import userService from "@/services/users";
+import { b64DecodeUnicode, b64EncodeStandard, b64DecodeStandard } from "@/utils/formatters";
+import { useLocalUserInfo } from "@/utils/storage";
+import { getUUID, getUUIDv7 } from "@/utils/uuid";
+
+export const trialPeriodAllowedPath = ["iam", "users", "organizations", "invitations"];
+
+export const trialPaywallAllowedPath = [...trialPeriodAllowedPath, "settings", "general"];
+
+export const getUserInfo = (loginString: string) => {
+  try {
+    let decToken = null;
+    const tokens = loginString.substring(1).split("&");
+    for (const token of tokens) {
+      const propArr = token.split("=");
+      if (propArr[0] === "id_token") {
+        const tokenString = propArr[1];
+        const parts = tokenString.split(".");
+        if (parts.length === 3) {
+          try {
+            const payload = JSON.parse(b64DecodeUnicode(parts[1]) || "");
+            if (!payload || typeof payload !== "object") return null;
+            payload["family_name"] = payload["name"] || "";
+            payload["given_name"] = payload["given_name"] || "";
+            const encodedSessionData: any = b64EncodeStandard(JSON.stringify(payload));
+            useLocalUserInfo(encodedSessionData);
+            decToken = payload;
+          } catch (error) {
+            console.error("Invalid JWT token");
+            return null;
+          }
+        } else {
+          decToken = getDecodedAccessToken(propArr[1]);
+          const encodedSessionData: any = b64EncodeStandard(JSON.stringify(decToken));
+          useLocalUserInfo(encodedSessionData);
+        }
+      }
+    }
+
+    return decToken;
+  } catch (e) {
+    console.log("Error in getUserInfo util");
+  }
+};
+
+export const invalidateLoginData = () => {
+  userService.logout().then(() => {});
+};
+
+export const getDecodedAccessToken = (token: string) => {
+  try {
+    const decodedString = b64DecodeStandard(token.split(".")[1]);
+    if (typeof decodedString === "string") {
+      return JSON.parse(decodedString);
+    } else {
+      return "";
+    }
+  } catch (e) {
+    console.log("error decoding token");
+  }
+};
+
+export const getDecodedUserInfo = () => {
+  try {
+    if (useLocalUserInfo() !== null) {
+      const userinfo: any = useLocalUserInfo();
+      return b64DecodeStandard(userinfo);
+    } else {
+      return null;
+    }
+  } catch (e) {
+    console.log("Error: Error while pull sessionstorage value.");
+    return undefined;
+  }
+};
+
+export const getBasicAuth = (username: string, password: string) => {
+  const token = username + ":" + password;
+  const hash = window.btoa(token);
+  return "Basic " + hash;
+};
+
+export const getDueDays = (microTimestamp: number): number => {
+  const timestampMs = Math.floor(microTimestamp / 1000);
+  const givenDate = new Date(timestampMs);
+  const currentDate = new Date();
+  const timeDiffMs = givenDate.getTime() - currentDate.getTime();
+  const dueDays = Math.floor(timeDiffMs / (1000 * 60 * 60 * 24));
+  return dueDays;
+};
+
+// Absent/empty/zero expiry means no trial is tracked, not a lapsed one.
+export const isTrialExpired = (expiry: unknown): boolean => {
+  if (expiry === undefined || expiry === null || expiry === "") return false;
+  const expiryMicros = Number(expiry);
+  if (!Number.isFinite(expiryMicros) || expiryMicros === 0) return false;
+  return getDueDays(expiryMicros) <= 0;
+};
+
+// Only cloud builds populate free_trial_expiry, so no other edition can paywall.
+export const shouldPaywallRoute = (expiry: unknown, routeName: unknown): boolean =>
+  config.isCloud === "true" &&
+  isTrialExpired(expiry) &&
+  trialPaywallAllowedPath.indexOf(routeName as string) === -1;
+
+// Org-setup and data-producing surfaces declare their empty-data exemption per route, in meta.
+export const isEmptyDataExempt = (route: { meta?: RouteMeta | Record<string, unknown> }): boolean =>
+  route.meta?.allowOnEmptyData === true;
+
+export const routeGuard = async (to: any, from: any, next: any) => {
+  const store = useStore();
+  if (
+    shouldPaywallRoute(
+      store.state.organizationData?.organizationSettings?.free_trial_expiry,
+      to.name,
+    )
+  ) {
+    next({
+      name: "plans",
+      query: {
+        org_identifier: store.state.selectedOrganization.identifier,
+      },
+    });
+    return;
+  }
+
+  if (
+    !isEmptyDataExempt(to) &&
+    Object.prototype.hasOwnProperty.call(store.state.zoConfig, "restricted_routes_on_empty_data") &&
+    store.state.zoConfig.restricted_routes_on_empty_data === true &&
+    store.state.organizationData.isDataIngested === false
+  ) {
+    try {
+      const orgIdentifier = store.state.selectedOrganization.identifier;
+      if (!orgIdentifier) {
+        next();
+        return;
+      }
+      // Shares the Usage tab's cached summary — this runs on every guarded
+      // navigation, so an uncached read here re-requested on each one.
+      const data: any = await queryClient.fetchQuery(orgSummaryQuery(orgIdentifier));
+      if (!data?.streams?.num_streams) {
+        store.dispatch("setIsDataIngested", false);
+        next({ path: "/ingestion" });
+      } else {
+        store.dispatch("setIsDataIngested", true);
+        next();
+      }
+    } catch (error) {
+      console.warn("Failed to fetch organization summary:", error);
+      store.dispatch("setIsDataIngested", true);
+      next();
+    }
+  } else {
+    next();
+  }
+};
+
+export const verifyOrganizationStatus = (_Organizations: any, _Router: any) => {};
+
+export const generateTraceContext = () => {
+  const traceId = getUUIDv7(true);
+  const spanId = getUUID().replace(/-/g, "").slice(0, 16);
+
+  return {
+    traceparent: `00-${traceId}-${spanId}-01`,
+    traceId,
+    spanId,
+  };
+};
+
+export function checkCallBackValues(url: string, key: string) {
+  const params = new URLSearchParams(url.startsWith("#") ? url.slice(1) : url);
+  return params.get(key) ?? undefined;
+}

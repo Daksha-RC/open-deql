@@ -1,6 +1,10 @@
 //logs visualise page object
 //Methods: openLogs, openVisualiseTab, logsApplyQueryButton, Visualize run query button, setRelative, searchAndAddField, showQueryToggle, enableSQLMode, streamIndexList, logsSelectStream, logsToggle, selectChartType, removeField, chartRender, backToLogs, openQueryEditor, fillQueryEditor
 import { expect } from "@playwright/test";
+import DateTimeHelper from "./dashboard-time.js";
+
+// Long enough for the empty-state overlay to reappear if the panel is genuinely empty.
+const quietPeriodProbeMs = 3000;
 export default class LogsVisualise {
   constructor(page) {
     this.page = page;
@@ -18,21 +22,26 @@ export default class LogsVisualise {
       .first();
 
     // Dashboard locators
-    this.addToDashboardBtn = page.getByRole("button", {
-      name: "Add To Dashboard",
-    });
+    this.addToDashboardBtn = page.locator('[data-test="panel-editor-add-to-dashboard-btn"]');
     this.newDashboardBtn = page.locator(
       '[data-test="dashboard-dashboard-new-add"]'
     );
-    this.dashboardNameInput = page.locator('[data-test="add-dashboard-name"]');
+    this.dashboardNameInput = page.locator('[data-test="add-dashboard-name-field"]');
+    // Inner "New dashboard" ODrawer's Save action — the legacy
+    // `dashboard-add-submit` button was removed when AddDashboard.vue was
+    // migrated to ODrawer (SelectDashboardDropdown now hosts the form and
+    // the footer primary button calls addDashboardRef?.submit()).
     this.dashboardSubmitBtn = page.locator(
-      '[data-test="dashboard-add-submit"]'
+      '[data-test="dashboard-dashboard-add-dialog"] [data-test="o-dialog-primary-btn"]'
     );
     this.panelTitleInput = page.locator(
-      '[data-test="metrics-new-dashboard-panel-title"]'
+      '[data-test="metrics-new-dashboard-panel-title-field"]'
     );
+    // Outer "Add to Dashboard" ODrawer's Add action — the legacy
+    // `metrics-schema-update-settings-button` was removed when AddToDashboard.vue
+    // migrated to ODrawer (parent slug: add-to-dashboard-dialog).
     this.updateSettingsBtn = page.locator(
-      '[data-test="metrics-schema-update-settings-button"]'
+      '[data-test="add-to-dashboard-dialog"] [data-test="o-dialog-primary-btn"]'
     );
 
     // Query editor locators
@@ -47,52 +56,103 @@ export default class LogsVisualise {
 
   async openVisualiseTab() {
     // Open Visualise Tab
-    await this.page.locator('[data-test="logs-visualize-toggle"]').click();
+    const visualizeToggle = this.page.locator('[data-test="logs-visualize-toggle"]');
+    // Wait for the toggle to be enabled before clicking
+    await visualizeToggle.waitFor({ state: "visible", timeout: 10000 });
+    await visualizeToggle.click();
 
-    // Wait for visualization tab to be fully loaded
-    // Check for chart selector OR error message (in case of query errors)
-    const chartSelector = this.page.locator('[data-test="selected-chart-table-item"], [data-test="selected-chart-bar-item"], [data-test="selected-chart-line-item"]').first();
-    const errorIndicator = this.page.locator('[data-test="dashboard-error"], .q-notification, .q-banner');
+    // Wait for the panel editor container to load (async component)
+    // It may be hidden if there's a query error, so wait for attached (in DOM)
+    await this.page.locator('[data-test="panel-editor-container"]').waitFor({
+      state: "attached",
+      timeout: 30000,
+    });
+  }
 
-    // Wait for either chart selectors or error indicator to appear
-    await Promise.race([
-      chartSelector.waitFor({ state: "visible", timeout: 10000 }).catch(() => {}),
-      errorIndicator.first().waitFor({ state: "visible", timeout: 10000 }).catch(() => {}),
-      this.page.waitForTimeout(3000) // Fallback timeout if neither appears quickly
-    ]);
-
-    // Small buffer to ensure UI is stable
-    await this.page.waitForTimeout(500);
+  // Visualize tab's root element. Rendered under v-show (Index.vue), so it is
+  // always attached but only *visible* when the Visualize tab is actually active.
+  getPanelEditorContainer() {
+    return this.page.locator('[data-test="panel-editor-container"]');
   }
 
   // Open visualise tab and ensure table chart is selected when VRL is present
   async openVisualiseTabWithVrl() {
+    // Started before the toggle is clicked so the requests it fires cannot be missed.
+    const pipelineIdle = this.waitForVisualizePipelineIdle();
     await this.openVisualiseTab();
+    await pipelineIdle;
+    await this.ensureTableRendered();
+  }
 
-    // When VRL is present, ensure table chart is selected
-    // Check if VRL warning is shown (indicating VRL is active but wrong chart selected)
-    const vrlWarning = this.page.getByText("VRL function is only supported for table chart");
-    const isVrlWarningVisible = await vrlWarning.isVisible().catch(() => false);
+  // Opening the visualise tab decides the chart type asynchronously off the result_schema response (auto-selection first, then the VRL table override), so nothing may touch the panel until that traffic has finished and stayed quiet, or the chart type still changes under the test.
+  async waitForVisualizePipelineIdle(quietMs = 2500, timeout = 60000) {
+    const isPipelineUrl = (url) =>
+      url.includes("/result_schema") || url.includes("/_search");
+    let inFlight = 0;
+    let sawRequest = false;
+    let lastEvent = Date.now();
 
-    if (isVrlWarningVisible) {
-      // VRL is present but table chart not selected - click table chart
-      const tableChartBtn = this.page.locator('[data-test="selected-chart-table-item"]');
-      await tableChartBtn.click();
-      await this.page.waitForTimeout(300);
+    const onRequest = (request) => {
+      if (!isPipelineUrl(request.url())) return;
+      inFlight += 1;
+      sawRequest = true;
+      lastEvent = Date.now();
+    };
+    const onRequestSettled = (request) => {
+      if (!isPipelineUrl(request.url())) return;
+      inFlight = Math.max(inFlight - 1, 0);
+      lastEvent = Date.now();
+    };
+
+    this.page.on("request", onRequest);
+    this.page.on("requestfinished", onRequestSettled);
+    this.page.on("requestfailed", onRequestSettled);
+
+    try {
+      const deadline = Date.now() + timeout;
+      // A visualize tab that reuses cached results issues no request at all, so stop waiting for one.
+      const firstRequestDeadline = Date.now() + 15000;
+      while (Date.now() < deadline) {
+        const idle = inFlight === 0 && Date.now() - lastEvent >= quietMs;
+        if (idle && (sawRequest || Date.now() >= firstRequestDeadline)) return;
+        await this.page.waitForTimeout(250);
+      }
+    } finally {
+      this.page.off("request", onRequest);
+      this.page.off("requestfinished", onRequestSettled);
+      this.page.off("requestfailed", onRequestSettled);
+    }
+  }
+
+  // The chart-type auto-selection wins over a table click issued while it is still running, and it can land even after the request wait above gives up (a loaded CI run can delay the tab's first request past that cap) - so re-select until the table renderer is on screen and has stayed there. VRL only works with the table chart type, so every caller needs that end state.
+  async ensureTableRendered({ timeout = 60000, quietMs = 1500 } = {}) {
+    const tableChartItem = this.getChartTypeItem("table");
+    const tablePanel = this.getTablePanel();
+    await tableChartItem.waitFor({ state: "visible", timeout: 10000 });
+
+    const deadline = Date.now() + timeout;
+    let renderedSince = null;
+    while (Date.now() < deadline) {
+      const isSelected =
+        (await tableChartItem.getAttribute("data-selected").catch(() => null)) === "true";
+      const isRendered = await tablePanel.isVisible().catch(() => false);
+
+      if (!isSelected) {
+        await tableChartItem.click({ timeout: 5000 }).catch(() => {});
+        renderedSince = null;
+      } else if (!isRendered) {
+        renderedSince = null;
+      } else if (renderedSince === null) {
+        renderedSince = Date.now();
+      } else if (Date.now() - renderedSince >= quietMs) {
+        return;
+      }
+      await this.page.waitForTimeout(250);
     }
 
-    // Also check if table chart is already selected
-    const tableChart = this.page.locator('[data-test="selected-chart-table-item"]');
-    const tableChartParent = tableChart.locator('..');
-    const isTableSelected = await tableChartParent.evaluate(el =>
-      el.classList.contains('bg-grey-3') || el.classList.contains('bg-grey-5')
-    ).catch(() => false);
-
-    if (!isTableSelected) {
-      // Table not selected, click to select it
-      await tableChart.click();
-      await this.page.waitForTimeout(300);
-    }
+    throw new Error(
+      "Visualise tab never settled on a rendered table chart (VRL requires the table type)"
+    );
   }
 
   //Apply: Logs
@@ -122,16 +182,13 @@ export default class LogsVisualise {
         const hasRunQueryText = btn.textContent?.includes('Run query');
 
         // Also check that no loading indicator is present
-        const hasLoadingClass = btn.classList.contains('q-btn--loading') ||
-                                btn.querySelector('.q-spinner') !== null;
+        const hasLoadingClass = btn.hasAttribute('disabled') || btn.getAttribute('aria-busy') === 'true';
 
         return isEnabled && hasRunQueryText && !hasLoadingClass;
       },
       { timeout }
     );
 
-    // Small buffer to ensure UI is stable after query completes
-    await this.page.waitForTimeout(300);
   }
 
   // Apply logs query and wait for completion
@@ -142,18 +199,25 @@ export default class LogsVisualise {
 
   //set relative time selection
   async setRelative(date, time) {
-    await this.timeTab.waitFor({ state: "visible" });
+    // Wait for the date-time button to be enabled before interacting
+    await this.page.waitForSelector(
+      '[data-test="date-time-btn"]:not([disabled])',
+      { timeout: 15000 }
+    );
     await this.timeTab.click();
     await this.relativeTime.click();
-    await this.page
-      .locator(`[data-test="date-time-relative-${date}-${time}-btn"]`)
-      .click();
+    const selector = `[data-test="date-time-relative-${date}-${time}-btn"]`;
+    // Wait for the relative time button to be enabled (not just visible)
+    await this.page.waitForSelector(`${selector}:not([disabled])`, {
+      timeout: 15000,
+    });
+    await this.page.locator(selector).click();
   }
 
   //search and add fields
   async searchAndAddField(fieldName, target) {
     const searchInput = this.page.locator(
-      '[data-test="index-field-search-input"]'
+      '[data-test="o-field-list-search-field"]'
     );
     await searchInput.waitFor({ state: "visible", timeout: 5000 });
     await searchInput.click();
@@ -195,13 +259,9 @@ export default class LogsVisualise {
 
   //enable SQL Mode
   async enableSQLMode() {
-    await this.page
-      // .getByRole("switch", { name: "SQL Mode" })
-      // .locator("div")
-      // .nth(2)
-      // .click();
-      .getByRole("switch", { name: "SQL Mode" })
-      .click();
+    // SQL mode toggle was removed from the UI. SQL mode is now auto-detected
+    // from query content — entering a SELECT query enables it automatically.
+    // This method is intentionally a no-op.
   }
 
   //stream index list
@@ -215,9 +275,18 @@ export default class LogsVisualise {
     await this.page
       .locator('[data-test="log-search-index-list-select-stream"]')
       .click({ force: true });
-    await this.page
-      .locator("div.q-item")
-      .getByText(`${stream}`)
+    const popover = this.page.locator(
+      '[data-test="log-search-index-list-select-stream-popover"]'
+    );
+    await popover.waitFor({ state: "visible", timeout: 10000 });
+    // OSelect virtualises past 50 options, so a target stream further down the
+    // list is not in the DOM at all — filter it in through the popover search.
+    const popoverSearch = popover.locator("input").first();
+    await popoverSearch.click();
+    await popoverSearch.fill(stream);
+    // OSelect forwards parent data-test to ListboxItems (`*-option`).
+    await popover
+      .locator('[data-test="log-search-index-list-select-stream-option"]', { hasText: stream })
       .first()
       .click();
   }
@@ -233,7 +302,7 @@ export default class LogsVisualise {
       `[data-test="selected-chart-${chartType}-item"]`
     );
     await chartOption.waitFor({ state: "visible" });
-    await chartOption.click();
+    await chartOption.click({ force: true });
   }
 
   //remove field
@@ -316,7 +385,7 @@ export default class LogsVisualise {
     await this.queryEditor.fill(vrl);
   }
 
-  async runQueryAndWaitForCompletion() {
+  async runQueryAndWaitForCompletion({ expectTable = false } = {}) {
     const runBtn = this.page.locator(
       '[data-test="logs-search-bar-visualize-refresh-btn"]'
     );
@@ -325,9 +394,14 @@ export default class LogsVisualise {
     );
     await runBtn.waitFor({ state: "visible" });
     await runBtn.click();
-    await runBtn.waitFor({ state: "visible" });
-    // Optional: small buffer to ensure UI is stable
-    await this.page.waitForTimeout(300);
+    // Wait for query to start (cancel btn appears) then complete (cancel btn disappears)
+    await cancelBtn.waitFor({ state: "visible", timeout: 5000 }).catch(() => {});
+    await cancelBtn.waitFor({ state: "hidden", timeout: 30000 }).catch(() => {});
+    // The cancel button is enterprise-gated (SearchBar.vue config.isEnterprise), so on OSS the waits above are no-ops that don't gate completion — wait for the result to actually render (the table specifically when the caller expects one, so a transient chart-renderer can't satisfy the gate early).
+    const resultSelector = expectTable
+      ? '[data-test="dashboard-panel-table"]'
+      : '[data-test="chart-renderer"], [data-test="dashboard-panel-table"]';
+    await this.page.locator(resultSelector).first().waitFor({ state: "visible", timeout: 30000 }).catch(() => {});
   }
 
   // Helper function to check for dashboard errors
@@ -461,19 +535,24 @@ export default class LogsVisualise {
 
   // Get quick mode toggle state using the most reliable method
   async getQuickModeToggleState() {
-    const quickModeToggle = this.page.locator(
-      '[data-test="logs-search-bar-quick-mode-toggle-btn"]'
+    // Open utilities dropdown to access the quick mode toggle
+    const utilitiesBtn = this.page.locator(
+      '[data-test="logs-search-bar-utilities-menu-btn"]'
     );
+    await utilitiesBtn.waitFor({ state: "visible", timeout: 10000 });
+    await utilitiesBtn.click();
 
-    // Wait for the toggle to be present
-    await quickModeToggle.waitFor({ state: "visible", timeout: 10000 });
+    const quickModeSwitch = this.page.locator(
+      '[data-test="logs-search-bar-quick-mode-switch"]'
+    );
+    await quickModeSwitch.waitFor({ state: "visible", timeout: 10000 });
 
-    // Check aria-checked attribute - this is the most reliable indicator
-    // Falls back to aria-pressed if aria-checked is not available
-    let ariaChecked = await quickModeToggle.getAttribute("aria-checked");
-    if (ariaChecked === null) {
-      ariaChecked = await quickModeToggle.getAttribute("aria-pressed");
-    }
+    // OSwitch inner button carries aria-checked
+    const switchBtn = quickModeSwitch.locator('[data-test$="-btn"]');
+    const ariaChecked = await switchBtn.getAttribute("aria-checked");
+
+    // Close dropdown
+    await this.page.keyboard.press("Escape");
 
     return ariaChecked === "true";
   }
@@ -533,13 +612,12 @@ export default class LogsVisualise {
 
   // Helper function to verify chart type selection
   async verifyChartTypeSelected(page, chartType, shouldBeSelected = true) {
-    const selector = `[data-test="selected-chart-${chartType}-item"]`;
-    const locator = page.locator(selector).locator("..");
+    const locator = page.locator(`[data-test="selected-chart-${chartType}-item"]`);
 
     if (shouldBeSelected) {
-      await expect(locator).toHaveClass(/bg-grey-[35]/);
+      await expect(locator).toHaveAttribute("data-selected", "true");
     } else {
-      await expect(locator).not.toHaveClass(/bg-grey-[35]/);
+      await expect(locator).toHaveAttribute("data-selected", "false");
     }
   }
 
@@ -548,8 +626,10 @@ export default class LogsVisualise {
     await this.addToDashboardBtn.waitFor({ state: "visible", timeout: 5000 });
     await this.addToDashboardBtn.click();
 
-    // Wait for the "Add to Dashboard" side panel to fully load
-    const sidePanelTitle = this.page.locator('[data-test="schema-title-text"]');
+    // Wait for the "Add to Dashboard" side panel to fully load. The old
+    // `schema-title-text` element was removed when AddToDashboard.vue migrated
+    // to ODrawer — use the drawer's parent slug instead.
+    const sidePanelTitle = this.page.locator('[data-test="add-to-dashboard-dialog"]');
     await sidePanelTitle.waitFor({ state: "visible", timeout: 10000 });
     await sidePanelTitle.waitFor({ state: "attached", timeout: 5000 });
 
@@ -586,7 +666,199 @@ export default class LogsVisualise {
 
   //wait for query inspector to be visible
   async waitForQueryInspector(page) {
-    const queryInspectorCloseBtn = page.locator('[data-test="query-inspector-close-btn"]');
+    const queryInspectorCloseBtn = page.locator('[data-test="query-inspector-dialog"] [data-test="o-dialog-close-btn"]');
     await queryInspectorCloseBtn.waitFor({ state: "visible", timeout: 10000 });
+  }
+
+  async closeQueryInspector() {
+    const closeBtn = this.page.locator('[data-test="query-inspector-dialog"] [data-test="o-dialog-close-btn"]');
+    await closeBtn.click();
+    await this.page.locator('[data-test="query-inspector-dialog"]').waitFor({ state: 'hidden', timeout: 5000 });
+  }
+
+  // Verify toast message is visible with expected text
+  async verifyToastMessage(expectedText, timeout = 10000) {
+    const toast = this.page.locator('[data-test="o-toast-message"]', { hasText: expectedText }).first();
+    await expect(toast).toBeVisible({ timeout });
+    return toast;
+  }
+
+  // Locator for a saved panel's dropdown menu trigger
+  getPanelDropdown(panelName) {
+    return this.page.locator(`[data-test="dashboard-edit-panel-${panelName}-dropdown"]`);
+  }
+
+  // ── VRL visualization locator getters (used by visualize-vrl spec) ──────────
+
+  // Utilities menu button in the logs/visualize search bar (hosts the VRL toggle)
+  getUtilitiesMenuBtn() {
+    return this.page.locator('[data-test="logs-search-bar-utilities-menu-btn"]');
+  }
+
+  // VRL show-query toggle button rendered inside the utilities dropdown menu
+  getVrlToggleMenuBtn() {
+    return this.page.locator('[data-test="logs-search-bar-show-query-toggle-btn-btn"]');
+  }
+
+  // Rendered dashboard table panel
+  getTablePanel() {
+    return this.page.locator('[data-test="dashboard-panel-table"]');
+  }
+
+  // Data rows inside the rendered dashboard table panel
+  getTableRows() {
+    return this.page.locator('[data-test="dashboard-panel-table"] tbody tr');
+  }
+
+  // Chart-type selector item by type (e.g. "table", "line", "bar", "h-bar")
+  getChartTypeItem(chartType) {
+    return this.page.locator(`[data-test="selected-chart-${chartType}-item"]`);
+  }
+
+  // "Edit panel" action button (from a panel dropdown menu)
+  getEditPanelBtn() {
+    return this.page.locator('[data-test="dashboard-edit-panel"]');
+  }
+
+  // VRL "only supported for table chart" warning banner
+  getVrlWarningBanner() {
+    return this.page.getByText("VRL function is only supported for table chart");
+  }
+
+  // VRL error notification (present only when VRL functions are active on non-table)
+  getVrlErrorNotification() {
+    return this.page.getByText(
+      "VRL functions are present. Only table chart is supported when using VRL functions."
+    );
+  }
+
+  // Toast message locator scoped to a given text
+  getToastMessageByText(text) {
+    return this.page
+      .locator('[data-test="o-toast-message"]')
+      .filter({ hasText: text });
+  }
+
+  // Dashboard back button locator (for waits; use clickDashboardBackBtn() to click)
+  getDashboardBackBtn() {
+    return this.page.locator('[data-test="dashboard-back-btn"]');
+  }
+
+  // Dialog primary (confirm) button locator
+  getDialogPrimaryBtn() {
+    return this.page.locator('[data-test="o-dialog-primary-btn"]');
+  }
+
+  // Sidebar/table field locator matched by Playwright text engine selector
+  getFieldByTextSelector(textSelector) {
+    return this.page.locator(textSelector);
+  }
+
+  // Open query inspector from a panel dropdown
+  // metaData gating the Query Inspector item populates only on a non-empty query, so the panel has to come back with rows. The dashboard opens on its own 15m default whatever range the test used in logs, and the fixture is ingested once per worker, so by a late test it can sit outside that window - the panel is then empty however often it is refreshed. Widen the window first, unconditionally, so every run takes the same path instead of a recovery branch only CI ever exercises; the refreshes that follow cover rows that are not searchable yet (WAL lag under load).
+  async waitForPanelToLoadData({ refreshAttempts = 3, attemptTimeout = 10000 } = {}) {
+    const noData = this.page.locator('[data-test="no-data"]');
+    const refreshBtn = this.page.locator('[data-test="dashboard-refresh-btn"]');
+
+    await new DateTimeHelper(this.page).setRelativeTimeRange("6-h");
+
+    // A refresh unmounts the empty-state overlay for as long as its query runs, so "absent
+    // right now" is not "the panel came back with rows" - it has to stay absent.
+    const hasData = async (timeout, quietMs = 1500) => {
+      const deadline = Date.now() + timeout;
+      let goneSince = null;
+      while (Date.now() < deadline) {
+        if (await noData.isVisible().catch(() => false)) {
+          goneSince = null;
+        } else if (goneSince === null) {
+          goneSince = Date.now();
+        } else if (Date.now() - goneSince >= quietMs) {
+          return true;
+        }
+        await this.page.waitForTimeout(250);
+      }
+      return false;
+    };
+
+    if (await hasData(quietPeriodProbeMs)) return;
+
+    for (let attempt = 0; attempt < refreshAttempts; attempt++) {
+      await refreshBtn.click({ timeout: 5000 }).catch(() => {});
+      if (await hasData(attemptTimeout)) return;
+    }
+
+    throw new Error(
+      "Dashboard panel still reports no data over a 6h window after refreshing"
+    );
+  }
+
+  async openPanelQueryInspector(panelName) {
+    // The Query Inspector item is v-if-gated on the panel's metaData, populated only after its query executes, so wait for the panel to render before opening the menu.
+    await this.verifyChartRenders(this.page);
+    await this.waitForPanelToLoadData();
+
+    const dropdown = this.getPanelDropdown(panelName);
+    await dropdown.waitFor({ state: "visible", timeout: 20000 });
+
+    const inspectorBtn = this.page.locator('[data-test="dashboard-query-inspector-panel"]');
+    // Opening the menu before the item mounts leaves it absent for that open, so re-open until it appears.
+    // Escape first each retry: the dropdown is a toggle, so a blind re-click on an already-open menu closes it — fighting itself while metaData populates.
+    await expect(async () => {
+      if (await inspectorBtn.isVisible().catch(() => false)) return;
+      await this.page.keyboard.press("Escape").catch(() => {});
+      await dropdown.click();
+      await expect(inspectorBtn).toBeVisible({ timeout: 3000 });
+    }).toPass({ timeout: 30000, intervals: [500, 1000, 2000] });
+
+    await inspectorBtn.click();
+    await this.waitForQueryInspector(this.page);
+  }
+
+  // Verify executed query in query inspector contains expected text
+  async verifyExecutedQueryContains(expectedTexts, queryIndex = 0) {
+    const executedQuery = this.page.locator(`[data-test="query-inspector-executed-query-${queryIndex}"]`);
+    await expect(executedQuery).toBeVisible({ timeout: 10000 });
+    for (const text of expectedTexts) {
+      await expect(executedQuery).toContainText(text);
+    }
+  }
+
+  // Click the dashboard back button
+  async clickDashboardBackBtn() {
+    await this.page.locator('[data-test="dashboard-back-btn"]').click();
+
+    // Both the panel-editor and dashboard-view page render an element with
+    // the same data-test="dashboard-back-btn" — a click right after saving
+    // can land on a stale instance mid page-transition and silently no-op.
+    // Verify the URL actually changed and retry once if not.
+    try {
+      await this.page.waitForURL(/\/dashboards(?:\?|$)/, { timeout: 8000 });
+    } catch (e) {
+      await this.page.locator('[data-test="dashboard-back-btn"]').click();
+      await this.page.waitForURL(/\/dashboards(?:\?|$)/, { timeout: 15000 });
+    }
+  }
+
+  // Get chart renderer canvas locator
+  getChartRendererCanvas() {
+    return this.page.locator('[data-test="chart-renderer"] canvas');
+  }
+
+  // Get dashboard error locator
+  getDashboardErrorLocator() {
+    return this.page.locator('[data-test="dashboard-error"]');
+  }
+
+  // Verify no dashboard errors are present
+  async verifyNoDashboardErrors() {
+    const errorLocator = this.getDashboardErrorLocator();
+    await expect(errorLocator).toHaveCount(0);
+  }
+
+  // Get connect null values toggle button locator
+  getConnectNullValuesToggle() {
+    return this.page.locator(
+      '[data-test="dashboard-config-connect-null-values"] [data-test$="-btn"]'
+    );
   }
 }

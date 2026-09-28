@@ -13,27 +13,17 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { nextTick } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
 import store from "@/test/unit/helpers/store";
 import i18n from "@/locales";
 
-installQuasar({ plugins: [Dialog, Notify] });
-
-vi.mock("quasar", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("quasar")>();
-  return {
-    ...actual,
-    useQuasar: vi.fn(() => ({
-      notify: vi.fn(),
-      dialog: vi.fn(() => ({ onOk: vi.fn(), onCancel: vi.fn() })),
-      dark: { isActive: false },
-    })),
-  };
-});
+vi.mock("@/composables/useConfirmDialog", () => ({
+  useConfirmDialog: vi.fn(() => ({
+    confirm: vi.fn().mockResolvedValue(false),
+  })),
+}));
 
 vi.mock("../../services/backfill", () => ({
   default: {
@@ -71,6 +61,43 @@ const makeJob = (overrides: Partial<BackfillJob> = {}): BackfillJob => ({
   ...overrides,
 });
 
+// ODrawer stub: forwards data-test attr, exposes `open`/`title` via data
+// attributes, and renders the default slot inline so children remain queryable.
+// Emits update:open / click:primary|secondary|neutral to mirror real component.
+const ODrawerStub = {
+  name: "ODrawer",
+  props: [
+    "open",
+    "width",
+    "title",
+    "subTitle",
+    "primaryButtonLabel",
+    "primaryButtonLoading",
+    "primaryButtonDisabled",
+    "secondaryButtonLabel",
+    "secondaryButtonDisabled",
+    "neutralButtonLabel",
+    "showClose",
+    "persistent",
+    "size",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test-stub="o-drawer"
+      :data-test="$attrs['data-test']"
+      :data-open="open"
+      :data-title="title"
+      :data-width="width"
+    >
+      <div data-test-stub="o-drawer-header"><slot name="header" /></div>
+      <div data-test-stub="o-drawer-body"><slot /></div>
+      <div data-test-stub="o-drawer-footer"><slot name="footer" /></div>
+    </div>
+  `,
+  inheritAttrs: false,
+};
+
 function createWrapper(props: Record<string, any> = {}) {
   return mount(BackfillJobDetails, {
     props: {
@@ -82,13 +109,7 @@ function createWrapper(props: Record<string, any> = {}) {
     global: {
       plugins: [i18n, store],
       stubs: {
-        QDialog: {
-          inheritAttrs: false,
-          template: '<div v-bind="$attrs"><slot /></div>',
-          props: ["modelValue"],
-        },
-        QTimeline: { template: "<div><slot /></div>" },
-        QTimelineEntry: { template: "<div />" },
+        ODrawer: ODrawerStub,
       },
     },
   });
@@ -105,21 +126,43 @@ describe("BackfillJobDetails – mount", () => {
     expect(wrapper.exists()).toBe(true);
   });
 
-  it("renders the q-dialog with data-test='backfill-job-details-dialog'", () => {
+  it("renders the ODrawer with data-test='backfill-job-details-dialog'", () => {
     const wrapper = createWrapper();
-    expect(
-      wrapper.find('[data-test="backfill-job-details-dialog"]').exists()
-    ).toBe(true);
+    expect(wrapper.find('[data-test="backfill-job-details-dialog"]').exists()).toBe(true);
   });
 
-  it("renders dialog-title element", () => {
+  it("passes title 'Backfill Job Details' to ODrawer", () => {
     const wrapper = createWrapper();
-    expect(wrapper.find('[data-test="dialog-title"]').exists()).toBe(true);
+    const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+    expect(drawer.attributes("data-title")).toBe("Backfill Job Details");
   });
 
-  it("renders close-dialog-btn element", () => {
+  it("passes width=55 to ODrawer", () => {
     const wrapper = createWrapper();
-    expect(wrapper.find('[data-test="close-dialog-btn"]').exists()).toBe(true);
+    const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+    expect(drawer.attributes("data-width")).toBe("40");
+  });
+
+  it("renders ODrawer with open=true when modelValue is true", async () => {
+    const wrapper = createWrapper({ modelValue: true });
+    await flushPromises();
+    const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+    expect(drawer.attributes("data-open")).toBe("true");
+  });
+
+  it("renders ODrawer with open=false when modelValue is false", () => {
+    const wrapper = createWrapper({ modelValue: false });
+    const drawer = wrapper.find('[data-test-stub="o-drawer"]');
+    expect(drawer.attributes("data-open")).toBe("false");
+  });
+
+  it("emits update:modelValue when ODrawer emits update:open", async () => {
+    const wrapper = createWrapper({ modelValue: true });
+    await flushPromises();
+    const drawer = wrapper.findComponent(ODrawerStub);
+    await drawer.vm.$emit("update:open", false);
+    expect(wrapper.emitted("update:modelValue")).toBeTruthy();
+    expect(wrapper.emitted("update:modelValue")![0]).toEqual([false]);
   });
 });
 
@@ -134,7 +177,7 @@ describe("BackfillJobDetails – loadJobDetails watcher", () => {
     await wrapper.setProps({ modelValue: true });
     await flushPromises();
     expect(backfillService.getBackfillJob).toHaveBeenCalledWith(
-      expect.objectContaining({ job_id: "job1", pipeline_id: "pipe1" })
+      expect.objectContaining({ job_id: "job1", pipeline_id: "pipe1" }),
     );
   });
 
@@ -145,7 +188,7 @@ describe("BackfillJobDetails – loadJobDetails watcher", () => {
     await wrapper.setProps({ jobId: "job2" });
     await flushPromises();
     expect(backfillService.getBackfillJob).toHaveBeenCalledWith(
-      expect.objectContaining({ job_id: "job2" })
+      expect.objectContaining({ job_id: "job2" }),
     );
   });
 
@@ -168,9 +211,7 @@ describe("BackfillJobDetails – loading state", () => {
   });
 
   it("sets job to null when getBackfillJob rejects", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockRejectedValue(
-      new Error("network error")
-    );
+    vi.mocked(backfillService.getBackfillJob).mockRejectedValue(new Error("network error"));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     expect((wrapper.vm as any).job).toBeNull();
@@ -181,45 +222,35 @@ describe("BackfillJobDetails – canCancelJob computed", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("canCancelJob is true when job status is 'running'", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "running" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "running" }));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     expect((wrapper.vm as any).canCancelJob).toBe(true);
   });
 
   it("canCancelJob is true when job status is 'pending'", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "pending" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "pending" }));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     expect((wrapper.vm as any).canCancelJob).toBe(true);
   });
 
   it("canCancelJob is false when job status is 'completed'", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "completed" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "completed" }));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     expect((wrapper.vm as any).canCancelJob).toBeFalsy();
   });
 
   it("canCancelJob is false when job status is 'failed'", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "failed" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "failed" }));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     expect((wrapper.vm as any).canCancelJob).toBeFalsy();
   });
 
   it("cancel-job-btn is rendered when canCancelJob is true", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "running" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "running" }));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     await nextTick();
@@ -227,9 +258,7 @@ describe("BackfillJobDetails – canCancelJob computed", () => {
   });
 
   it("cancel-job-btn is NOT rendered when canCancelJob is false", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "completed" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "completed" }));
     const wrapper = createWrapper({ modelValue: true, jobId: "job1" });
     await flushPromises();
     await nextTick();
@@ -237,7 +266,7 @@ describe("BackfillJobDetails – canCancelJob computed", () => {
   });
 });
 
-describe("BackfillJobDetails – getStatusColor", () => {
+describe("BackfillJobDetails – getStatusKey", () => {
   let wrapper: ReturnType<typeof createWrapper>;
 
   beforeEach(async () => {
@@ -246,31 +275,16 @@ describe("BackfillJobDetails – getStatusColor", () => {
     await flushPromises();
   });
 
-  it("returns 'positive' for status 'running'", () => {
-    expect((wrapper.vm as any).getStatusColor("running")).toBe("positive");
+  it("passes the raw status through as the registry value key", () => {
+    for (const s of ["running", "completed", "failed", "pending", "canceled"]) {
+      expect((wrapper.vm as any).getStatusKey(s)).toBe(s);
+    }
   });
 
-  it("returns 'positive' for status 'completed'", () => {
-    expect((wrapper.vm as any).getStatusColor("completed")).toBe("positive");
-  });
-
-  it("returns 'negative' for status 'failed'", () => {
-    expect((wrapper.vm as any).getStatusColor("failed")).toBe("negative");
-  });
-
-  it("returns 'warning' for status 'pending'", () => {
-    expect((wrapper.vm as any).getStatusColor("pending")).toBe("warning");
-  });
-
-  it("returns 'grey' for status 'canceled'", () => {
-    expect((wrapper.vm as any).getStatusColor("canceled")).toBe("grey");
-  });
-
-  it("returns 'negative' when deletionStatus is an object with 'failed' key", () => {
-    const result = (wrapper.vm as any).getStatusColor("running", {
-      failed: "some error",
-    });
-    expect(result).toBe("negative");
+  it("maps a failed deletion overlay to the 'deletionfailed' key", () => {
+    expect((wrapper.vm as any).getStatusKey("running", { failed: "some error" })).toBe(
+      "deletionfailed",
+    );
   });
 });
 
@@ -296,32 +310,6 @@ describe("BackfillJobDetails – getStatusLabel", () => {
   });
 });
 
-describe("BackfillJobDetails – getProgressColor", () => {
-  let wrapper: ReturnType<typeof createWrapper>;
-
-  beforeEach(async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob());
-    wrapper = createWrapper({ modelValue: true });
-    await flushPromises();
-  });
-
-  it("returns 'blue' when deletionStatus is 'pending'", () => {
-    expect((wrapper.vm as any).getProgressColor("pending")).toBe("blue");
-  });
-
-  it("returns 'blue' when deletionStatus is 'in_progress'", () => {
-    expect((wrapper.vm as any).getProgressColor("in_progress")).toBe("blue");
-  });
-
-  it("returns 'positive' when deletionStatus is undefined", () => {
-    expect((wrapper.vm as any).getProgressColor(undefined)).toBe("positive");
-  });
-
-  it("returns 'positive' when deletionStatus is 'completed'", () => {
-    expect((wrapper.vm as any).getProgressColor("completed")).toBe("positive");
-  });
-});
-
 describe("BackfillJobDetails – getDeletionStatusLabel", () => {
   let wrapper: ReturnType<typeof createWrapper>;
 
@@ -332,45 +320,31 @@ describe("BackfillJobDetails – getDeletionStatusLabel", () => {
   });
 
   it("returns 'Not Required' for undefined status", () => {
-    expect((wrapper.vm as any).getDeletionStatusLabel(undefined)).toBe(
-      "Not Required"
-    );
+    expect((wrapper.vm as any).getDeletionStatusLabel(undefined)).toBe("Not Required");
   });
 
   it("returns 'Not Required' for null status", () => {
-    expect((wrapper.vm as any).getDeletionStatusLabel(null)).toBe(
-      "Not Required"
-    );
+    expect((wrapper.vm as any).getDeletionStatusLabel(null)).toBe("Not Required");
   });
 
   it("returns 'Not Required' for 'not_required' status", () => {
-    expect((wrapper.vm as any).getDeletionStatusLabel("not_required")).toBe(
-      "Not Required"
-    );
+    expect((wrapper.vm as any).getDeletionStatusLabel("not_required")).toBe("Not Required");
   });
 
   it("returns 'Completed' for 'completed' status", () => {
-    expect((wrapper.vm as any).getDeletionStatusLabel("completed")).toBe(
-      "Completed"
-    );
+    expect((wrapper.vm as any).getDeletionStatusLabel("completed")).toBe("Completed");
   });
 
   it("returns 'In Progress' for 'in_progress' status", () => {
-    expect((wrapper.vm as any).getDeletionStatusLabel("in_progress")).toBe(
-      "In Progress"
-    );
+    expect((wrapper.vm as any).getDeletionStatusLabel("in_progress")).toBe("In Progress");
   });
 
   it("returns 'Pending' for 'pending' status", () => {
-    expect((wrapper.vm as any).getDeletionStatusLabel("pending")).toBe(
-      "Pending"
-    );
+    expect((wrapper.vm as any).getDeletionStatusLabel("pending")).toBe("Pending");
   });
 
   it("returns 'Failed' for object status with failed key", () => {
-    expect(
-      (wrapper.vm as any).getDeletionStatusLabel({ failed: "some error" })
-    ).toBe("Failed");
+    expect((wrapper.vm as any).getDeletionStatusLabel({ failed: "some error" })).toBe("Failed");
   });
 });
 
@@ -406,9 +380,7 @@ describe("BackfillJobDetails – formatTimestamp / formatTimestampFull", () => {
   });
 
   it("formatTimestampFull returns a string containing '2 hours ago' for valid timestamp", () => {
-    const result = (wrapper.vm as any).formatTimestampFull(
-      1_700_000_000_000_000
-    );
+    const result = (wrapper.vm as any).formatTimestampFull(1_700_000_000_000_000);
     expect(result).toContain("2 hours ago");
   });
 });
@@ -418,7 +390,7 @@ describe("BackfillJobDetails – getCurrentPhase computed", () => {
 
   it("returns 'Deleting Data' when deletion_status is 'in_progress'", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ deletion_status: "in_progress" })
+      makeJob({ deletion_status: "in_progress" }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -427,7 +399,7 @@ describe("BackfillJobDetails – getCurrentPhase computed", () => {
 
   it("returns 'Deleting Data' when deletion_status is 'pending'", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ deletion_status: "pending" })
+      makeJob({ deletion_status: "pending" }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -436,7 +408,7 @@ describe("BackfillJobDetails – getCurrentPhase computed", () => {
 
   it("returns 'Backfilling Data' when deletion_status is 'completed'", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ deletion_status: "completed" })
+      makeJob({ deletion_status: "completed" }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -445,7 +417,7 @@ describe("BackfillJobDetails – getCurrentPhase computed", () => {
 
   it("returns 'Deletion Failed' when deletion_status is an object with failed key", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ deletion_status: { failed: "some error" } })
+      makeJob({ deletion_status: { failed: "some error" } }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -454,7 +426,7 @@ describe("BackfillJobDetails – getCurrentPhase computed", () => {
 
   it("returns 'Backfilling Data' when no deletion_status but progress > 20", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ progress_percent: 50, deletion_status: undefined })
+      makeJob({ progress_percent: 50, deletion_status: undefined }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -463,7 +435,7 @@ describe("BackfillJobDetails – getCurrentPhase computed", () => {
 
   it("returns 'Initializing' when progress <= 20 and no deletion_status", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ progress_percent: 10, deletion_status: undefined })
+      makeJob({ progress_percent: 10, deletion_status: undefined }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -475,9 +447,7 @@ describe("BackfillJobDetails – estimatedCompletion computed", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("returns null when job status is not 'running'", async () => {
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "completed" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "completed" }));
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
     expect((wrapper.vm as any).estimatedCompletion).toBeNull();
@@ -485,7 +455,7 @@ describe("BackfillJobDetails – estimatedCompletion computed", () => {
 
   it("returns null when chunks_total is missing", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "running", chunks_total: undefined })
+      makeJob({ status: "running", chunks_total: undefined }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -494,7 +464,7 @@ describe("BackfillJobDetails – estimatedCompletion computed", () => {
 
   it("returns null when chunks_completed is missing", async () => {
     vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "running", chunks_total: 10, chunks_completed: undefined })
+      makeJob({ status: "running", chunks_total: 10, chunks_completed: undefined }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -507,7 +477,7 @@ describe("BackfillJobDetails – estimatedCompletion computed", () => {
         status: "running",
         chunks_total: 10,
         chunks_completed: 5,
-      })
+      }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -521,7 +491,7 @@ describe("BackfillJobDetails – estimatedCompletion computed", () => {
         status: "running",
         chunks_total: 100,
         chunks_completed: 10,
-      })
+      }),
     );
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
@@ -533,22 +503,19 @@ describe("BackfillJobDetails – estimatedCompletion computed", () => {
 describe("BackfillJobDetails – confirmCancelJob", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("calls $q.dialog when confirmCancelJob is invoked", async () => {
-    const mockDialog = vi.fn(() => ({ onOk: vi.fn(), onCancel: vi.fn() }));
-    vi.mocked(
-      (await import("quasar")).useQuasar
-    ).mockReturnValue({
-      notify: vi.fn(),
-      dialog: mockDialog,
-      dark: { isActive: false },
+  it("should call confirm dialog when confirmCancelJob is invoked", async () => {
+    const mockConfirm = vi.fn().mockResolvedValue(false);
+    vi.mocked((await import("@/composables/useConfirmDialog")).useConfirmDialog).mockReturnValue({
+      confirm: mockConfirm,
     } as any);
 
-    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(
-      makeJob({ status: "running" })
-    );
+    vi.mocked(backfillService.getBackfillJob).mockResolvedValue(makeJob({ status: "running" }));
     const wrapper = createWrapper({ modelValue: true });
     await flushPromises();
     await (wrapper.vm as any).confirmCancelJob();
-    expect(mockDialog).toHaveBeenCalled();
+    expect(mockConfirm).toHaveBeenCalledWith({
+      title: "Cancel Backfill Job",
+      message: "Are you sure you want to cancel this backfill job?",
+    });
   });
 });

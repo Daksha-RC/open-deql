@@ -35,7 +35,8 @@ export default function useRoutePrefetch() {
         import("@/plugins/logs/SearchResult.vue"),
       ]);
     },
-    "/metrics": () => import("@/plugins/metrics/Index.vue"),
+    // /metrics renders the explorer; the panel editor lives at /metrics/editor.
+    "/metrics": () => import("@/plugins/metrics/explorer/MetricsExplorer.vue"),
     "/traces": () => import("@/plugins/traces/Index.vue"),
     "/rum": () => import("@/views/RUM/RealUserMonitoring.vue"),
     "/dashboards": () => import("@/views/Dashboards/Dashboards.vue"),
@@ -44,7 +45,6 @@ export default function useRoutePrefetch() {
     "/ingestion": () => import("@/views/Ingestion.vue"),
     "/iam": () => import("@/views/IdentityAccessManagement.vue"),
     "/reports": () => import("@/components/reports/ReportList.vue"),
-    "/actions": () => import("@/components/actionScripts/ActionScripts.vue"),
     "/settings": () => import("@/components/settings/index.vue"),
   };
 

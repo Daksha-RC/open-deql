@@ -13,7 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -112,6 +112,19 @@ impl MemorySize for DerivedStream {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct WorkflowDestination {
+    pub destination_id: String,
+    pub template_override: Option<String>,
+}
+impl MemorySize for WorkflowDestination {
+    fn mem_size(&self) -> usize {
+        std::mem::size_of::<WorkflowDestination>()
+            + self.destination_id.mem_size()
+            + self.template_override.mem_size()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct Node {
@@ -131,7 +144,7 @@ pub struct Node {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub meta: Option<HashMap<String, String>>,
     /// Visual position for UI rendering
-    position: Position,
+    pub position: Position,
     /// Node role in the pipeline. MUST be one of:
     /// - "input": Source stream node (first node in pipeline)
     /// - "output": Destination stream node (last node in pipeline)
@@ -140,6 +153,8 @@ pub struct Node {
     io_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     style: Option<NodeStyle>,
+    #[serde(default)]
+    pub is_disabled: bool,
 }
 
 impl MemorySize for Node {
@@ -151,6 +166,7 @@ impl MemorySize for Node {
             + self.meta.mem_size()
             + self.io_type.mem_size()
             + self.style.mem_size()
+            + self.is_disabled.mem_size()
     }
 }
 
@@ -161,6 +177,7 @@ impl PartialEq for Node {
             && self.position == other.position
             && self.meta == other.meta
             && self.io_type == other.io_type
+            && self.is_disabled == other.is_disabled
     }
 }
 
@@ -173,6 +190,7 @@ impl Node {
             position: Position { x: pos_x, y: pos_y },
             io_type,
             style: None,
+            is_disabled: false,
         }
     }
 
@@ -199,6 +217,10 @@ pub struct Edge {
     pub source: String,
     /// Target node id (data flows to this node)
     pub target: String,
+    /// Which output handle of the source node this edge leaves from, for multi-output
+    /// nodes such as Branch. Absent on every pre-existing edge, so it must not serialize.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_handle: Option<String>,
 }
 
 impl MemorySize for Edge {
@@ -207,13 +229,30 @@ impl MemorySize for Edge {
             + self.id.mem_size()
             + self.source.mem_size()
             + self.target.mem_size()
+            + self.source_handle.mem_size()
     }
 }
 
 impl Edge {
     pub fn new(source: String, target: String) -> Self {
         let id = format!("e{source}-{target}");
-        Self { id, source, target }
+        Self {
+            id,
+            source,
+            target,
+            source_handle: None,
+        }
+    }
+
+    pub fn new_with_handle(source: String, target: String, source_handle: String) -> Self {
+        // handle is part of the id so two arms of one branch to the same target stay distinct
+        let id = format!("e{source}-{target}-{source_handle}");
+        Self {
+            id,
+            source,
+            target,
+            source_handle: Some(source_handle),
+        }
     }
 }
 
@@ -227,6 +266,12 @@ pub enum NodeData {
     Function(FunctionParams),
     Condition(ConditionParams),
     LlmEvaluation(LlmEvaluationParams),
+    WorkflowTrigger,
+    Destination(WorkflowDestination),
+    Branch(BranchParams),
+    // A newer build's node type; without this one such row fails the whole list via `try_into()?`
+    #[serde(other)]
+    Unsupported,
 }
 
 impl MemorySize for NodeData {
@@ -239,7 +284,43 @@ impl MemorySize for NodeData {
                 NodeData::Function(function_params) => function_params.mem_size(),
                 NodeData::Condition(condition_params) => condition_params.mem_size(),
                 NodeData::LlmEvaluation(llm_evaluation_params) => llm_evaluation_params.mem_size(),
+                NodeData::WorkflowTrigger => 0, // no sub-members
+                NodeData::Destination(dest) => dest.mem_size(),
+                NodeData::Branch(branch_params) => branch_params.mem_size(),
+                NodeData::Unsupported => 0, // no sub-members
             }
+    }
+}
+
+impl NodeData {
+    pub fn is_pipeline_node(&self) -> bool {
+        matches!(
+            self,
+            Self::RemoteStream(_)
+                | Self::Stream(_)
+                | Self::Query(_)
+                | Self::Function(_)
+                | Self::Condition(_)
+                | Self::LlmEvaluation(_)
+        )
+    }
+    pub fn is_workflow_node(&self) -> bool {
+        matches!(
+            self,
+            Self::WorkflowTrigger
+                | Self::Query(_)
+                | Self::Function(_)
+                | Self::Condition(_)
+                | Self::Destination(_)
+                | Self::Branch(_)
+        )
+    }
+
+    pub fn is_a_leaf_node(&self) -> bool {
+        matches!(
+            self,
+            Self::Stream(_) | Self::RemoteStream(_) | Self::Destination(_)
+        )
     }
 }
 
@@ -252,11 +333,68 @@ pub struct FunctionParams {
     pub after_flatten: bool,
     #[serde(default)]
     pub num_args: u8,
+    #[serde(default)]
+    pub raw_fn: Option<String>,
 }
 
 impl MemorySize for FunctionParams {
     fn mem_size(&self) -> usize {
         std::mem::size_of::<FunctionParams>() + self.name.mem_size()
+    }
+}
+
+/// Reference to a scorer: either a scorer entity id (latest version) or entity id + pinned version.
+///
+/// Supports two JSON forms:
+/// - Latest: `"scorer_entity_id"` (plain string -> version = None)
+/// - Pinned: `{"id": "scorer_entity_id", "version": 2}`
+#[derive(Clone, Debug, PartialEq, ToSchema)]
+pub struct ScorerRef {
+    pub id: String,
+    pub version: Option<i32>,
+}
+
+impl Serialize for ScorerRef {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if self.version.is_some() {
+            let mut s = serializer.serialize_struct("ScorerRef", 2)?;
+            s.serialize_field("id", &self.id)?;
+            s.serialize_field("version", &self.version)?;
+            s.end()
+        } else {
+            serializer.serialize_str(&self.id)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ScorerRef {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let v = serde_json::Value::deserialize(deserializer)?;
+        match v {
+            serde_json::Value::String(id) => Ok(ScorerRef { id, version: None }),
+            serde_json::Value::Object(map) => {
+                let id = map
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+                    .ok_or_else(|| serde::de::Error::missing_field("id"))?;
+                let version = map
+                    .get("version")
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v as i32);
+                Ok(ScorerRef { id, version })
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected string or object for ScorerRef",
+            )),
+        }
+    }
+}
+
+impl crate::stats::MemorySize for ScorerRef {
+    fn mem_size(&self) -> usize {
+        std::mem::size_of::<ScorerRef>() + self.id.mem_size() + self.version.mem_size()
     }
 }
 
@@ -268,29 +406,23 @@ pub struct LlmEvaluationParams {
     /// Uses hash-based sampling on trace_id for deterministic, consistent sampling.
     #[serde(default = "default_sampling_rate", with = "sampling_rate_str")]
     pub sampling_rate: f64,
-    /// Backward-compat: ignored, LLM judge is always enabled.
-    #[serde(default = "default_enable_llm_judge")]
-    pub enable_llm_judge: bool,
-    /// Field name used to identify LLM spans within a trace (e.g., "llm_input").
-    /// Only spans containing this field (with a non-empty value) are considered LLM spans.
-    #[serde(default = "default_llm_span_identifier")]
-    pub llm_span_identifier: String,
-    /// Optional template to use for evaluation (response_type name).
-    /// If specified, overrides auto-resolution by response_type.
+    /// Scorers to execute for this eval node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scorers: Vec<ScorerRef>,
+    /// Optional job ID for online eval jobs. When set, the evaluation pipeline
+    /// runs in span-bounded mode and publishes durable span evaluation tasks.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub eval_template: Option<String>,
+    pub job_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_version: Option<i32>,
+    /// Per-scorer bindings used to resolve the compact task payload before it
+    /// crosses the durable queue boundary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub input_mapping: Option<BTreeMap<String, BTreeMap<String, String>>>,
 }
 
 fn default_sampling_rate() -> f64 {
     0.01
-}
-
-fn default_enable_llm_judge() -> bool {
-    true
-}
-
-fn default_llm_span_identifier() -> String {
-    "llm_input".to_string()
 }
 
 mod sampling_rate_str {
@@ -334,9 +466,10 @@ impl Default for LlmEvaluationParams {
         Self {
             name: String::new(),
             sampling_rate: default_sampling_rate(),
-            enable_llm_judge: default_enable_llm_judge(),
-            llm_span_identifier: default_llm_span_identifier(),
-            eval_template: None,
+            scorers: Vec::new(),
+            job_id: None,
+            job_version: None,
+            input_mapping: None,
         }
     }
 }
@@ -345,8 +478,49 @@ impl MemorySize for LlmEvaluationParams {
     fn mem_size(&self) -> usize {
         std::mem::size_of::<LlmEvaluationParams>()
             + self.name.mem_size()
-            + self.llm_span_identifier.mem_size()
-            + self.eval_template.mem_size()
+            + self.scorers.iter().map(|s| s.mem_size()).sum::<usize>()
+            + self.input_mapping.mem_size()
+    }
+}
+
+/// One arm of a Branch node: records matching `conditions` leave via `handle`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct BranchCase {
+    pub handle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    // None = a draft arm with no rule yet; keeping it required made drafts unsaveable
+    #[serde(
+        default,
+        deserialize_with = "branch_case_conditions",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub conditions: Option<ConditionParams>,
+}
+
+impl MemorySize for BranchCase {
+    fn mem_size(&self) -> usize {
+        std::mem::size_of::<BranchCase>()
+            + self.handle.mem_size()
+            + self.label.mem_size()
+            + self.conditions.mem_size()
+    }
+}
+
+/// Exclusive router: cases are evaluated top-down and the first match wins.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
+pub struct BranchParams {
+    #[serde(default)]
+    pub cases: Vec<BranchCase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub else_handle: Option<String>,
+}
+
+impl MemorySize for BranchParams {
+    fn mem_size(&self) -> usize {
+        std::mem::size_of::<BranchParams>()
+            + self.cases.iter().map(|c| c.mem_size()).sum::<usize>()
+            + self.else_handle.mem_size()
     }
 }
 
@@ -436,9 +610,15 @@ impl Serialize for ConditionParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, ToSchema)]
-struct Position {
+pub struct Position {
     x: f32,
     y: f32,
+}
+
+impl Position {
+    pub fn is_valid(&self) -> bool {
+        !self.x.is_nan() && !self.y.is_nan() && !self.x.is_infinite() && !self.y.is_infinite()
+    }
 }
 
 impl MemorySize for Position {
@@ -456,6 +636,23 @@ impl MemorySize for NodeStyle {
     fn mem_size(&self) -> usize {
         std::mem::size_of::<NodeStyle>() + self.background_color.mem_size()
     }
+}
+
+// Old drawers emitted a rule-less arm as `{version, conditions: null}`; map it to None too.
+fn branch_case_conditions<'de, D>(deserializer: D) -> Result<Option<ConditionParams>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error;
+    use serde_json::Value;
+
+    let value = Value::deserialize(deserializer)?;
+    if value.is_null() || value.get("conditions").is_some_and(Value::is_null) {
+        return Ok(None);
+    }
+    serde_json::from_value(value)
+        .map(Some)
+        .map_err(D::Error::custom)
 }
 
 #[cfg(test)]
@@ -532,6 +729,7 @@ mod tests {
             after_flatten: false,
             // params: "row".to_string(),
             num_args: 0,
+            raw_fn: None,
         };
         let func_node = NodeData::Function(func);
         let payload = json::json!({
@@ -799,6 +997,7 @@ mod tests {
             name: "my_func".to_string(),
             after_flatten: false,
             num_args: 0,
+            raw_fn: None,
         });
         let node = Node::new(
             "func-1".to_string(),
@@ -824,10 +1023,8 @@ mod tests {
     fn test_llm_evaluation_params_default() {
         let p = LlmEvaluationParams::default();
         assert_eq!(p.sampling_rate, 0.01);
-        assert!(p.enable_llm_judge);
-        assert_eq!(p.llm_span_identifier, "llm_input");
         assert!(p.name.is_empty());
-        assert!(p.eval_template.is_none());
+        assert!(p.scorers.is_empty());
     }
 
     #[test]
@@ -935,6 +1132,7 @@ mod tests {
             name: "my_fn".to_string(),
             after_flatten: false,
             num_args: 0,
+            raw_fn: None,
         });
         assert!(data.mem_size() > 0);
     }
@@ -945,6 +1143,7 @@ mod tests {
             name: "fn".to_string(),
             after_flatten: true,
             num_args: 2,
+            raw_fn: None,
         };
         assert!(p.mem_size() > 0);
     }
@@ -1004,20 +1203,74 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_evaluation_params_eval_template_absent_when_none() {
+    fn test_llm_evaluation_params_scorers_absent_when_empty() {
         let params = LlmEvaluationParams::default();
         let json = serde_json::to_value(&params).unwrap();
-        assert!(!json.as_object().unwrap().contains_key("eval_template"));
+        assert!(!json.as_object().unwrap().contains_key("scorers"));
     }
 
     #[test]
-    fn test_llm_evaluation_params_eval_template_present_when_some() {
+    fn test_llm_evaluation_params_scorers_present_when_some() {
         let params = LlmEvaluationParams {
-            eval_template: Some("my_template".to_string()),
+            scorers: vec![ScorerRef {
+                id: "scorer-entity-1".to_string(),
+                version: None,
+            }],
             ..LlmEvaluationParams::default()
         };
         let json = serde_json::to_value(&params).unwrap();
-        assert!(json.as_object().unwrap().contains_key("eval_template"));
+        assert!(json.as_object().unwrap().contains_key("scorers"));
+    }
+
+    #[test]
+    fn test_llm_evaluation_params_job_version_is_optional() {
+        let params = LlmEvaluationParams {
+            job_id: Some("job-1".to_string()),
+            job_version: Some(3),
+            ..LlmEvaluationParams::default()
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["job_id"], "job-1");
+        assert_eq!(json["job_version"], 3);
+
+        let without_version = LlmEvaluationParams {
+            job_id: Some("job-1".to_string()),
+            ..LlmEvaluationParams::default()
+        };
+        let json = serde_json::to_value(&without_version).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("job_version"));
+    }
+
+    #[test]
+    fn test_llm_evaluation_params_scorers_deserialize_from_array() {
+        let json = serde_json::json!({
+            "name": "llm_eval",
+            "sampling_rate": 0.01,
+            "scorers": ["scorer-entity-1", "scorer-entity-2"]
+        });
+        let params: LlmEvaluationParams = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            params.scorers,
+            vec![
+                ScorerRef {
+                    id: "scorer-entity-1".to_string(),
+                    version: None,
+                },
+                ScorerRef {
+                    id: "scorer-entity-2".to_string(),
+                    version: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_scorer_ref_deserialize_pinned_entity_id() {
+        let json = serde_json::json!({"id": "scorer-entity-1", "version": 2});
+        let scorer_ref: ScorerRef = serde_json::from_value(json).unwrap();
+
+        assert_eq!(scorer_ref.id, "scorer-entity-1");
+        assert_eq!(scorer_ref.version, Some(2));
     }
 
     #[test]
@@ -1026,12 +1279,130 @@ mod tests {
     }
 
     #[test]
-    fn test_default_enable_llm_judge() {
-        assert!(default_enable_llm_judge());
+    fn test_edge_without_source_handle_round_trips_byte_identical() {
+        let stored = r#"{"id":"esource-1-target-2","source":"source-1","target":"target-2"}"#;
+        let edge: Edge = serde_json::from_str(stored).unwrap();
+
+        assert_eq!(edge.source_handle, None);
+        assert_eq!(serde_json::to_string(&edge).unwrap(), stored);
     }
 
     #[test]
-    fn test_default_llm_span_identifier() {
-        assert_eq!(default_llm_span_identifier(), "llm_input");
+    fn test_edge_with_source_handle_deserializes_and_serializes() {
+        let stored = r#"{"id":"ebranch-1-target-2-true","source":"branch-1","target":"target-2","source_handle":"true"}"#;
+        let edge: Edge = serde_json::from_str(stored).unwrap();
+
+        assert_eq!(edge.source_handle.as_deref(), Some("true"));
+        assert_eq!(serde_json::to_string(&edge).unwrap(), stored);
+    }
+
+    #[test]
+    fn test_edge_new_keeps_legacy_id_and_no_handle() {
+        let edge = Edge::new("a".to_string(), "b".to_string());
+
+        assert_eq!(edge.id, "ea-b");
+        assert_eq!(edge.source_handle, None);
+    }
+
+    #[test]
+    fn test_edge_new_with_handle_ids_do_not_collide() {
+        let true_edge = Edge::new_with_handle("a".to_string(), "b".to_string(), "true".to_string());
+        let false_edge =
+            Edge::new_with_handle("a".to_string(), "b".to_string(), "false".to_string());
+
+        assert_ne!(true_edge.id, false_edge.id);
+        assert_eq!(true_edge.source_handle.as_deref(), Some("true"));
+        assert_eq!(false_edge.source_handle.as_deref(), Some("false"));
+        assert_eq!(true_edge.source, "a");
+        assert_eq!(true_edge.target, "b");
+    }
+
+    #[test]
+    fn test_branch_is_workflow_node_but_not_pipeline_node() {
+        let branch = NodeData::Branch(BranchParams {
+            cases: vec![BranchCase {
+                handle: "case_0".to_string(),
+                label: None,
+                conditions: Some(ConditionParams::V1 {
+                    conditions: ConditionList::LegacyConditions(vec![]),
+                }),
+            }],
+            else_handle: Some("else".to_string()),
+        });
+
+        assert!(branch.is_workflow_node());
+        assert!(!branch.is_pipeline_node());
+        assert!(!branch.is_a_leaf_node());
+    }
+
+    #[test]
+    fn test_branch_node_data_deserializes_from_json() {
+        let data = json::json!({
+            "node_type": "branch",
+            "cases": [{
+                "handle": "case_0",
+                "label": "high severity",
+                "conditions": {
+                    "conditions": {"and": [{"column": "severity", "operator": "=", "value": "high"}]}
+                }
+            }],
+            "else_handle": "else"
+        });
+
+        let node: NodeData = json::from_value(data).unwrap();
+        let NodeData::Branch(params) = node else {
+            panic!("`node_type: branch` must deserialize as NodeData::Branch");
+        };
+        assert_eq!(params.cases.len(), 1);
+        assert_eq!(params.cases[0].handle, "case_0");
+        assert_eq!(params.cases[0].label.as_deref(), Some("high severity"));
+        assert_eq!(params.else_handle.as_deref(), Some("else"));
+    }
+
+    #[test]
+    fn branch_case_without_rule_deserializes_so_drafts_can_save() {
+        // The canvas mints new arms as `conditions: null`; a draft must round-trip them.
+        for case_json in [
+            json::json!({ "handle": "case-0", "conditions": null }),
+            json::json!({ "handle": "case-0" }),
+            json::json!({ "handle": "case-0", "conditions": { "version": 2, "conditions": null } }),
+        ] {
+            let data = json::json!({
+                "node_type": "branch",
+                "cases": [case_json],
+                "else_handle": "else",
+            });
+            let node: NodeData = json::from_value(data.clone())
+                .unwrap_or_else(|e| panic!("must accept a rule-less arm: {e} — {data}"));
+            let NodeData::Branch(params) = node else {
+                panic!("must deserialize as NodeData::Branch");
+            };
+            assert!(params.cases[0].conditions.is_none(), "no rule yet: {data}");
+        }
+    }
+
+    #[test]
+    fn branch_case_without_rule_serializes_without_a_conditions_key() {
+        let params = BranchParams {
+            cases: vec![BranchCase {
+                handle: "case-0".to_string(),
+                label: None,
+                conditions: None,
+            }],
+            else_handle: Some("else".to_string()),
+        };
+        let value = json::to_value(NodeData::Branch(params)).unwrap();
+        assert!(value["cases"][0].get("conditions").is_none());
+    }
+
+    #[test]
+    fn unknown_node_type_decodes_to_unsupported_and_is_not_a_workflow_node() {
+        let data = json::json!({ "node_type": "some_future_node", "whatever": 1 });
+        let node: NodeData = json::from_value(data).unwrap();
+
+        assert!(matches!(node, NodeData::Unsupported));
+        // re-serializing Unsupported rewrites the newer node's data; every allowlist must reject it
+        assert!(!node.is_workflow_node());
+        assert!(!node.is_pipeline_node());
     }
 }

@@ -1,4 +1,4 @@
-<!-- Copyright 2026 OpenObserve Inc.
+﻿<!-- Copyright 2026 OpenObserve Inc.
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU Affero General Public License as published by
@@ -15,10 +15,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="trace-details tw:h-[calc(100vh-2.625rem)]">
+  <div class="trace-details relative flex h-[calc(100vh-2.625rem)] w-full flex-col overflow-hidden">
     <!-- Original View -->
     <div
-      class="trace-details-content"
+      class="box-border flex min-h-0 flex-1 flex-col overflow-hidden"
       v-if="
         traceTree.length &&
         effectiveSpanList.length &&
@@ -28,57 +28,241 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         )
       "
     >
-      <div class="trace-combined-header-wrapper card-container">
-        <!-- New Modern Header -->
-        <header
-          class="tw:h-auto tw:py-[0.125rem] tw:flex! tw:items-center tw:justify-between tw:bg-[var(--o2-surface)]"
+      <div
+        v-if="showHeader"
+        class="trace-combined-header-wrapper bg-card-glass-bg shrink-0 py-[0.2rem]"
+      >
+        <!-- Standalone (routed) header: shared OPageHeader -->
+        <OPageHeader
+          v-if="mode === 'standalone'"
+          title-overflow="visible"
+          :back="
+            showBackButton
+              ? {
+                  onClick: handleBackOrClose,
+                  dataTest: 'trace-details-back-btn',
+                }
+              : undefined
+          "
+          class=""
         >
-          <div class="tw:flex tw:items-center tw:space-x-4 tw:w-fit!">
-            <!-- Back button -->
-            <q-btn
-              v-if="mode === 'standalone' && showBackButton"
-              data-test="trace-details-back-btn"
-              class="tw:px-1! tw:mr-[0.325rem]! hover:tw:bg-slate-200 tw:rounded tw:text-[var(--o2-text-secondary)]"
+          <!-- Operation names run long (SQL, URLs); the default header title never shrinks, so it never ellipsises. -->
+          <template #title>
+            <span
+              data-test="trace-details-operation-name"
+              class="block truncate"
+              :title="traceTree[0]?.operationName"
+            >
+              {{ traceTree[0]?.operationName || t("traces.loadingTrace") }}
+            </span>
+          </template>
+
+          <template #subtitle>
+            <div class="text-2xs text-text-secondary flex items-center space-x-2 whitespace-nowrap">
+              <span>{{ formatTimestamp(traceStartTime, store.state.timezone) }}</span>
+              <div class="bg-text-label h-4 w-px py-0" />
+              <span class="me-1">
+                {{ t("traces.traceId") }}:
+                <span
+                  data-test="trace-details-trace-id"
+                  class="text-text-body font-mono"
+                  :title="effectiveTraceId"
+                >
+                  {{ effectiveTraceId }}
+                </span>
+              </span>
+
+              <!-- Copy Trace ID Button -->
+              <OButton
+                data-test="trace-details-copy-trace-id-btn"
+                variant="ghost"
+                size="icon-xs"
+                icon-left="content-copy"
+                :title="t('traces.copyTraceId')"
+                @click="copyTraceId"
+              />
+
+              <!-- Session ID (LLM traces) -->
+              <template v-if="sessionId">
+                <div class="bg-text-label h-4 w-px py-0" />
+                <span class="me-1">
+                  {{ t("traces.traceDetails.sessionId") }}:
+                  <span
+                    data-test="trace-details-session-id"
+                    class="text-text-body font-mono"
+                    :title="sessionId"
+                  >
+                    {{ sessionId }}
+                  </span>
+                </span>
+                <OButton
+                  data-test="trace-details-copy-session-id-btn"
+                  variant="ghost"
+                  size="icon-xs"
+                  icon-left="content-copy"
+                  :title="t('traces.traceDetails.copySessionId')"
+                  @click="copySessionId"
+                />
+              </template>
+
+              <div class="bg-text-label h-4 w-px py-0" />
+              <!-- Span Count Badge -->
+              <span class="inline-flex">
+                <!-- sm + py-1! keeps both count chips at 1.1875rem: anything over the header's fixed 1.25rem subtitle band grows into the title's descenders. -->
+                <OTag
+                  type="logsResultChip"
+                  value="neutral"
+                  size="sm"
+                  data-test="trace-details-spans-count"
+                  class="py-1!"
+                >
+                  <span data-test="span-count-text">
+                    {{ formatLargeNumber(effectiveSpanList.length) }}
+                    {{ t("traces.spansLabel") }}
+                  </span>
+                </OTag>
+                <OTooltip :content="raw(effectiveSpanList.length + ' ' + t('traces.spansLabel'))" />
+              </span>
+
+              <div class="bg-text-label h-4 w-px py-0" />
+
+              <!-- Error Count Badge -->
+              <span class="inline-flex">
+                <OTag
+                  type="logsResultChip"
+                  value="error"
+                  size="sm"
+                  data-test="trace-details-error-spans-count"
+                  class="py-1!"
+                >
+                  <span
+                    >{{ formatLargeNumber(errorSpansCount) }} {{ t("traces.errorsLabel") }}</span
+                  >
+                </OTag>
+                <OTooltip :content="raw(errorSpansCount + ' ' + t('traces.errorsLabel'))" />
+              </span>
+            </div>
+          </template>
+
+          <template #actions>
+            <!-- Apply filters button -->
+            <OButton
+              v-if="areFiltersAdded"
+              data-test="trace-details-apply-filters-btn-right"
+              variant="outline"
               size="xs"
-              flat
-              dense
+              @click="openFilterPopover"
+            >
+              <template #icon-left><OIcon name="filter-alt" size="xs" /></template>
+              <span class="text-xs">{{ t("traces.viewFilters") }}</span>
+              <OTooltip :content="t('traces.reviewAndApplyFilters')" />
+            </OButton>
+
+            <!-- LLM workflow actions — icon-only so the header stays legible
+                 with the trace identity chips it already carries. -->
+            <OButton
+              v-if="canManualEvaluate"
+              data-test="trace-details-evaluate-trace-btn"
+              variant="outline"
+              size="icon-xs"
+              :aria-label="t('onlineEvals.manualEvaluation.titles.trace')"
+              @click="openTraceEvaluation"
+            >
+              <OIcon name="rule" size="sm" />
+              <OTooltip side="bottom" :content="t('onlineEvals.manualEvaluation.titles.trace')" />
+            </OButton>
+
+            <TraceAnnotateMenu
+              v-if="canAnnotate"
+              ref-type="trace"
+              :ref-id="effectiveTraceId"
+              :ref-trace-start-time="traceEvaluationRange.startTime"
+              :source-stream="effectiveStreamName"
+              compact
+              data-test="trace-details-annotate-trace-btn"
+            />
+
+            <OButton
+              v-if="canAnnotate"
+              data-test="trace-details-dataset-trace-btn"
+              variant="outline"
+              size="icon-xs"
+              :aria-label="t('aiObservability.traceActions.dataset.button')"
+              @click="openTraceDataset"
+            >
+              <OIcon name="table-chart" size="sm" />
+              <OTooltip side="bottom" :content="t('aiObservability.traceActions.dataset.button')" />
+            </OButton>
+
+            <!-- Share button -->
+            <ShareButton
+              v-if="showShareButton"
+              data-test="trace-details-share-link-btn"
+              :url="traceDetailsShareURL"
+              variant="outline"
+              size="icon-xs"
+            />
+
+            <!-- Close button -->
+            <OButton
+              v-if="showCloseButton"
+              data-test="trace-details-close-btn"
+              variant="ghost"
+              size="icon-xs"
               @click="handleBackOrClose"
             >
-              <q-icon class="tw:text-[1.1rem]!" name="arrow_back" />
-              <q-tooltip>{{
-                areFiltersAdded
-                  ? t("traces.applyPendingFilters")
-                  : t("traces.backToTraces")
-              }}</q-tooltip>
-            </q-btn>
+              <OIcon name="close" size="sm" />
+              <OTooltip :content="t('common.cancel')" />
+            </OButton>
+          </template>
+        </OPageHeader>
 
-            <div
-              class="tw:flex tw:min-w-0 tw:w-full tw:gap-[0.625rem]! tw:items-center"
+        <!-- Embedded (logs) header -->
+        <header
+          v-else
+          class="bg-surface-base flex! h-auto items-center justify-between py-0.5 ps-1"
+        >
+          <div class="flex w-fit! items-center space-x-4">
+            <!-- Back button -->
+            <OButton
+              v-if="isStandaloneMode && showBackButton"
+              data-test="trace-details-back-btn"
+              variant="ghost-muted"
+              size="icon-xs"
+              class="me-1.5"
+              @click="handleBackOrClose"
             >
+              <OIcon name="arrow-back" size="sm" />
+              <OTooltip
+                :content="
+                  areFiltersAdded ? t('traces.applyPendingFilters') : t('traces.backToTraces')
+                "
+              />
+            </OButton>
+
+            <div class="flex w-full min-w-0 items-center gap-2.5!">
               <!-- Operation Name -->
               <div
                 data-test="trace-details-operation-name"
-                class="tw:text-base tw:font-semibold tw:leading-tight tw:text-[var(--o2-text-primary)] tw:truncate tw:min-w-0 tw:max-w-[24rem]!"
+                class="text-text-heading max-w-96! min-w-0 truncate text-base leading-tight font-semibold"
                 :title="traceTree[0]?.operationName"
               >
                 {{ traceTree[0]?.operationName || t("traces.loadingTrace") }}
-                <q-tooltip>{{ traceTree[0]?.operationName }}</q-tooltip>
+                <OTooltip :content="traceTree[0]?.operationName" />
               </div>
 
               <!-- Service, Timestamp, and Trace ID -->
               <div
-                class="tw:flex tw:items-center tw:space-x-2 tw:text-[11px] tw:text-[var(--o2-text-secondary)] tw:max-w-[32rem]"
+                class="text-2xs text-text-secondary flex items-center space-x-2 whitespace-nowrap"
               >
-                <span>{{ formatTimestamp(traceStartTime) }}</span>
-                <div
-                  class="tw:bg-[var(--o2-text-3)] tw:py-[0rem] tw:w-[1px] tw:h-[16px]"
-                />
-                <span class="tw:mr-[0.25rem]">
+                <span>{{ formatTimestamp(traceStartTime, store.state.timezone) }}</span>
+                <div class="bg-text-label h-4 w-px py-0" />
+                <span class="me-1">
                   {{ t("traces.traceId") }}:
                   <span
                     v-if="mode === 'embedded'"
                     data-test="trace-details-trace-id"
-                    class="tw:text-[var(--o2-text-primary)] tw:font-mono tw:cursor-pointer hover:tw:text-[var(--o2-theme-color)] tw:transition-colors"
+                    class="text-text-body hover:text-theme-accent cursor-pointer font-mono transition-colors"
                     :title="t('traces.openInTraces')"
                     @click="handleExpandToFullView"
                   >
@@ -87,7 +271,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   <span
                     v-else
                     data-test="trace-details-trace-id"
-                    class="tw:text-[var(--o2-text-primary)] tw:font-mono"
+                    class="text-text-body font-mono"
                     :title="effectiveTraceId"
                   >
                     {{ effectiveTraceId }}
@@ -95,370 +279,324 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 </span>
 
                 <!-- Copy Trace ID Button -->
-                <q-icon
+                <OButton
                   data-test="trace-details-copy-trace-id-btn"
-                  name="content_copy"
-                  size="12px"
-                  class="tw:cursor-pointer hover:tw:text-[var(--o2-text-primary)]"
+                  variant="ghost"
+                  size="icon-xs"
+                  icon-left="content-copy"
                   :title="t('traces.copyTraceId')"
                   @click="copyTraceId"
                 />
 
+                <!-- Session ID (LLM traces) -->
+                <template v-if="sessionId">
+                  <div class="bg-text-label h-4 w-px py-0" />
+                  <span class="me-1">
+                    {{ t("traces.traceDetails.sessionId") }}:
+                    <span
+                      data-test="trace-details-session-id"
+                      class="text-text-body font-mono"
+                      :title="sessionId"
+                    >
+                      {{ sessionId }}
+                    </span>
+                  </span>
+                  <OButton
+                    data-test="trace-details-copy-session-id-btn"
+                    variant="ghost"
+                    size="icon-xs"
+                    icon-left="content-copy"
+                    :title="t('traces.traceDetails.copySessionId')"
+                    @click="copySessionId"
+                  />
+                </template>
+
                 <!-- Open in new icon (embedded mode only) -->
-                <q-icon
+                <OButton
                   v-if="mode === 'embedded' && showExpandButton"
                   data-test="trace-details-trace-id-open-btn"
-                  class="tw:cursor-pointer hover:tw:text-[var(--o2-theme-color)]"
-                  size="14px"
-                  name="open_in_new"
+                  variant="ghost"
+                  size="icon-xs"
+                  icon-left="open-in-new"
                   :title="t('traces.openInTraces')"
                   @click="handleExpandToFullView"
                 />
               </div>
 
-              <div
-                class="tw:bg-[var(--o2-text-3)] tw:py-[0rem] tw:w-[1px] tw:h-[16px]"
-              />
+              <div class="bg-text-label h-4 w-px py-0" />
               <!-- Span Count Badge -->
-              <div
-                data-test="trace-details-spans-count"
-                class="tw:flex tw:items-center tw:ml-[0rem] tw:space-x-1 tw:px-[0.625rem] tw:py-[0.1rem] tw:rounded tw:text-[0.75rem] tw:text-[var(--o2-text-4)] tw:bg-[var(--o2-tag-grey-1)]"
-              >
-                <span data-test="span-count-text">
-                  {{ formatLargeNumber(effectiveSpanList.length) }}
-                  {{ t("traces.spansLabel") }}
-                  <q-tooltip
-                    >{{ effectiveSpanList.length }}
-                    {{ t("traces.spansLabel") }}</q-tooltip
-                  >
-                </span>
-              </div>
+              <span class="inline-flex">
+                <OTag type="logsResultChip" value="neutral" data-test="trace-details-spans-count">
+                  <span data-test="span-count-text">
+                    {{ formatLargeNumber(effectiveSpanList.length) }}
+                    {{ t("traces.spansLabel") }}
+                  </span>
+                </OTag>
+                <OTooltip :content="raw(effectiveSpanList.length + ' ' + t('traces.spansLabel'))" />
+              </span>
 
-              <div
-                class="tw:bg-[var(--o2-text-3)] tw:py-[0rem] tw:w-[1px] tw:h-[16px]"
-              />
+              <div class="bg-text-label h-4 w-px py-0" />
 
               <!-- Error Count Badge -->
-              <div
-                data-test="trace-details-error-spans-count"
-                class="tw:flex tw:items-center tw:space-x-1 tw:px-[0.625rem] tw:py-[0.1rem] tw:rounded tw:text-[0.75rem] tw:text-[var(--o2-error-tag-text)] tw:bg-[var(--o2-error-tag-bg)] tw:mr-[0.85rem]"
-              >
-                <span
-                  >{{ formatLargeNumber(errorSpansCount) }}
-                  {{ t("traces.errorsLabel") }}</span
+              <span class="me-[0.85rem] inline-flex">
+                <OTag
+                  type="logsResultChip"
+                  value="error"
+                  data-test="trace-details-error-spans-count"
                 >
-                <q-tooltip
-                  >{{ errorSpansCount }}
-                  {{ t("traces.errorsLabel") }}</q-tooltip
-                >
-              </div>
+                  <span
+                    >{{ formatLargeNumber(errorSpansCount) }} {{ t("traces.errorsLabel") }}</span
+                  >
+                </OTag>
+                <OTooltip :content="raw(errorSpansCount + ' ' + t('traces.errorsLabel'))" />
+              </span>
             </div>
           </div>
 
-          <div
-            class="tw:flex tw:justify-end tw:items-center tw:space-x-3 tw:w-fit!"
-          >
+          <div class="flex w-fit! items-center justify-end space-x-3">
             <!-- Apply filters button (standalone mode, right side) -->
-            <q-btn
-              v-if="mode === 'standalone' && areFiltersAdded"
+            <OButton
+              v-if="isStandaloneMode && areFiltersAdded"
               data-test="trace-details-apply-filters-btn-right"
-              class="tw:px-2! tw:mr-[0.625rem]! tw:ml-[0.325rem]! hover:tw:bg-slate-200 tw:rounded tw:border-1! tw:border-solid! tw:border-[var(--o2-theme-color)]! tw:text-[var(--o2-theme-color)]! tw:tracking-[0.03rem]"
+              variant="outline"
               size="xs"
-              icon="filter_alt"
-              no-caps
+              class="me-2.5"
               @click="openFilterPopover"
             >
-              <span class="tw:text-[0.75rem] tw:pl-[0.25rem]"
-                >{{ t("traces.viewFilters") }}
-              </span>
-              <q-tooltip>{{ t("traces.reviewAndApplyFilters") }}</q-tooltip>
-            </q-btn>
+              <template #icon-left><OIcon name="filter-alt" size="xs" /></template>
+              <span class="text-xs">{{ t("traces.viewFilters") }}</span>
+              <OTooltip :content="t('traces.reviewAndApplyFilters')" />
+            </OButton>
 
             <!-- Expand button (embedded mode) -->
-            <q-btn
+            <OButton
               v-if="mode === 'embedded' && showExpandButton"
               data-test="trace-details-expand-btn"
-              class="tw:px-1! tw:ml-[0.325rem]! hover:tw:bg-slate-200 tw:rounded tw:text-[var(--o2-text-secondary)]"
-              size="xs"
-              icon="open_in_new"
+              variant="outline"
+              size="icon-xs"
               @click="handleExpandToFullView"
             >
-              <q-tooltip>{{ t("traces.openInTraces") }}</q-tooltip>
-            </q-btn>
+              <OIcon name="open-in-new" size="sm" />
+              <OTooltip :content="t('traces.openInTraces')" />
+            </OButton>
 
             <!-- Share button (standalone mode) -->
-            <share-button
-              v-if="mode === 'standalone' && showShareButton"
+            <ShareButton
+              v-if="isStandaloneMode && showShareButton"
               data-test="trace-details-share-link-btn"
               :url="traceDetailsShareURL"
-              button-class="tw:px-1! tw:ml-[0.325rem]! hover:tw:bg-slate-200 tw:rounded tw:text-[var(--o2-text-secondary)]"
+              variant="outline"
+              buttonClass="me-1!"
+              size="icon-xs"
             />
 
             <!-- Close button -->
-            <q-btn
-              v-if="mode === 'standalone' && showCloseButton"
+            <OButton
+              v-if="isStandaloneMode && showCloseButton"
               data-test="trace-details-close-btn"
-              class="tw:px-1! tw:mx-[0.325rem]! hover:tw:bg-slate-200 tw:rounded tw:text-[var(--o2-text-secondary)]"
-              size="xs"
-              icon="close"
+              variant="ghost"
+              size="icon-xs"
+              class="me-1!"
               @click="handleBackOrClose"
             >
-              <q-tooltip>{{ t("common.cancel") }}</q-tooltip>
-            </q-btn>
+              <OIcon name="close" size="sm" />
+              <OTooltip :content="t('common.cancel')" />
+            </OButton>
           </div>
         </header>
       </div>
-      <div
-        class="card-container tw:overflow-hidden tw:h-full"
-        style="display: flex; flex-direction: column; min-height: 0"
-      >
+      <div class="bg-card-glass-bg flex h-full min-h-0 flex-col overflow-hidden">
         <!-- Tabs & Search Bar -->
         <div
-          class="tw:py-0 tw:border-b tw:border-[var(--o2-border)] tw:flex tw:items-center tw:justify-between tw:bg-white tw:bg-[var(--o2-card-bg)]!"
+          class="border-border-default bg-card-glass-bg! flex items-center justify-between border-b bg-white py-0"
         >
           <div
-            class="tw:flex tw:items-center tw:space-x-4 trace-details-view-tabs tw:ml-[0.325rem]"
+            class="trace-details-view-tabs ms-[0.325rem] flex items-center space-x-4 py-[0.325rem]"
           >
-            <AppTabs
-              :tabs="traceTabs"
-              :active-tab="activeTab"
-              @update:active-tab="activeTab = $event"
-            />
+            <!--
+              Tabs are data-driven from `traceTabs` so they can be dragged to
+              reorder (same interaction as the Home page tab bar). Visibility
+              rules — including the Thread tab's `VITE_SHOW_LLM_UI` + LLM-span
+              gate — live in `isTraceTabVisible`.
+            -->
+            <OToggleGroup
+              :model-value="activeTab"
+              reorderable
+              @update:model-value="updateActiveTab"
+              @reorder="onTabReorder"
+            >
+              <OToggleGroupItem
+                v-for="tab in traceTabs"
+                :key="tab.value"
+                :value="tab.value"
+                size="sm"
+                :data-test="`trace-details-${tab.value}-tab`"
+              >
+                <template #icon-left>
+                  <OIcon :name="tab.icon" :size="tab.iconSize" class="shrink-0" />
+                </template>
+                {{ "label" in tab ? raw(tab.label) : t(tab.labelKey) }}
+              </OToggleGroupItem>
+            </OToggleGroup>
           </div>
 
-          <div class="tw:flex tw:items-center tw:space-x-2">
+          <div class="flex items-center gap-2 space-x-2 pe-[0.325rem]">
             <!-- Unified Search Input Group -->
             <div
-              v-if="activeTab !== 'flame-graph' && activeTab !== 'map'"
-              class="unified-search-group"
+              v-if="activeTab !== 'flame-graph' && activeTab !== 'map' && activeTab !== 'thread'"
+              class="unified-search-group rounded-default dark:bg-surface-base dark:hover:border-theme-accent dark:focus-within:border-theme-accent me-1! flex w-fit items-stretch gap-1 transition-colors duration-200"
             >
               <div class="log-stream-search-input">
-                <q-input
+                <OSearchInput
                   v-model="searchQuery"
                   data-test="trace-details-search-input"
-                  outlined
-                  dense
                   :placeholder="t('traces.searchInSpans')"
                   clearable
-                  class="tw:text-[12px]!"
+                  size="sm"
+                  class="text-xs!"
                   @update:model-value="handleSearchQueryChange"
-                >
-                  <template v-slot:prepend>
-                    <q-icon name="search" size="1rem" />
-                  </template>
-                </q-input>
+                />
               </div>
               <!-- Search Results Navigation -->
-              <div class="search-navigation-container">
+              <div
+                class="rounded-default border-border-default dark:hover:border-theme-accent h-8.2! inline-flex items-center border bg-transparent px-0.5 py-0! [transition:all_0.2s_ease]"
+              >
                 <div
-                  class="search-results-counter"
+                  class="flex items-center gap-[0.0625rem] px-1 text-xs font-medium select-none"
                   data-test="trace-details-search-results"
                 >
-                  <span class="counter-current">{{
+                  <span class="text-text-secondary">{{
                     searchResults ? currentIndex + 1 : 0
                   }}</span>
-                  <span class="counter-separator">/</span>
-                  <span class="counter-total">{{ searchResults }}</span>
+                  <span class="text-text-secondary mx-0.5">/</span>
+                  <span class="text-text-secondary">{{ searchResults }}</span>
                 </div>
-                <div class="navigation-buttons">
-                  <q-btn
+                <div class="ms-1 flex h-full items-center">
+                  <OButton
                     data-test="trace-details-search-prev-btn"
-                    :disable="!searchResults || currentIndex === 0"
-                    flat
-                    dense
-                    icon="keyboard_arrow_up"
-                    size="sm"
-                    class="nav-btn"
+                    :disabled="!searchResults || currentIndex === 0"
+                    variant="ghost-muted"
+                    size="icon"
                     @click="prevMatch"
                   >
-                    <q-tooltip>{{ t("traces.previousMatch") }}</q-tooltip>
-                  </q-btn>
-                  <div class="button-separator"></div>
-                  <q-btn
+                    <OIcon name="keyboard-arrow-up" size="sm" />
+                    <OTooltip :content="t('traces.previousMatch')" />
+                  </OButton>
+                  <div class="bg-card-glass-border mx-0.5 h-[1.125rem] w-px"></div>
+                  <OButton
                     data-test="trace-details-search-next-btn"
-                    :disable="
-                      !searchResults || currentIndex + 1 === searchResults
-                    "
-                    flat
-                    dense
-                    icon="keyboard_arrow_down"
-                    size="sm"
-                    class="nav-btn"
+                    :disabled="!searchResults || currentIndex + 1 === searchResults"
+                    variant="ghost-muted"
+                    size="icon"
                     @click="nextMatch"
                   >
-                    <q-tooltip>{{ t("traces.nextMatch") }}</q-tooltip>
-                  </q-btn>
+                    <OIcon name="keyboard-arrow-down" size="sm" />
+                    <OTooltip :content="t('traces.nextMatch')" />
+                  </OButton>
                 </div>
               </div>
             </div>
             <!-- Log Stream Selector (if enabled) -->
             <div
-              v-if="showLogStreamSelector"
-              class="log-stream-search-input tw:flex tw:items-center trace-logs-selector"
+              v-if="showLogStreamSelector && config.isEnterprise !== 'true'"
+              class="log-stream-search-input trace-logs-selector mx-1! flex items-center"
             >
-              <q-select
+              <OSelect
                 data-test="trace-details-log-streams-select"
                 v-model="searchObj.data.traceDetails.selectedLogStreams"
-                :label="
-                  searchObj.data.traceDetails.selectedLogStreams.length
-                    ? ''
-                    : t('search.selectIndex')
-                "
+                :placeholder="t('search.selectLogStream')"
                 :options="filteredStreamOptions"
-                data-cy="stream-selection"
-                input-debounce="0"
-                behavior="menu"
-                filled
                 multiple
-                borderless
-                dense
-                fill-input
                 :title="selectedStreamsString"
-              >
-                <template #no-option>
-                  <div class="log-stream-search-input">
-                    <q-input
-                      data-test="trace-details-stream-search-input"
-                      v-model="streamSearchValue"
-                      borderless
-                      filled
-                      debounce="500"
-                      autofocus
-                      dense
-                      size="xs"
-                      @update:model-value="filterStreamFn"
-                      class="q-ml-auto q-mb-xs no-border q-pa-xs"
-                      :placeholder="t('search.searchStream')"
-                    >
-                      <template #prepend>
-                        <q-icon name="search" class="cursor-pointer" />
-                      </template>
-                    </q-input>
-                  </div>
-                  <q-item>
-                    <q-item-section> {{ t("search.noResult") }}</q-item-section>
-                  </q-item>
-                </template>
-                <template #before-options>
-                  <div class="log-stream-search-input">
-                    <q-input
-                      data-test="trace-details-stream-search-input-options"
-                      v-model="streamSearchValue"
-                      borderless
-                      debounce="500"
-                      filled
-                      dense
-                      autofocus
-                      @update:model-value="filterStreamFn"
-                      class="q-ml-auto q-mb-xs no-border q-pa-xs"
-                      :placeholder="t('search.searchStream')"
-                    >
-                      <template #prepend>
-                        <q-icon name="search" class="cursor-pointer" />
-                      </template>
-                    </q-input>
-                  </div>
-                </template>
-              </q-select>
-              <q-btn
-                data-test="trace-details-view-logs-btn"
-                v-close-popup="true"
-                class="o2-secondary-button text-bold tw:px-[0.5rem]! tw:py-0! traces-view-logs-btn tw:border! tw:border-l-0! tw:border-solid! tw:border-[var(--o2-border-color)]!"
-                :label="
-                  searchObj.meta.redirectedFromLogs
-                    ? t('traces.backToLogs')
-                    : t('traces.viewLogs')
-                "
-                padding="sm sm"
-                size="sm"
-                no-caps
-                outline
-                icon="search"
-                flat
-                dense
-                unelevated
-                :title="t('traces.viewLogs')"
-                @click="redirectToLogs"
+                class="w-44!"
               />
-              <q-btn
-                v-if="hasRumSessionId"
-                data-test="trace-details-view-session-replay-btn"
-                v-close-popup="true"
-                class="traces-view-session-replay-btn text-bold q-ml-md tw-text-[16px]! tw:border! tw:border-solid tw:border-[var(--o2-theme-color)]!"
-                :label="t('rum.playSessionReplay')"
-                padding="sm sm"
-                size="sm"
-                no-caps
-                flat
-                color="primary"
-                outline
-                dense
-                :icon="outlinedPlayCircle"
-                @click="redirectToSessionReplay"
-              />
+              <span class="traces-view-logs-btn ps-1">
+                <!-- Single button with wrapper for tooltip functionality -->
+                <span class="inline-block" tabindex="0">
+                  <OButton
+                    data-test="trace-details-view-logs-btn"
+                    variant="outline"
+                    size="sm"
+                    class="h-8! text-xs font-normal!"
+                    :disabled="isViewLogsDisabled"
+                    @click="redirectToLogs"
+                  >
+                    <template #icon-left><OIcon name="search" size="xs" /></template>
+                    {{
+                      searchObj.meta.redirectedFromLogs
+                        ? t("traces.backToLogs")
+                        : t("traces.viewLogs")
+                    }}
+                  </OButton>
+                  <OTooltip
+                    :content="
+                      isViewLogsDisabled ? t('search.selectLogsStreamFirst') : t('traces.viewLogs')
+                    "
+                  />
+                </span>
+              </span>
             </div>
+            <OButton
+              v-if="hasReplaySession && !hideSessionReplayButton"
+              data-test="trace-details-view-session-replay-btn"
+              variant="outline"
+              size="sm"
+              class="ms-1"
+              @click="redirectToSessionReplay"
+            >
+              <template #icon-left>
+                <OIcon name="play-circle" size="sm" />
+              </template>
+              {{ t("rum.playSessionReplay") }}
+            </OButton>
           </div>
         </div>
         <div
-          class="histogram-spans-container"
+          class="relative flex min-h-0 flex-1 flex-col pb-2"
           :class="[
             isSidebarOpen ? 'histogram-container' : 'histogram-container-full',
             isTimelineExpanded ? '' : 'full',
           ]"
           ref="parentContainer"
         >
-          <div class="trace-tree-wrapper">
+          <div class="box-border flex min-h-0 flex-1 flex-col overflow-hidden">
             <!-- Waterfall View - show for waterfall tab, or when no LLM spans -->
-            <div
-              v-if="activeTab === 'waterfall'"
-              class="tw:flex tw:h-full tw:bg-[var(--o2-card-bg)]!"
-            >
+            <div v-if="activeTab === 'waterfall'" class="bg-card-glass-bg! flex h-full">
               <div
-                class="tw:flex tw:flex-col tw:min-h-0"
+                class="flex min-h-0 flex-col"
                 :style="{
                   width: isSidebarOpen ? leftWidth + 'px' : '100%',
                 }"
               >
-                <trace-header
+                <TraceHeader
                   data-test="trace-details-header"
                   :baseTracePosition="baseTracePosition"
                   :splitterWidth="leftWidth"
-                  :isSidebarOpen="
-                    Boolean(
-                      isSidebarOpen && (selectedSpanId || showTraceDetails),
-                    )
-                  "
+                  :isSidebarOpen="Boolean(isSidebarOpen && (selectedSpanId || showTraceDetails))"
                   @resize-start="startResize"
                 />
                 <div
                   ref="traceScrollContainer"
-                  class="relative-position trace-content-scroll"
+                  class="relative-position trace-content-scroll min-h-0! max-w-full! flex-1! [scrollbar-gutter:stable]! overflow-x-hidden! overflow-y-auto!"
                   :style="{
                     width: isSidebarOpen ? leftWidth + 'px' : '100%',
                   }"
                 >
                   <div
-                    class="trace-tree-container tw:bg-[var(--o2-card-bg)]!"
+                    class="bg-card-glass-bg! mb-0 min-h-full pt-0 pb-0"
                     data-test="trace-details-tree-container"
                   >
                     <div class="position-relative">
                       <div
+                        data-test="trace-details-resizer"
                         :style="{
-                          width: '1px',
                           left: `${leftWidth}px`,
-                          backgroundColor:
-                            store.state.theme === 'dark'
-                              ? '#3c3c3c'
-                              : '#ececec',
                           zIndex: 999,
-                          top: '-28px',
-                          height: `${spanPositionList.length * spanDimensions.height + 28}px`,
-                          cursor: 'col-resize',
                         }"
-                        class="absolute resize"
+                        class="bg-border-default hover:bg-accent rounded-default absolute top-0 h-full w-px cursor-col-resize resize transition-colors duration-200 after:absolute after:top-0 after:-right-2.5 after:bottom-0 after:-left-2.5 after:z-999 after:h-full after:content-['']"
                         @mousedown="startResize"
                       />
-                      <trace-tree
+                      <TraceTree
                         data-test="trace-details-tree"
                         :collapseMapping="collapseMapping"
                         :spans="spanPositionList"
@@ -466,22 +604,22 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                         :spanDimensions="spanDimensions"
                         :spanMap="spanMap"
                         :leftWidth="leftWidth"
-                        :scrollContainer="traceScrollContainer"
+                        :scrollContainer="scrollContainerForTree"
                         ref="traceTreeRef"
-                        class="tw:bg-[var(--o2-card-bg)]!"
+                        class="bg-card-glass-bg!"
                         :search-query="searchQuery"
                         :spanList="spanList"
                         :selectedSpanId="selectedSpanId"
-                        :isSidebarOpen="
-                          !!(
-                            isSidebarOpen &&
-                            (selectedSpanId || showTraceDetails)
-                          )
-                        "
+                        :hoveredSpanId="hoveredSpanId"
+                        :isSidebarOpen="!!(isSidebarOpen && (selectedSpanId || showTraceDetails))"
                         @toggle-collapse="toggleSpanCollapse"
                         @select-span="updateSelectedSpan"
+                        @select-span-event="onSelectSpanEvent"
+                        @hover-span="onHoverSpan"
+                        @unhover-span="onUnhoverSpan"
                         @update-current-index="handleIndexUpdate"
                         @search-result="handleSearchResult"
+                        @view-correlated-logs="handleTreeViewCorrelatedLogs"
                       />
                     </div>
                   </div>
@@ -489,42 +627,47 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               </div>
               <div
                 v-if="isSidebarOpen && (selectedSpanId || showTraceDetails)"
-                class="histogram-sidebar-inner tw:border-l tw:border-l-solid tw:border-l-[var(--o2-border-color)]"
+                class="border-s-solid border-s-card-glass-border min-h-0 shrink-0 overflow-x-hidden overflow-y-auto border-s transition-all duration-300"
                 :class="isTimelineExpanded ? '' : 'full'"
                 :style="{
                   width: `calc(100% - ${leftWidth}px)`,
                 }"
               >
-                <trace-details-sidebar
+                <TraceDetailsSidebar
                   data-test="trace-details-sidebar"
-                  :span="spanMap[selectedSpanId as string]"
+                  :span="spanMap[effectiveSpanId as string]"
                   :baseTracePosition="baseTracePosition"
                   :search-query="searchQuery"
                   :stream-name="currentTraceStreamName"
                   :service-streams-enabled="serviceStreamsEnabled"
                   :parent-mode="mode"
+                  :activeTab="sidebarActiveTab"
+                  :focusEventIndex="focusedEventIndex"
+                  :selected-log-streams="searchObj.data.traceDetails.selectedLogStreams"
+                  :show-log-stream-selector="showLogStreamSelector"
+                  :show-evaluate-button="canManualEvaluate"
+                  :show-annotate-buttons="canAnnotate"
                   @view-logs="redirectToLogs"
+                  @evaluate="openSpanEvaluation"
+                  @add-to-dataset="openSpanDataset"
                   @close="closeSidebar"
                   @open-trace="openTraceLink"
                   @add-filter="addFilterFromSidebar"
                   @apply-filter-immediately="applyFilterImmediately"
+                  @update:activeTab="onSidebarTabChange($event as string)"
                 />
               </div>
             </div>
 
             <!-- DAG View - only for LLM traces -->
-            <div
-              v-if="hasLLMSpans && activeTab === 'dag'"
-              style="display: flex; flex: 1; min-height: 0"
-            >
+            <div v-if="hasLLMSpans && activeTab === 'dag'" class="flex min-h-0 flex-1">
               <div
-                class="dag-left-panel"
+                class="h-[calc(100vh-12.5rem)] min-w-[12.5rem] overflow-hidden p-4"
                 :style="{
                   width:
                     isSidebarOpen && (selectedSpanId || showTraceDetails)
                       ? `${dagLeftWidth}%`
                       : '100%',
-                  minWidth: '200px',
                 }"
               >
                 <TraceDAG
@@ -533,43 +676,49 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   :streamName="currentTraceStreamName || 'default'"
                   :startTime="effectiveTimeRange.from || 0"
                   :endTime="effectiveTimeRange.to || 0"
-                  :sidebarOpen="
-                    Boolean(
-                      isSidebarOpen && (!!selectedSpanId || showTraceDetails),
-                    )
-                  "
+                  :sidebarOpen="Boolean(isSidebarOpen && (!!selectedSpanId || showTraceDetails))"
                   @node-click="handleDAGNodeClick"
                 />
               </div>
               <!-- Resizable divider -->
               <div
                 v-if="isSidebarOpen && (selectedSpanId || showTraceDetails)"
-                class="dag-resizer"
+                class="dag-resizer group relative z-10 flex w-2 shrink-0 cursor-col-resize items-center justify-center"
                 @mousedown="startDagResize"
               >
-                <div class="dag-resizer-line"></div>
+                <div
+                  class="dag-resizer-line bg-border-default group-hover:bg-accent rounded-default h-full w-0.75 transition-colors duration-200"
+                ></div>
               </div>
               <div
                 v-if="isSidebarOpen && (selectedSpanId || showTraceDetails)"
-                class="dag-right-panel"
+                class="h-[calc(100vh-12.5rem)] min-h-0 min-w-[18.75rem] overflow-x-hidden overflow-y-auto"
                 :style="{
                   width: `${100 - dagLeftWidth}%`,
-                  minWidth: '300px',
                 }"
               >
-                <trace-details-sidebar
+                <TraceDetailsSidebar
                   data-test="trace-details-dag-sidebar"
-                  :span="spanMap[selectedSpanId as string]"
+                  :span="spanMap[effectiveSpanId as string]"
                   :baseTracePosition="baseTracePosition"
                   :search-query="searchQuery"
                   :stream-name="currentTraceStreamName"
                   :service-streams-enabled="serviceStreamsEnabled"
                   :parent-mode="mode"
+                  :activeTab="sidebarActiveTab"
+                  :focusEventIndex="focusedEventIndex"
+                  :selected-log-streams="searchObj.data.traceDetails.selectedLogStreams"
+                  :show-log-stream-selector="showLogStreamSelector"
+                  :show-evaluate-button="canManualEvaluate"
+                  :show-annotate-buttons="canAnnotate"
                   @view-logs="redirectToLogs"
+                  @evaluate="openSpanEvaluation"
+                  @add-to-dataset="openSpanDataset"
                   @close="closeSidebar"
                   @open-trace="openTraceLink"
                   @add-filter="addFilterFromSidebar"
                   @apply-filter-immediately="applyFilterImmediately"
+                  @update:activeTab="onSidebarTabChange($event as string)"
                 />
               </div>
             </div>
@@ -577,86 +726,108 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             <!-- Flame Graph View -->
             <div
               v-if="activeTab === 'flame-graph'"
-              style="display: flex; flex: 1; min-height: 0"
-              class="tw:w-full tw:bg-[var(--o2-card-bg)]!"
+              class="bg-card-glass-bg! flex min-h-0 w-full flex-1"
             >
               <FlameGraphView
                 :spans="flatSpans"
                 :selected-span-id="selectedSpanId"
                 :trace-duration="traceMetadata?.duration_ms || 0"
-                @span-selected="updateSelectedSpan"
+                :span-map="spanMap"
+                :stream-name="currentTraceStreamName"
+                :search-query="searchQuery"
+                :parent-mode="mode"
+                :service-streams-enabled="serviceStreamsEnabled"
+                :show-evaluate-button="canManualEvaluate"
+                :base-trace-position="baseTracePosition"
+                @view-logs="redirectToLogs"
+                @evaluate="openSpanEvaluation"
+                @close="closeSidebar"
+                @select-span="updateSelectedSpan"
+                @add-filter="addFilterFromSidebar"
+                @apply-filter-immediately="applyFilterImmediately"
+                @open-trace="openTraceLink"
               />
+            </div>
+
+            <!--
+              Thread View — chat-style projection of LLM turns.
+              Same `config.showLLMUI !== 'false'` gate as the tab
+              toggle above so a stale `activeTab="thread"` (e.g. from
+              a saved URL) can't render the body when the env flag
+              has explicitly disabled the feature.
+            -->
+            <div
+              v-if="config.showLLMUI !== 'false' && activeTab === 'thread'"
+              class="bg-card-glass-bg! flex min-h-0 w-full flex-1"
+            >
+              <div
+                class="thread-left-panel h-full min-w-[20rem] overflow-hidden"
+                :style="{
+                  width: isSidebarOpen && (selectedSpanId || showTraceDetails) ? '60%' : '100%',
+                }"
+              >
+                <ThreadView
+                  :spans="effectiveSpanList"
+                  :selected-span-id="selectedSpanId"
+                  @span-selected="updateSelectedSpan"
+                />
+              </div>
+              <div
+                v-if="isSidebarOpen && (selectedSpanId || showTraceDetails)"
+                class="border-s-solid border-s-card-glass-border h-full overflow-hidden border-s"
+                style="width: 40%; min-width: 18.75rem"
+              >
+                <TraceDetailsSidebar
+                  data-test="trace-details-thread-sidebar"
+                  :span="spanMap[selectedSpanId as string]"
+                  :baseTracePosition="baseTracePosition"
+                  :search-query="searchQuery"
+                  :stream-name="currentTraceStreamName"
+                  :service-streams-enabled="serviceStreamsEnabled"
+                  :parent-mode="mode"
+                  :activeTab="sidebarActiveTab"
+                  :focusEventIndex="focusedEventIndex"
+                  :selected-log-streams="searchObj.data.traceDetails.selectedLogStreams"
+                  :show-log-stream-selector="showLogStreamSelector"
+                  :show-evaluate-button="canManualEvaluate"
+                  :show-annotate-buttons="canAnnotate"
+                  @view-logs="redirectToLogs"
+                  @evaluate="openSpanEvaluation"
+                  @add-to-dataset="openSpanDataset"
+                  @close="closeSidebar"
+                  @open-trace="openTraceLink"
+                  @add-filter="addFilterFromSidebar"
+                  @apply-filter-immediately="applyFilterImmediately"
+                  @update:activeTab="onSidebarTabChange($event as string)"
+                />
+              </div>
             </div>
 
             <!-- Spans Table View Placeholder -->
             <div
               v-if="activeTab === 'spans'"
-              style="
-                display: flex;
-                flex: 1;
-                min-height: 0;
-                align-items: center;
-                justify-content: center;
-              "
+              class="flex min-h-0 flex-1 items-center justify-center"
             >
-              <div
-                style="
-                  text-align: center;
-                  color: var(--o2-text-secondary);
-                  padding: 40px;
-                "
-              >
-                <q-icon
-                  name="table_chart"
-                  size="48px"
-                  style="margin-bottom: 16px"
-                />
-                <div
-                  style="font-size: 16px; font-weight: 600; margin-bottom: 8px"
-                >
+              <div class="p-10 text-center" style="color: var(--color-text-secondary)">
+                <OIcon name="table-chart" class="mb-4" style="width: 3rem; height: 3rem" />
+                <div class="mb-2 font-semibold" style="font-size: var(--text-base)">
                   {{ t("traces.spansTableView") }}
                 </div>
-                <div style="font-size: 14px">{{ t("traces.comingSoon") }}</div>
+                <div style="font-size: var(--text-sm)">{{ t("traces.comingSoon") }}</div>
               </div>
             </div>
 
-            <!-- Map View Placeholder -->
-            <div
-              v-if="activeTab === 'map'"
-              style="
-                display: flex;
-                flex: 1;
-                min-height: 0;
-                align-items: center;
-                justify-content: center;
-              "
-            >
-              <div
-                style="text-align: center"
-                class="tw:w-full tw:h-full tw:p-[0.625rem]"
-              >
+            <!-- Map View with Pattern/Span Toggle -->
+            <div v-if="activeTab === 'map'" class="flex h-full min-h-0 w-full flex-1 flex-col">
+              <!-- Chart Container -->
+              <div class="min-h-0 flex-1 overflow-hidden p-2.5">
                 <ChartRenderer
+                  ref="chartRendererRef"
                   data-test="trace-details-service-map-chart"
-                  :data="traceServiceMap"
-                  class="trace-chart-height tw:h-full! tw:w-full!"
+                  :data="traceServiceMapChartOptions"
+                  class="h-full"
                 />
               </div>
-            </div>
-
-            <!-- Evaluations View - only for LLM traces with evaluation data -->
-            <div
-              v-if="
-                hasLLMSpans && evalPipelineExists && activeTab === 'evaluations'
-              "
-              style="display: flex; flex: 1; min-height: 0; overflow-y: auto"
-              class="tw:w-full tw:bg-[var(--o2-card-bg)]!"
-            >
-              <TraceEvaluationsView
-                ref="traceEvaluationsViewRef"
-                data-test="trace-details-evaluations"
-                :eval-data="evalData"
-                :is-loading="isLoadingEvalData"
-              />
             </div>
           </div>
         </div>
@@ -668,75 +839,55 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         (searchObj.data.traceDetails.isLoadingTraceDetails ||
           searchObj.data.traceDetails.isLoadingTraceMeta)
       "
-      class="flex column items-center justify-center"
-      :style="{ height: '100%' }"
+      class="flex h-full flex-col items-center justify-center"
     >
-      <q-spinner-hourglass
-        data-test="trace-details-loading-spinner"
-        color="primary"
-        size="3em"
-        :thickness="2"
-      />
-      <div data-test="trace-details-loading-text" class="q-pt-sm">
+      <OSpinner data-test="trace-details-loading-spinner" size="lg" />
+      <div data-test="trace-details-loading-text" class="pt-2">
         {{ t("traces.fetchingTrace") }}
       </div>
     </div>
 
     <!-- Filters Sidebar -->
-    <q-dialog
-      v-model="showFilterPopover"
-      position="right"
-      maximized
-      transition-show="slide-left"
-      transition-hide="slide-right"
+    <ODrawer
+      data-test="trace-details-filter-popover-drawer"
+      v-model:open="showFilterPopover"
+      :width="30"
+      :title="t('traces.traceFilters')"
+      :secondary-button-label="t('common.cancel')"
+      :primary-button-label="t('traces.showTraces')"
+      @click:secondary="showFilterPopover = false"
+      @click:primary="applyAndViewTraces"
     >
-      <q-card
-        class="tw:w-[30vw]! tw:h-full tw:flex tw:flex-col tw:bg-[var(--o2-surface)]"
-      >
-        <q-card-section
-          class="tw:flex tw:items-center tw:justify-between tw:border-b tw:border-[var(--o2-border)] tw:pb-2 tw:pt-3 tw:px-4"
-        >
-          <div
-            class="tw:text-lg tw:font-semibold tw:text-[var(--o2-text-primary)]"
-          >
-            {{ t("traces.traceFilters") }}
-          </div>
-          <q-btn icon="close" flat round dense v-close-popup />
-        </q-card-section>
+      <div class="border-border-default rounded-default flex-1 border">
+        <CodeQueryEditor v-model:query="localEditorValue" language="sql" class="h-full w-full" />
+      </div>
+    </ODrawer>
 
-        <q-card-section class="tw:flex-1 tw:p-4 tw:flex tw:flex-col">
-          <div
-            class="tw:flex-1 tw:border tw:border-[var(--o2-border)] tw:rounded"
-          >
-            <CodeQueryEditor
-              v-model:query="localEditorValue"
-              language="sql"
-              class="tw:h-full tw:w-full"
-            />
-          </div>
-        </q-card-section>
+    <AddToDatasetDrawer
+      v-if="datasetTarget"
+      :open="datasetOpen"
+      :org-id="effectiveOrgIdentifier"
+      :ref-type="datasetTarget.refType"
+      :ref-id="datasetTarget.refId"
+      :source-stream="effectiveStreamName"
+      :ref-trace-start-time="datasetTarget.refTraceStartTime"
+      :input-preview="datasetTarget.inputPreview"
+      @update:open="updateDatasetOpen"
+    />
 
-        <q-card-actions
-          align="right"
-          class="tw:border-t tw:border-[var(--o2-border)] tw:p-4 tw:bg-[var(--o2-card-bg)]"
-        >
-          <q-btn
-            flat
-            :label="t('common.cancel')"
-            color="primary"
-            v-close-popup
-            class="tw:normal-case"
-          />
-          <q-btn
-            unelevated
-            color="primary"
-            :label="t('traces.showTraces')"
-            @click="applyAndViewTraces"
-            class="tw:normal-case"
-          />
-        </q-card-actions>
-      </q-card>
-    </q-dialog>
+    <ManualEvaluationDialog
+      v-if="manualEvaluationTarget"
+      :open="manualEvaluationOpen"
+      :org-id="effectiveOrgIdentifier"
+      :stream="effectiveStreamName"
+      :target-scope="manualEvaluationTarget.targetScope"
+      :target-id="manualEvaluationTarget.targetId"
+      :start-time="manualEvaluationTarget.startTime"
+      :end-time="manualEvaluationTarget.endTime"
+      :trace-id="manualEvaluationTarget.traceId"
+      :session-id="manualEvaluationTarget.sessionId"
+      @update:open="updateManualEvaluationOpen"
+    />
   </div>
 </template>
 
@@ -744,75 +895,191 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 import {
   defineComponent,
   ref,
-  type Ref,
   type PropType,
   onMounted,
+  onUnmounted,
   watch,
   defineAsyncComponent,
   onBeforeMount,
   nextTick,
+  computed,
+  provide,
 } from "vue";
 import { cloneDeep } from "lodash-es";
 import ShareButton from "@/components/common/ShareButton.vue";
+import OPageHeader from "@/lib/core/PageHeader/OPageHeader.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
 import useTraces from "@/composables/useTraces";
-import { computed } from "vue";
 import TraceDetailsSidebar from "./TraceDetailsSidebar.vue";
 import TraceTree from "./TraceTree.vue";
 import TraceDAG from "./TraceDAG.vue";
 import TraceHeader from "./TraceHeader.vue";
 import { useStore } from "vuex";
+import useTheme from "@/composables/useTheme";
+import { createTracesContextProvider } from "@/composables/contextProviders/tracesContextProvider";
+import { contextRegistry } from "@/composables/contextProviders";
 import {
   formatTimeWithSuffix,
   getImageURL,
-  convertTimeFromNsToMs,
-  convertTimeFromNsToUs,
+  b64EncodeUnicode,
+  formatLargeNumber,
 } from "@/utils/zincutils";
 import TraceTimelineIcon from "@/components/icons/TraceTimelineIcon.vue";
 import ServiceMapIcon from "@/components/icons/ServiceMapIcon.vue";
-import {
-  convertTimelineData,
-  convertTraceServiceMapData,
-} from "@/utils/traces/convertTraceData";
+import { convertTimelineData, convertTraceServiceMapData } from "@/utils/traces/convertTraceData";
 import { getAllSpanColors } from "@/utils/traces/traceColors";
+import { resolveReplaySpan, resolveSessionId, resolveUrlTimeRange } from "./traceDetails.utils";
 import { buildFilterTerm, applyFilterTerm } from "@/utils/traces/filterUtils";
+import { buildPatternConsolidatedTree } from "@/utils/traces/patternDetection";
+import { useTracePatternTree } from "@/composables/useTracePatternTree";
+import type { TreeNode as PatternTreeNode } from "@/composables/useTreeVisualization";
+import type { EnrichedSpan } from "@/ts/interfaces/traces/span.types";
+import type { AcceptableValue } from "reka-ui";
 import {
-  SPAN_KIND_MAP,
-  SPAN_KIND_UNSPECIFIED,
-  SPAN_KIND_CLIENT,
-} from "@/utils/traces/constants";
-import { throttle } from "lodash-es";
-import { copyToClipboard, useQuasar } from "quasar";
-import { useI18n } from "vue-i18n";
-import {
-  outlinedInfo,
-  outlinedPlayCircle,
-} from "@quasar/extras/material-icons-outlined";
+  createTreeVisualizationEngine,
+  type TreeVisualizationData,
+  type TreeNode as EngineTreeNode,
+} from "@/utils/traces/treeVisualizationEngine";
+import { SPAN_KIND_MAP } from "@/utils/traces/constants";
+import { spanWindowUs } from "@/utils/rum/traceWindow";
+import useResizer from "@/composables/useResizer";
+import useSmartBack from "@/composables/useSmartBack";
+import { copyToClipboard } from "@/utils/clipboard";
+import { raw, useI18nTyped, type I18nText } from "@/types/i18n";
 import useStreams from "@/composables/useStreams";
-import { b64EncodeUnicode, formatLargeNumber } from "@/utils/zincutils";
+import useRumSpanBuilder from "@/composables/rum/useRumSpanBuilder";
 import { useRouter } from "vue-router";
 import searchService from "@/services/search";
+import config from "@/aws-exports";
+import { quoteSqlIdentifierIfNeeded } from "@/utils/query/sqlIdentifiers";
+import { escapeSingleQuotes } from "@/utils/queryUtils";
 import useNotifications from "@/composables/useNotifications";
+import { parseUsageDetails, parseCostDetails, hasTracePreview, isLLMTrace } from "@/utils/llmUtils";
+import { formatTimestamp, useTraceProcessing } from "@/composables/traces/useTraceProcessing";
+import OToggleGroup from "@/lib/core/ToggleGroup/OToggleGroup.vue";
+import OToggleGroupItem from "@/lib/core/ToggleGroup/OToggleGroupItem.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OSpinner from "@/lib/feedback/Spinner/OSpinner.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
+import OSelect from "@/lib/forms/Select/OSelect.vue";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { useShortcuts } from "@/lib/vue-shortcut-manager";
+import { isInputFocused } from "@/utils/keyboardShortcuts";
 import {
-  parseUsageDetails,
-  parseCostDetails,
-  isLLMTrace,
-} from "@/utils/llmUtils";
-import {
-  formatTimestamp,
-  useTraceProcessing,
-} from "@/composables/traces/useTraceProcessing";
-import AppTabs from "@/components/common/AppTabs.vue";
-import pipelineService from "@/services/pipelines";
+  TRACE_SERVICE_DETECTION_KEY,
+  useSpanServiceDetection,
+} from "@/utils/traces/useSpanServiceDetection";
+import type { ServiceDetectionConfig } from "@/ts/interfaces/traces/serviceDetection.types";
+import { useServiceCorrelation, type KeyFieldsConfig } from "@/composables/useServiceCorrelation";
+import { getOrSetServiceColor } from "@/utils/traces/serviceColorRegistry";
 
 // Import FlameGraphView
-const FlameGraphView = defineAsyncComponent(
-  () => import("@/components/traces/FlameGraphView.vue"),
+const FlameGraphView = defineAsyncComponent(() => import("@/components/traces/FlameGraphView.vue"));
+
+// Import ThreadView (LLM Thread tab)
+const ThreadView = defineAsyncComponent(() => import("./ThreadView.vue"));
+const ManualEvaluationDialog = defineAsyncComponent(
+  () => import("@/enterprise/components/onlineEvals/ManualEvaluationDialog.vue"),
+);
+const TraceAnnotateMenu = defineAsyncComponent(
+  () => import("@/enterprise/components/AIObservability/TraceAnnotateMenu.vue"),
+);
+const AddToDatasetDrawer = defineAsyncComponent(
+  () => import("@/enterprise/components/AIObservability/AddToDatasetDrawer.vue"),
 );
 
-// Import TraceEvaluationsView
-const TraceEvaluationsView = defineAsyncComponent(
-  () => import("./TraceEvaluationsView.vue"),
-);
+/** A trace or span being distilled into a dataset golden. */
+interface DatasetTarget {
+  refType: "trace" | "span";
+  refId: string;
+  refTraceId?: string;
+  /** MICROSECONDS — the lower bound the review and dataset APIs search from. */
+  refTraceStartTime: number;
+  /** Read-only view of the input the golden will carry. */
+  inputPreview?: string;
+}
+
+interface ManualEvaluationTarget {
+  targetScope: "span" | "trace";
+  targetId: string;
+  startTime: number;
+  endTime: number;
+  traceId?: string;
+  sessionId?: string;
+}
+
+/**
+ * Tab definitions for the trace detail views. The order here is the *default*
+ * order — Waterfall leads because it is the default landing view. Users can
+ * drag tabs to reorder them (same interaction as the Home page tab bar) and
+ * that order is persisted per-browser under LS_TRACE_TAB_ORDER_KEY.
+ *
+ * `iconSize` is per-tab because the chat glyph reads visually larger than the
+ * others at the same nominal size.
+ */
+const TRACE_TAB_DEFS = [
+  { value: "waterfall", labelKey: "traces.waterfall", icon: "align-left", iconSize: "sm" },
+  { value: "flame-graph", labelKey: "traces.flameGraph", icon: "flame", iconSize: "sm" },
+  { value: "map", labelKey: "traces.traceGraph", icon: "account-tree", iconSize: "sm" },
+  // `label` overrides `labelKey`: DAG is an acronym, and translating it produced
+  // "DÍA"/"JOUR"/"GIORNO" (day) in shipped locales.
+  { value: "dag", label: "DAG", icon: "git-branch", iconSize: "sm" },
+  { value: "thread", labelKey: "traces.thread", icon: "chat", iconSize: "xs" },
+] as const;
+
+type TraceTabValue = (typeof TRACE_TAB_DEFS)[number]["value"];
+
+/** The view a trace opens on when the user has no persisted preference. */
+const DEFAULT_TRACE_TAB: TraceTabValue = "waterfall";
+
+const LS_TRACE_TAB_ORDER_KEY = "o2_trace_tab_order";
+const LS_TRACE_ACTIVE_TAB_KEY = "o2_trace_active_tab";
+
+const isKnownTraceTab = (value: string): value is TraceTabValue =>
+  TRACE_TAB_DEFS.some((tab) => tab.value === value);
+
+/**
+ * Reads the saved tab order, dropping any values that are no longer known and
+ * appending tabs added since the order was saved, so a shipped new tab still
+ * shows up for users with a stored order.
+ */
+function loadTraceTabOrder(): TraceTabValue[] {
+  const defaults = TRACE_TAB_DEFS.map((tab) => tab.value);
+  try {
+    const saved = localStorage.getItem(LS_TRACE_TAB_ORDER_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed)) {
+        const ordered = parsed.filter(
+          (value: unknown): value is TraceTabValue =>
+            typeof value === "string" && isKnownTraceTab(value),
+        );
+        // De-dupe defensively — a corrupted entry shouldn't render a tab twice.
+        const unique = [...new Set(ordered)];
+        defaults.forEach((value) => {
+          if (!unique.includes(value)) unique.push(value);
+        });
+        return unique;
+      }
+    }
+  } catch {
+    // Corrupt/unavailable storage → fall through to the default order.
+  }
+  return [...defaults];
+}
+
+function loadTraceActiveTab(): TraceTabValue {
+  try {
+    const saved = localStorage.getItem(LS_TRACE_ACTIVE_TAB_KEY);
+    if (saved && isKnownTraceTab(saved)) return saved;
+  } catch {
+    // Ignore — fall through to the default tab.
+  }
+  return DEFAULT_TRACE_TAB;
+}
 
 export default defineComponent({
   name: "TraceDetails",
@@ -879,6 +1146,10 @@ export default defineComponent({
       type: Boolean,
       default: false,
     },
+    hideSessionReplayButton: {
+      type: Boolean,
+      default: false,
+    },
     // Correlation-specific props
     enableCorrelationLinks: {
       type: Boolean,
@@ -887,28 +1158,48 @@ export default defineComponent({
   },
   components: {
     ShareButton,
+    OPageHeader,
+    OTag,
     TraceDetailsSidebar,
     TraceTree,
     TraceDAG,
     TraceHeader,
     FlameGraphView,
-    TraceEvaluationsView,
-    AppTabs,
+    OToggleGroup,
+    OToggleGroupItem,
+    OButton,
+    ODrawer,
+    OIcon,
+    ThreadView,
     ChartRenderer: defineAsyncComponent(
       () => import("@/components/dashboards/panels/ChartRenderer.vue"),
     ),
-    CodeQueryEditor: defineAsyncComponent(
-      () => import("@/components/CodeQueryEditor.vue"),
-    ),
+    CodeQueryEditor: defineAsyncComponent(() => import("@/components/CodeQueryEditor.vue")),
+    OSpinner,
+    OTooltip,
+    OSearchInput,
+    OSelect,
+    ManualEvaluationDialog,
+    TraceAnnotateMenu,
+    AddToDatasetDrawer,
   },
 
   emits: ["searchQueryUpdated", "close", "spanSelected"],
   setup(props, { emit }) {
+    const serviceDetectionConfig = ref<ServiceDetectionConfig | null>(null);
+    provide(TRACE_SERVICE_DETECTION_KEY, serviceDetectionConfig);
+    const { resolveSpanIdentity } = useSpanServiceDetection(serviceDetectionConfig);
+
     const traceTree: any = ref([]);
     const spanMap: any = ref({});
-    const activeTab = ref("waterfall");
+    const activeTab = ref<string>(loadTraceActiveTab());
+    const tabOrder = ref<TraceTabValue[]>(loadTraceTabOrder());
+    const sidebarActiveTab = ref("attributes");
 
-    const { searchObj, getUrlQueryParams } = useTraces();
+    const { searchObj, getUrlQueryParams, navigateToCorrelatedLogs } = useTraces();
+
+    const { loadKeyFields } = useServiceCorrelation();
+
     const baseTracePosition: any = ref({});
     const collapseMapping: any = ref({});
     const traceRootSpan: any = ref(null);
@@ -916,8 +1207,81 @@ export default defineComponent({
     const splitterModel = ref(25);
     const timeRange: any = ref({ start: 0, end: 0 });
     const store = useStore();
+    const { t } = useI18nTyped();
+    const { getStreams } = useStreams(t);
+
+    // Chart renderer ref for tooltip integration
+    const chartRendererRef = ref<any>(null);
+
+    // Tooltip lifecycle management
+    let tooltipCleanup: (() => void) | null = null;
+    let pendingTooltipSetup: ReturnType<typeof setTimeout> | null = null;
+
+    // AI copilot context provider for trace details page
+    const setupContextProvider = () => {
+      const provider = createTracesContextProvider(searchObj, store);
+      contextRegistry.register("traces", provider);
+      contextRegistry.setActive("traces");
+    };
+
+    const cleanupContextProvider = () => {
+      contextRegistry.unregister("traces");
+      contextRegistry.setActive("");
+    };
+
     const traceServiceMap: any = ref({});
-    const { getStreams, getStream } = useStreams();
+
+    // Pattern View - new functionality
+    const consolidatedPatterns = ref(new Map());
+    const { isDark: isDarkMode } = useTheme();
+
+    // Set up pattern tree composable and visualization engine
+    const { generateEChartsOptions } = createTreeVisualizationEngine();
+    const {
+      treeData: patternTreeData,
+      getNodeLabel: getPatternNodeLabel,
+      getNodeTooltip: getPatternNodeTooltip,
+      getNodeErrorRate: getPatternNodeErrorRate,
+    } = useTracePatternTree(consolidatedPatterns, isDarkMode);
+
+    // Computed chart options that switches between pattern and span views
+    const traceServiceMapChartOptions = computed(() => {
+      // Pattern view - use new pattern-based visualization
+      // Engine TreeNode makes errorRate/children optional while the pattern
+      // callbacks (useTreeVisualization) require errorRate; adapt each call to
+      // a compatible node (errorRate defaults to 0 — pattern nodes read only
+      // name/value/metadata, never errorRate/children).
+      const toPatternNode = (node: EngineTreeNode): PatternTreeNode => ({
+        id: node.id,
+        name: node.name,
+        label: raw(node.label),
+        value: node.value,
+        errorRate: node.errorRate ?? 0,
+        metadata: node.metadata,
+      });
+      const chartOptions = generateEChartsOptions(
+        {
+          treeData: patternTreeData.value,
+          getNodeLabel: (node: EngineTreeNode) => getPatternNodeLabel(toPatternNode(node)),
+          getNodeTooltip: (node: EngineTreeNode) => getPatternNodeTooltip(toPatternNode(node)),
+          getNodeErrorRate: (node: EngineTreeNode) => getPatternNodeErrorRate(toPatternNode(node)),
+          getNodeServiceColor: (node: EngineTreeNode) => searchObj.meta.serviceColors[node.name],
+        },
+        {
+          layoutType: "horizontal",
+          isDarkMode: isDarkMode.value,
+          nodeSize: "fixed",
+        },
+      );
+
+      // Wrap in the format expected by ChartRenderer
+      return {
+        options: chartOptions,
+        notMerge: true,
+        lazyUpdate: true,
+      };
+    });
+
     const spanDimensions = {
       height: 30,
       barHeight: 8,
@@ -930,10 +1294,15 @@ export default defineComponent({
       hConnectorWidth: 20,
       dotConnectorWidth: 6,
       dotConnectorHeight: 6,
-      colors: ["#b7885e", "#1ab8be", "#ffcb99", "#f89570", "#839ae2"],
     };
     const parentContainer = ref<HTMLElement | null>(null);
     const traceScrollContainer = ref<HTMLElement | null>(null);
+    // TraceTree's `scrollContainer` prop is under-declared (default: null, no
+    // type → vue-tsc infers null | undefined). Forward the real element through
+    // this boundary accessor; runtime value is unchanged.
+    const scrollContainerForTree = computed(
+      () => traceScrollContainer.value as unknown as null | undefined,
+    );
     let parentHeight = ref(0);
     let currentHeight = 0;
     const updateHeight = async () => {
@@ -949,15 +1318,11 @@ export default defineComponent({
 
     const { showErrorNotification } = useNotifications();
 
-    const logStreams = ref([]);
+    const logStreams = ref<string[]>([]);
 
-    const filteredStreamOptions = ref([]);
+    const filteredStreamOptions = ref<string[]>([]);
 
     const streamSearchValue = ref<string>("");
-
-    const { t } = useI18n();
-
-    const $q = useQuasar();
 
     const router = useRouter();
 
@@ -965,6 +1330,7 @@ export default defineComponent({
 
     // ── Filter-from-trace-details state ──────────────────────────────────────
     const areFiltersAdded = ref(false);
+    const isStandaloneMode = computed(() => props.mode === "standalone");
     const showFilterPopover = ref(false);
     const filterDialogReady = ref(false);
     const localEditorValue = ref("");
@@ -982,10 +1348,9 @@ export default defineComponent({
       localEditorValue.value = applyFilterTerm(term, localEditorValue.value);
       areFiltersAdded.value = true;
 
-      $q.notify({
-        type: "positive",
-        message: `Filter added: ${field} ${operator} '${value}'`,
-        timeout: 2000,
+      toast({
+        variant: "success",
+        message: t("traces.traceDetails.filterAdded", { field, operator, value }),
       });
     };
 
@@ -1015,8 +1380,8 @@ export default defineComponent({
     // ─────────────────────────────────────────────────────────────────────────
 
     const traceVisuals = [
-      { label: "Timeline", value: "timeline", icon: TraceTimelineIcon },
-      { label: "Service Map", value: "service_map", icon: ServiceMapIcon },
+      { label: t("traces.traceDetails.timeline"), value: "timeline", icon: TraceTimelineIcon },
+      { label: t("traces.traceDetails.serviceMap"), value: "service_map", icon: ServiceMapIcon },
     ];
 
     const activeVisual = ref("timeline");
@@ -1027,17 +1392,23 @@ export default defineComponent({
 
     const ChartData: any = ref({});
 
-    const leftWidth: Ref<number> = ref(460);
-    const initialX: Ref<number> = ref(0);
-    const initialWidth: Ref<number> = ref(0);
-
-    const throttledResizing = ref<any>(null);
+    const { value: leftWidth, onMouseDown: startResize } = useResizer({
+      direction: "horizontal",
+      initialValue: 460,
+      unit: "px",
+      throttleMs: 50,
+    });
 
     // DAG panel resize state
-    const dagLeftWidth: Ref<number> = ref(50); // percentage
-    const dagInitialX: Ref<number> = ref(0);
-    const dagInitialWidth: Ref<number> = ref(0);
-    const throttledDagResizing = ref<any>(null);
+    const { value: dagLeftWidth, onMouseDown: startDagResize } = useResizer({
+      direction: "horizontal",
+      initialValue: 50,
+      minValue: 20,
+      maxValue: 80,
+      unit: "%",
+      containerRef: parentContainer,
+      throttleMs: 16,
+    });
 
     // Calculate sidebar width based on leftWidth
     // Sidebar should take ~84% of the remaining space after left panel
@@ -1062,6 +1433,16 @@ export default defineComponent({
       searchObj.data.traceDetails.selectedLogStreams.join(", "),
     );
 
+    // Check if View Logs button should be disabled
+    const isViewLogsDisabled = computed(() => {
+      // In non-enterprise mode with visible log stream selector, disable when no streams are selected
+      return (
+        config.isEnterprise !== "true" &&
+        props.showLogStreamSelector &&
+        searchObj.data.traceDetails.selectedLogStreams.length === 0
+      );
+    });
+
     // Current trace stream name for correlation
     const currentTraceStreamName = computed(() => {
       return (
@@ -1076,16 +1457,9 @@ export default defineComponent({
       return store.state.zoConfig.service_streams_enabled !== false;
     });
 
-    // Check if any RUM span has a session_id
-    const hasRumSessionId = computed(() => {
-      return spanList.value.some((span: any) => span.rum_session_id);
-    });
-
-    // Get the first RUM event with session_id for navigation
-    const firstRumSessionData = computed(() => {
-      const rumSpan = spanList.value.find((span: any) => span.rum_session_id);
-      return rumSpan || null;
-    });
+    // Gate and target share one span so the button never links to a session with nothing to play.
+    const replaySpan = computed(() => resolveReplaySpan(spanList.value));
+    const hasReplaySession = computed(() => replaySpan.value !== null);
 
     // Computed properties for mode-based priority logic
     const effectiveTraceId = computed(() => {
@@ -1116,10 +1490,10 @@ export default defineComponent({
         };
       }
       // Standalone mode - get from URL
-      return {
-        from: Number(router.currentRoute.value.query.from),
-        to: Number(router.currentRoute.value.query.to),
-      };
+      return resolveUrlTimeRange(
+        router.currentRoute.value.query.from,
+        router.currentRoute.value.query.to,
+      );
     });
 
     const effectiveOrgIdentifier = computed(() => {
@@ -1151,7 +1525,7 @@ export default defineComponent({
     // Use trace processing composable for FlameGraph
     // Pass traceTree (nested) instead of flat span list
     const treeForFlameGraph = computed(() => traceTree.value || []);
-    const flatSpans = ref([]);
+    const flatSpans = ref<EnrichedSpan[]>([]);
 
     // Calculate trace metadata for FlameGraph
     const traceMetadata = computed(() => {
@@ -1185,12 +1559,11 @@ export default defineComponent({
       return spans.some((span: any) => isLLMTrace(span));
     });
 
-    // Evaluation pipeline state
-    const evalPipelineExists = ref(false);
-    const evalPipelineStreamName = ref<string | null>(null);
-    const evalData = ref<any[]>([]);
-    const isLoadingEvalData = ref(false);
-    const traceEvaluationsViewRef = ref<any>(null);
+    const hasPreviewableSpans = computed(() => {
+      const spans = effectiveSpanList.value;
+      if (!spans || spans.length === 0) return false;
+      return spans.some((span: Record<string, unknown>) => hasTracePreview(span));
+    });
 
     // Computed properties for new header
     const errorSpansCount = computed(() => {
@@ -1212,28 +1585,253 @@ export default defineComponent({
       return Math.min(...spans.map((span: any) => span.start_time));
     });
 
-    // Tabs configuration matching TraceDetailsV2
-    const traceTabs = computed(() => {
-      const tabs = [
-        { label: "Waterfall", value: "waterfall" },
-        { label: "Flame Graph", value: "flame-graph" },
-        // { label: "Spans", value: "spans" },
-        { label: "Trace Graph", value: "map" },
-      ];
-      // Conditionally add DAG tab for LLM traces
-      if (hasLLMSpans.value) {
-        tabs.push({ label: "DAG", value: "dag" });
+    const traceEvaluationRange = computed(() => {
+      const spans = effectiveSpanList.value ?? [];
+      const starts = spans
+        .map((span: any) => Number(span.start_time))
+        .filter((value: number) => Number.isFinite(value) && value >= 0);
+      const ends = spans
+        .map((span: any) => Number(span.end_time))
+        .filter((value: number) => Number.isFinite(value) && value >= 0);
+      if (starts.length > 0 && ends.length > 0) {
+        // Raw nanosecond timestamps exceed JavaScript's exact integer range.
+        // A one-microsecond guard on each side prevents rounding from excluding
+        // the boundary spans while keeping the worker window trace-specific.
+        return {
+          startTime: Math.max(0, Math.floor(Math.min(...starts) / 1_000) - 1),
+          endTime: Math.ceil(Math.max(...ends) / 1_000) + 1,
+        };
       }
-      // Conditionally add Evaluations tab for LLM traces with evaluation data
-      if (
-        hasLLMSpans.value &&
-        evalPipelineExists.value &&
-        evalData.value.length > 0
-      ) {
-        tabs.push({ label: "Evaluations", value: "evaluations" });
-      }
-      return tabs;
+      return {
+        startTime: effectiveTimeRange.value.from,
+        endTime: effectiveTimeRange.value.to,
+      };
     });
+
+    const canManualEvaluate = computed(() => {
+      const range = traceEvaluationRange.value;
+      return (
+        props.mode === "standalone" &&
+        hasPreviewableSpans.value &&
+        (config.isEnterprise === "true" || config.isCloud === "true") &&
+        Boolean(store.state.zoConfig?.online_evals_enabled) &&
+        Boolean(effectiveOrgIdentifier.value) &&
+        Boolean(effectiveStreamName.value) &&
+        Boolean(effectiveTraceId.value) &&
+        Number.isFinite(range.startTime) &&
+        range.startTime > 0 &&
+        Number.isFinite(range.endTime) &&
+        range.endTime > range.startTime
+      );
+    });
+
+    const manualEvaluationOpen = ref(false);
+    const manualEvaluationTarget = ref<ManualEvaluationTarget | null>(null);
+
+    const openTraceEvaluation = () => {
+      const range = traceEvaluationRange.value;
+      manualEvaluationTarget.value = {
+        targetScope: "trace",
+        targetId: effectiveTraceId.value,
+        traceId: effectiveTraceId.value,
+        sessionId: resolveSessionId(effectiveSpanList.value) || undefined,
+        ...range,
+      };
+      manualEvaluationOpen.value = true;
+    };
+
+    const openSpanEvaluation = (span: Record<string, unknown>) => {
+      const startNs = Number(span.start_time);
+      const endNs = Number(span.end_time);
+      const range =
+        Number.isFinite(startNs) && Number.isFinite(endNs) && endNs > startNs
+          ? {
+              startTime: Math.max(0, Math.floor(startNs / 1_000) - 1),
+              endTime: Math.ceil(endNs / 1_000) + 1,
+            }
+          : traceEvaluationRange.value;
+      manualEvaluationTarget.value = {
+        targetScope: "span",
+        targetId: String(span.span_id ?? ""),
+        traceId: String(span.trace_id ?? effectiveTraceId.value),
+        sessionId:
+          String(
+            span.session_id ??
+              span.gen_ai_conversation_id ??
+              resolveSessionId(effectiveSpanList.value) ??
+              "",
+          ) || undefined,
+        ...range,
+      };
+      manualEvaluationOpen.value = true;
+    };
+
+    const updateManualEvaluationOpen = (open: boolean) => {
+      manualEvaluationOpen.value = open;
+      if (!open) manualEvaluationTarget.value = null;
+    };
+
+    // ── Annotate / Dataset (Phase 2.5 Annotate) ──
+    // Same enterprise gate as manual evaluation minus the online-eval flag:
+    // queuing a trace for human review does not require the eval engine.
+    const canAnnotate = computed(() => {
+      const range = traceEvaluationRange.value;
+      return (
+        props.mode === "standalone" &&
+        (config.isEnterprise === "true" || config.isCloud === "true") &&
+        Boolean(effectiveOrgIdentifier.value) &&
+        Boolean(effectiveStreamName.value) &&
+        Boolean(effectiveTraceId.value) &&
+        Number.isFinite(range.startTime) &&
+        range.startTime > 0
+      );
+    });
+
+    const datasetOpen = ref(false);
+    const datasetTarget = ref<DatasetTarget | null>(null);
+
+    /** Span start in nanoseconds; spans without one sort last. */
+    const startNsOf = (span: Record<string, unknown>): number => {
+      const ns = Number(span?.start_time);
+      return Number.isFinite(ns) ? ns : Number.POSITIVE_INFINITY;
+    };
+
+    /** The trace's input is the EARLIEST previewable LLM call, matching how the
+     *  server hydrates it (first by timestamp) — array order would preview a
+     *  different call's input than the one the golden ends up carrying. */
+    const earliestPreviewableSpan = (): Record<string, unknown> | undefined => {
+      const candidates = (effectiveSpanList.value ?? []).filter((span: Record<string, unknown>) =>
+        hasTracePreview(span),
+      );
+      if (!candidates.length) return undefined;
+      return candidates.reduce(
+        (earliest: Record<string, unknown>, span: Record<string, unknown>) =>
+          startNsOf(span) < startNsOf(earliest) ? span : earliest,
+      );
+    };
+
+    /** The LLM input as text, for the read-only preview in the dataset drawer. */
+    const inputPreviewOf = (span: Record<string, unknown> | undefined): string | undefined => {
+      const value = span?.gen_ai_input_messages;
+      if (value == null) return undefined;
+      return typeof value === "string" ? value : JSON.stringify(value);
+    };
+
+    const traceTarget = (): DatasetTarget => ({
+      refType: "trace",
+      refId: effectiveTraceId.value,
+      refTraceStartTime: traceEvaluationRange.value.startTime,
+      inputPreview: inputPreviewOf(earliestPreviewableSpan()),
+    });
+
+    /** A span's own start time in µs (start_time is ns), widened by 1µs so an
+     *  inclusive lower-bound search can't exclude the span itself. Falls back to
+     *  the trace window when the span carries no usable start. */
+    const spanTarget = (span: Record<string, unknown>): DatasetTarget => {
+      const startNs = Number(span.start_time);
+      return {
+        refType: "span",
+        refId: String(span.span_id ?? ""),
+        refTraceId: String(span.trace_id ?? effectiveTraceId.value),
+        refTraceStartTime: Number.isFinite(startNs)
+          ? Math.max(0, Math.floor(startNs / 1_000) - 1)
+          : traceEvaluationRange.value.startTime,
+        inputPreview: inputPreviewOf(span),
+      };
+    };
+
+    const openTraceDataset = () => {
+      datasetTarget.value = traceTarget();
+      datasetOpen.value = true;
+    };
+
+    const openSpanDataset = (span: Record<string, unknown>) => {
+      datasetTarget.value = spanTarget(span);
+      datasetOpen.value = true;
+    };
+
+    const updateDatasetOpen = (open: boolean) => {
+      datasetOpen.value = open;
+      if (!open) datasetTarget.value = null;
+    };
+
+    /** Which tabs this trace can show, independent of ordering. */
+    const isTraceTabVisible = (value: TraceTabValue) => {
+      switch (value) {
+        // DAG and Thread only make sense for traces containing LLM spans.
+        case "dag":
+          return hasLLMSpans.value;
+        // Thread view — chat-style projection of LLM turns and tool calls —
+        // is additionally gated on the VITE_SHOW_LLM_UI env flag.
+        case "thread":
+          return config.showLLMUI !== "false" && hasLLMSpans.value;
+        default:
+          return true;
+      }
+    };
+
+    /**
+     * The tab bar, in the user's order, filtered to what this trace supports.
+     * `tabOrder` keeps hidden tabs in place so a user's arrangement survives
+     * moving between traces that do and don't have LLM spans.
+     */
+    const traceTabs = computed(() =>
+      tabOrder.value
+        .filter(isTraceTabVisible)
+        .map((value) => TRACE_TAB_DEFS.find((tab) => tab.value === value)!),
+    );
+
+    /**
+     * Applies a drag-reorder reported by OToggleGroup and persists the result.
+     * Indices are resolved against the full order (including hidden tabs) so
+     * the moved tab lands adjacent to its drop target either way.
+     */
+    const onTabReorder = ({
+      from,
+      to,
+      before = true,
+    }: {
+      from: string;
+      to: string;
+      before?: boolean;
+    }) => {
+      if (from === to) return;
+      const order = [...tabOrder.value];
+      const fromIdx = order.indexOf(from as TraceTabValue);
+      if (fromIdx === -1) return;
+
+      const [moved] = order.splice(fromIdx, 1);
+      // Recompute the target index after removal, then insert on the chosen side.
+      let toIdx = order.indexOf(to as TraceTabValue);
+      if (toIdx === -1) return;
+      if (!before) toIdx += 1;
+      order.splice(toIdx, 0, moved);
+
+      tabOrder.value = order;
+      try {
+        localStorage.setItem(LS_TRACE_TAB_ORDER_KEY, JSON.stringify(order));
+      } catch {
+        // Storage unavailable (private mode / quota) — order still applies for
+        // this session, it just won't survive a reload.
+      }
+    };
+
+    /**
+     * A persisted tab can be invalid for the trace being opened — e.g. the user
+     * last viewed "thread" on an LLM trace and then opens a plain HTTP trace.
+     * Fall back to the default view rather than rendering an empty body.
+     */
+    watch(
+      traceTabs,
+      (tabs) => {
+        if (!tabs.length) return;
+        if (tabs.some((tab) => tab.value === activeTab.value)) return;
+        activeTab.value = tabs.some((tab) => tab.value === DEFAULT_TRACE_TAB)
+          ? DEFAULT_TRACE_TAB
+          : tabs[0].value;
+      },
+      { immediate: true },
+    );
 
     const showTraceDetails = ref(false);
     const currentIndex = ref(0);
@@ -1291,7 +1889,8 @@ export default defineComponent({
       () => props.spanListProp,
       (newSpanList) => {
         if (props.mode === "embedded" && newSpanList.length > 0) {
-          searchObj.data.traceDetails.spanList = newSpanList;
+          // spanList is never[] in useTraces state; widen container to accept spans.
+          (searchObj.data.traceDetails as { spanList: unknown[] }).spanList = newSpanList;
           updateServiceColors();
           buildTracesTree();
         }
@@ -1310,46 +1909,58 @@ export default defineComponent({
       },
     );
 
-    // Watch for stream and LLM spans to fetch evaluation pipeline
-    watch(
-      () => [currentTraceStreamName.value, hasLLMSpans.value],
-      async ([streamName, hasLlm]) => {
-        if (hasLlm && streamName) {
-          await fetchEvalPipeline();
-        } else {
-          evalPipelineExists.value = false;
-          evalPipelineStreamName.value = null;
-        }
-      },
-      { immediate: true },
-    );
+    const updateActiveTab = (value: boolean | AcceptableValue | AcceptableValue[]) => {
+      const tab = String(value);
+      activeTab.value = tab;
+      // Remember the last view so reopening a trace lands where the user left
+      // off, rather than resetting to the default every time.
+      try {
+        localStorage.setItem(LS_TRACE_ACTIVE_TAB_KEY, tab);
+      } catch {
+        // Storage unavailable — selection still applies for this session.
+      }
+      if (tab === "map") {
+        setupTooltips();
+      }
+    };
 
-    // Watch for trace ID changes to fetch evaluation data
-    watch(
-      () => [
-        effectiveTraceId.value,
-        evalPipelineExists.value,
-        evalPipelineStreamName.value,
-      ],
-      async ([traceId, pipelineExists, streamName]) => {
-        if (pipelineExists && streamName && traceId) {
-          await fetchEvalData();
-        } else {
-          evalData.value = [];
-        }
-      },
-      { immediate: true },
-    );
+    const setupTooltips = async () => {
+      // Cleanup existing tooltips
+      if (tooltipCleanup) {
+        tooltipCleanup();
+        tooltipCleanup = null;
+      }
+      if (pendingTooltipSetup) {
+        clearTimeout(pendingTooltipSetup);
+        pendingTooltipSetup = null;
+      }
 
-    const backgroundStyle = computed(() => {
-      return {
-        background: store.state.theme === "dark" ? "#181a1b" : "#ffffff",
-      };
-    });
+      await nextTick();
+      // 300ms delay matches Service Graph tooltip setup timing
+      pendingTooltipSetup = setTimeout(() => {
+        pendingTooltipSetup = null;
+        const chart = chartRendererRef.value?.chart;
+        if (chart) {
+          const { setupTraceNodeTooltips } = createTreeVisualizationEngine();
+          // Tooltip setup never calls getNodeLabel, so it is omitted here.
+          tooltipCleanup = setupTraceNodeTooltips(
+            chart,
+            {
+              treeData: patternTreeData.value,
+              getNodeTooltip: getPatternNodeTooltip,
+              getNodeErrorRate: getPatternNodeErrorRate,
+            } as TreeVisualizationData,
+            isDarkMode.value,
+          );
+        }
+      }, 300);
+    };
 
     const resetTraceDetails = () => {
       searchObj.data.traceDetails.showSpanDetails = false;
       searchObj.data.traceDetails.selectedSpanId = "";
+      // Selection is being cleared — cancel any live scroll targeting it.
+      traceTreeRef.value?.cancelScroll?.();
       searchObj.data.traceDetails.selectedTrace = {
         trace_id: "",
         trace_start_time: 0,
@@ -1378,31 +1989,21 @@ export default defineComponent({
       return getStreams("logs", false)
         .then((res: any) => {
           logStreams.value = res.list.map((option: any) => option.name);
-          filteredStreamOptions.value = JSON.parse(
-            JSON.stringify(logStreams.value),
-          );
+          filteredStreamOptions.value = JSON.parse(JSON.stringify(logStreams.value));
 
           if (!searchObj.data.traceDetails.selectedLogStreams.length) {
             // Check if log_stream query parameter exists (from correlation navigation)
-            const logStreamQueryValue =
-              router.currentRoute.value.query.log_stream;
+            const logStreamQueryValue = router.currentRoute.value.query.log_stream;
             const logStreamFromQuery = Array.isArray(logStreamQueryValue)
               ? logStreamQueryValue[0]
               : logStreamQueryValue;
 
-            if (
-              logStreamFromQuery &&
-              logStreams.value.includes(logStreamFromQuery)
-            ) {
+            if (logStreamFromQuery && logStreams.value.includes(logStreamFromQuery)) {
               // Auto-select the correlated log stream from query parameter
-              searchObj.data.traceDetails.selectedLogStreams.push(
-                logStreamFromQuery,
-              );
-            } else if (logStreams.value.length > 0) {
+              searchObj.data.traceDetails.selectedLogStreams.push(logStreamFromQuery);
+            } else if (logStreams.value.length === 1) {
               // Default: select the first available log stream
-              searchObj.data.traceDetails.selectedLogStreams.push(
-                logStreams.value[0],
-              );
+              searchObj.data.traceDetails.selectedLogStreams.push(logStreams.value[0]);
             }
           }
         })
@@ -1414,24 +2015,24 @@ export default defineComponent({
       showTraceDetails.value = false;
       searchObj.data.traceDetails.showSpanDetails = false;
       searchObj.data.traceDetails.selectedSpanId = "";
+      // Cancel any scroll left over from a previous trace before (re)loading.
+      traceTreeRef.value?.cancelScroll?.();
 
       // If embedded mode with span list provided, skip fetching
       if (props.mode === "embedded" && props.spanListProp.length > 0) {
         // Use provided span list directly
-        searchObj.data.traceDetails.spanList = props.spanListProp;
+        // spanList is never[] in useTraces state; widen container to accept spans.
+        (searchObj.data.traceDetails as { spanList: unknown[] }).spanList = props.spanListProp;
 
         // Set up minimal trace metadata from span list
         if (props.spanListProp.length > 0) {
           const firstSpan = props.spanListProp[0];
           const serviceNames = extractServiceNames(props.spanListProp);
+          const traceWindow = spanWindowUs(props.spanListProp);
           (searchObj.data.traceDetails.selectedTrace as any) = {
             trace_id: props.traceIdProp || firstSpan.trace_id,
-            trace_start_time: Math.min(
-              ...props.spanListProp.map((s) => s.start_time / 1000),
-            ),
-            trace_end_time: Math.max(
-              ...props.spanListProp.map((s) => s.end_time / 1000),
-            ),
+            trace_start_time: traceWindow?.start ?? 0,
+            trace_end_time: traceWindow?.end ?? 0,
             service_name: serviceNames,
             services: {},
           };
@@ -1445,14 +2046,23 @@ export default defineComponent({
         return;
       }
 
-      // Standalone mode - fetch from API
-      if (props.mode === "standalone") {
-        await loadLogStreams();
-        await getTraceMeta();
-      }
+      // Fetch from API — standalone mode, or embedded with no pre-fetched spans
+      await loadLogStreams();
+      const timeRange = effectiveTimeRange.value;
+      await getTraceDetails({
+        stream: effectiveStreamName.value,
+        trace_id: effectiveTraceId.value,
+        from: timeRange.from,
+        to: timeRange.to,
+      });
     };
 
-    onMounted(() => {
+    onMounted(async () => {
+      setupContextProvider();
+
+      const keyFields: KeyFieldsConfig = await loadKeyFields();
+      serviceDetectionConfig.value = keyFields["traces"]?.service_detection ?? null;
+
       const params = router.currentRoute.value.query;
       if (params.span_id) {
         updateSelectedSpan(params.span_id as string);
@@ -1463,9 +2073,19 @@ export default defineComponent({
       // window.addEventListener("resize", updateHeight);
     });
 
-    // onBeforeUnmount(() => {
-    //   window.removeEventListener("resize", updateHeight);
-    // });
+    onUnmounted(() => {
+      cleanupContextProvider();
+
+      // Tooltip cleanup
+      if (pendingTooltipSetup) {
+        clearTimeout(pendingTooltipSetup);
+        pendingTooltipSetup = null;
+      }
+      if (tooltipCleanup) {
+        tooltipCleanup();
+        tooltipCleanup = null;
+      }
+    });
 
     // watch(
     //   () => spanList.value.length,
@@ -1481,82 +2101,81 @@ export default defineComponent({
       return searchObj.data.traceDetails.showSpanDetails;
     });
 
-    const selectedSpanId = computed(() => {
-      return searchObj.data.traceDetails.selectedSpanId;
+    const selectedSpanId = computed<string | undefined>(() => {
+      // Child props declare String (string | undefined); the store keeps null —
+      // normalize null → undefined (truthy/equality checks are unchanged).
+      return searchObj.data.traceDetails.selectedSpanId ?? undefined;
     });
 
-    const getTraceMeta = () => {
-      try {
-        searchObj.data.traceDetails.isLoadingTraceMeta = true;
+    const hoveredSpanId = ref("");
+    const effectiveSpanId = computed(() => hoveredSpanId.value || selectedSpanId.value);
 
-        let filter = (router.currentRoute.value.query.filter as string) || "";
+    /**
+     * A sidebar tab requested explicitly by an interaction, as opposed to the
+     * default the watcher below picks. Keyed to the span it was requested for
+     * and drained on every watcher fire, so a request that is never consumed
+     * (e.g. re-clicking a marker on the already-selected span, which does not
+     * change `selectedSpanId` and so never reaches this watcher) cannot
+     * outlive the selection it belonged to and hijack a later, unrelated one.
+     *
+     * The watcher runs on the flush after `selectedSpanId` changes, i.e. after
+     * the handler that changed it has returned — so a handler cannot simply
+     * assign `sidebarActiveTab` and expect it to survive. Recording the intent
+     * here removes the ordering question entirely: whichever runs first, the
+     * explicit tab wins and the default is skipped.
+     */
+    const pendingSidebarTab = ref<{ spanId: string; tab: string } | null>(null);
 
-        if (filter?.length)
-          filter += ` and trace_id='${effectiveTraceId.value}'`;
-        else filter += `trace_id='${effectiveTraceId.value}'`;
+    /**
+     * The span whose Events tab was opened by a marker click.
+     *
+     * A marker-driven Events view belongs to one span — navigating to another
+     * span should fall back to that span's default tab. A manually chosen tab
+     * is different: like every other tab, it persists across span navigation.
+     * Comparing `sidebarActiveTab` to "events" cannot tell the two apart,
+     * because the Events tab is always present and always selectable by hand.
+     */
+    const markerEventsSpanId = ref<string | null>(null);
 
-        const timeRange = effectiveTimeRange.value;
+    // Set the default sidebar tab on the first span selection,
+    // and re-evaluate when the current tab no longer exists for the new span
+    // (e.g. moving from LLM span with "preview" to a non-LLM span).
+    watch(selectedSpanId, (newSpanId, oldSpanId) => {
+      // Drain first, always: a request that was never consumed must not
+      // survive to hijack the next selection.
+      const pending = pendingSidebarTab.value;
+      pendingSidebarTab.value = null;
 
-        searchService
-          .get_traces({
-            org_identifier: effectiveOrgIdentifier.value,
-            start_time: timeRange.from - 10000,
-            end_time: timeRange.to + 10000,
-            filter: filter || "",
-            size: 1,
-            from: 0,
-            stream_name: effectiveStreamName.value,
-          })
-          .then(async (res: any) => {
-            const trace = getTracesMetaData(res.data.hits)[0];
-            if (!trace) {
-              showTraceDetailsError();
-              return;
-            }
-            searchObj.data.traceDetails.selectedTrace = trace;
+      // A marker-driven Events view is scoped to its own span. Once the
+      // selection moves elsewhere it no longer applies, so retire it and let
+      // the default apply — but only for a view a marker opened, never for a
+      // tab the user chose by hand.
+      const leavingMarkerEvents =
+        markerEventsSpanId.value !== null && markerEventsSpanId.value !== newSpanId;
+      if (leavingMarkerEvents) markerEventsSpanId.value = null;
 
-            let startTime = Number(router.currentRoute.value.query.from);
-            let endTime = Number(router.currentRoute.value.query.to);
-            if (
-              res.data.hits.length === 1 &&
-              res.data.hits[0].start_time &&
-              res.data.hits[0].end_time
-            ) {
-              startTime = Math.floor(res.data.hits[0].start_time / 1000);
-              endTime = Math.ceil(res.data.hits[0].end_time / 1000);
+      if (!newSpanId || !spanMap.value[newSpanId]) return;
 
-              // If the trace is not in the current time range, update the time range
-              if (
-                !(
-                  startTime >= Number(router.currentRoute.value.query.from) &&
-                  endTime <= Number(router.currentRoute.value.query.to)
-                )
-              ) {
-                updateUrlQueryParams({
-                  from: startTime,
-                  to: endTime,
-                });
-              }
-            }
-
-            getTraceDetails({
-              stream: effectiveStreamName.value,
-              trace_id: trace.trace_id,
-              from: startTime - 10000,
-              to: endTime + 10000,
-            });
-          })
-          .catch(() => {
-            showTraceDetailsError();
-          })
-          .finally(() => {
-            searchObj.data.traceDetails.isLoadingTraceMeta = false;
-          });
-      } catch (error) {
-        console.error("Error fetching trace meta:", error);
-        searchObj.data.traceDetails.isLoadingTraceMeta = false;
-        showTraceDetailsError();
+      if (pending && pending.spanId === newSpanId) {
+        sidebarActiveTab.value = pending.tab;
+        return;
       }
+
+      const canPreview = hasTracePreview(spanMap.value[newSpanId]);
+      if (
+        !oldSpanId ||
+        leavingMarkerEvents ||
+        (sidebarActiveTab.value === "preview" && !canPreview)
+      ) {
+        sidebarActiveTab.value = canPreview ? "preview" : "attributes";
+      }
+    });
+
+    const onHoverSpan = (spanId: string) => {
+      hoveredSpanId.value = spanId;
+    };
+    const onUnhoverSpan = () => {
+      hoveredSpanId.value = "";
     };
 
     /**
@@ -1572,268 +2191,95 @@ export default defineComponent({
       });
     };
 
-    const getDefaultRequest = () => {
-      return {
-        query: {
-          sql: `select min(${store.state.zoConfig.timestamp_column}) as zo_sql_timestamp, min(start_time/1000) as trace_start_time, max(end_time/1000) as trace_end_time, min(service_name) as service_name, min(operation_name) as operation_name, count(trace_id) as spans, SUM(CASE WHEN span_status='ERROR' THEN 1 ELSE 0 END) as errors, max(duration) as duration, trace_id [QUERY_FUNCTIONS] from "[INDEX_NAME]" [WHERE_CLAUSE] group by trace_id order by zo_sql_timestamp DESC`,
-          start_time: (new Date().getTime() - 900000) * 1000,
-          end_time: new Date().getTime() * 1000,
-          from: 0,
-          size: 0,
-        },
-        encoding: "base64",
-      };
-    };
-
-    const sanitizeTraceId = (id: string): string =>
-      String(id).replace(/['"\\]/g, "");
-
-    const buildTraceSearchQuery = (trace: any) => {
-      const req = getDefaultRequest();
-      req.query.from = 0;
-      // TODO : Handle this with _search_stream instead of adding size
-      req.query.size = 50000;
-      req.query.start_time = trace.from;
-      req.query.end_time = trace.to;
-
-      req.query.sql = b64EncodeUnicode(
-        `SELECT * FROM "${trace.stream}" WHERE trace_id = '${sanitizeTraceId(trace.trace_id)}' ORDER BY start_time`,
-      ) as string;
-
-      return req;
-    };
-
-    /**
-     * Fetch RUM events that have the matching trace_id
-     */
-    const fetchRumEventsForTrace = async (
-      traceId: string,
-      startTime: number,
-      endTime: number,
-    ) => {
-      try {
-        // Check if _rumdata stream exists in logs
-        if (!logStreams.value.includes("_rumdata")) {
-          return [];
-        }
-
-        // Check if traceId is valid (indicating _oo_trace_id might be present)
-        if (!traceId) {
-          return [];
-        }
-
-        // Verify _oo_trace_id field exists in _rumdata stream schema
-        const rumStream = await getStream("_rumdata", "logs", true);
-        const hasTraceIdField = rumStream?.schema?.some(
-          (field: any) => field.name === "_oo_trace_id",
-        );
-
-        if (!hasTraceIdField) {
-          return [];
-        }
-
-        const req = {
-          query: {
-            sql: `SELECT * FROM "_rumdata" WHERE _oo_trace_id = '${sanitizeTraceId(traceId)}' ORDER BY ${store.state.zoConfig.timestamp_column} ASC`,
-            start_time: startTime - 10000000,
-            end_time: endTime + 10000000,
-            from: 0,
-            size: 100,
-          },
-        };
-
-        const res = await searchService.search(
-          {
-            org_identifier:
-              (router.currentRoute.value.query?.org_identifier as string) ||
-              store.state.selectedOrganization.identifier,
-            query: req,
-            page_type: "logs",
-          },
-          "RUM",
-        );
-
-        return res.data?.hits || [];
-      } catch (error) {
-        console.error("Error fetching RUM events for trace:", error);
-        return [];
-      }
-    };
-
-    /**
-     * Format RUM events as trace spans
-     * This converts RUM event structure to span structure
-     */
-    const formatRumEventsAsSpans = (rumEvents: any[]) => {
-      if (!rumEvents || !rumEvents.length) return [];
-
-      return rumEvents.map((event: any) => {
-        // Calculate start_time and end_time from event timestamp and duration
-        const eventTimestamp = event.date * 1000000; // Convert to nanoseconds
-        const durationNs =
-          event.resource_duration || event.action_duration || 0; // in nanoseconds
-
-        const startTime = eventTimestamp;
-        const endTime = eventTimestamp + durationNs;
-
-        // Determine operation name based on event type
-        let operationName = "Unknown RUM Event";
-        if (event.type === "resource") {
-          operationName = `${event.resource_method || "GET"} ${event.resource_url || "Unknown URL"}`;
-        } else if (event.type === "action") {
-          operationName = `Action: ${event.action_type || "Unknown"} on ${event.action_target_name || "Unknown"}`;
-        } else if (event.type === "view") {
-          operationName = `View: ${event.view_url || "Unknown Page"}`;
-        } else if (event.type === "error") {
-          operationName = `Error: ${event.error_message || event.error_type || "Unknown Error"}`;
-        }
-
-        // Generate a unique span_id for the RUM event
-        const spanId =
-          event._oo_span_id ||
-          event[`${event.type}_id`] ||
-          `rum_${event.type}_${event.date}_${Math.random().toString(36).substring(7)}`;
-
-        // Determine parent_span_id from _oo_span_id if available
-        const parentSpanId =
-          event._oo_parent_span_id || event._oo_span_id || "";
-
-        // Add service to selectedTrace if not already present
-        const serviceName = event.service || "Frontend";
-        const traceObj = searchObj.data.traceDetails.selectedTrace as any;
-        const existingService = traceObj.service_name.find(
-          (s: any) => s.service_name === serviceName,
-        );
-
-        if (!existingService) {
-          traceObj.service_name.push({
-            service_name: serviceName,
-            count: 1,
-          });
-        } else {
-          existingService.count = (existingService.count || 0) + 1;
-        }
-
-        return {
-          [store.state.zoConfig.timestamp_column]:
-            event[store.state.zoConfig.timestamp_column],
-          start_time: startTime,
-          end_time: endTime,
-          duration: durationNs / 1000,
-          span_id: spanId,
-          trace_id: event._oo_trace_id,
-          operation_name: operationName,
-          service_name: event.service || "Frontend",
-          span_status:
-            event.type === "error" ||
-            (event.type === "resource" && event.resource_status_code >= 400)
-              ? "ERROR"
-              : "OK",
-          span_kind:
-            event.type === "resource"
-              ? SPAN_KIND_CLIENT
-              : SPAN_KIND_UNSPECIFIED,
-          // Store original RUM event data for reference
-          rum_event_type: event.type,
-          rum_session_id: event.session_id,
-          events: JSON.stringify([event]),
-          rum_date: event.date,
-        };
-      });
-    };
+    const { fetchRumEventsForTrace, formatRumEventsAsSpans } = useRumSpanBuilder(
+      logStreams,
+      searchObj,
+      t,
+    );
 
     const getTraceDetails = async (data: any) => {
       try {
         searchObj.data.traceDetails.isLoadingTraceDetails = true;
         searchObj.data.traceDetails.spanList = [];
-        const req = buildTraceSearchQuery(data);
+        const traceRes = await searchService.get_trace_details({
+          org_identifier: effectiveOrgIdentifier.value,
+          stream_name: data.stream,
+          trace_id: data.trace_id,
+          start_time: data.from,
+          end_time: data.to,
+          hint_ts: data.from + Math.floor((data.to - data.from) / 2),
+        });
+        if (!traceRes.data?.hits?.length) {
+          showTraceDetailsError();
+          return;
+        }
 
-        const tracePromise = searchService.search(
-          {
-            org_identifier: router.currentRoute.value.query
-              ?.org_identifier as string,
-            query: req,
-            page_type: "traces",
-          },
-          "ui",
+        const effectiveStart = traceRes.data.new_start_time ?? data.from;
+        const effectiveEnd = traceRes.data.new_end_time ?? data.to;
+        if (effectiveStart !== data.from || effectiveEnd !== data.to) {
+          updateUrlQueryParams({ from: effectiveStart, to: effectiveEnd });
+        }
+        const traceSpans = traceRes.data.hits;
+        const rumData = await fetchRumEventsForTrace(data.trace_id, traceSpans);
+        const { tracedResources, viewEvents, actionEvents, allViewEvents } = rumData;
+        const rumSpans = formatRumEventsAsSpans(
+          tracedResources,
+          viewEvents,
+          actionEvents,
+          allViewEvents,
         );
-
-        const rumPromise = fetchRumEventsForTrace(
-          data.trace_id,
-          req.query.start_time,
-          req.query.end_time,
-        );
-
-        Promise.all([tracePromise, rumPromise])
-          .then(([traceRes, rumEvents]) => {
-            if (!traceRes.data?.hits?.length) {
-              showTraceDetailsError();
-              return;
-            }
-
-            const traceSpans = traceRes.data?.hits || [];
-            const rumSpans = formatRumEventsAsSpans(rumEvents);
-            searchObj.data.traceDetails.spanList = [...rumSpans, ...traceSpans];
-            updateServiceColors();
-            buildTracesTree();
-          })
-          .catch((error) => {
-            console.error("Error fetching trace details:", error);
-            searchObj.data.traceDetails.isLoadingTraceDetails = false;
-            showTraceDetailsError();
-          })
-          .finally(() => {
-            searchObj.data.traceDetails.isLoadingTraceDetails = false;
-          });
+        // RUM spans take priority over trace spans with the same span_id
+        const rumSpanIds = new Set(rumSpans.map((s: any) => s.span_id));
+        const deduplicatedTraceSpans = traceSpans.filter((s: any) => !rumSpanIds.has(s.span_id));
+        // spanList is never[] in useTraces state; widen container to accept spans.
+        (searchObj.data.traceDetails as { spanList: unknown[] }).spanList = [
+          ...rumSpans,
+          ...deduplicatedTraceSpans,
+        ];
+        updateSelectedTrace(data.trace_id, spanList.value);
+        updateServiceColors();
+        buildTracesTree();
       } catch (error) {
         console.error("Error fetching trace details:", error);
-        searchObj.data.traceDetails.isLoadingTraceDetails = false;
         showTraceDetailsError();
+      } finally {
+        searchObj.data.traceDetails.isLoadingTraceDetails = false;
       }
     };
 
-    const getTracesMetaData = (traces: any[]) => {
-      if (!traces.length) return [];
-
-      return traces.map((trace) => {
-        const _trace = {
-          trace_id: trace.trace_id,
-          trace_start_time: Math.round(trace.start_time / 1000),
-          trace_end_time: Math.round(trace.end_time / 1000),
-          service_name: trace.service_name,
-          operation_name: trace.operation_name,
-          spans: trace.spans[0],
-          errors: trace.spans[1],
-          duration: trace.duration,
-          services: {} as any,
-          zo_sql_timestamp: new Date(trace.start_time / 1000).getTime(),
-        };
-        return _trace;
-      });
+    const updateSelectedTrace = (traceId: string, spans: any[]) => {
+      const traceWindow = spanWindowUs(spans);
+      searchObj.data.traceDetails.selectedTrace = {
+        trace_id: traceId,
+        trace_start_time: traceWindow?.start ?? 0,
+        trace_end_time: traceWindow?.end ?? 0,
+        service_name: extractServiceNames(spans),
+        services: {},
+      };
     };
 
     const updateServiceColors = () => {
-      searchObj.data.traceDetails.selectedTrace.service_name.forEach(
-        (service: any) => {
-          if (!searchObj.meta.serviceColors[service.service_name]) {
-            if (serviceColorIndex.value >= colors.value.length)
-              generateNewColor();
+      // service_name / services are stamped onto selectedTrace at runtime (see
+      // useTraces type); non-null asserts preserve the existing unguarded access.
+      const selected = searchObj.data.traceDetails.selectedTrace!;
+      selected.service_name!.forEach((service) => {
+        if (!searchObj.meta.serviceColors[service.service_name]) {
+          if (serviceColorIndex.value >= colors.value.length) generateNewColor();
 
-            searchObj.meta.serviceColors[service.service_name] =
-              colors.value[serviceColorIndex.value];
+          searchObj.meta.serviceColors[service.service_name] =
+            colors.value[serviceColorIndex.value];
 
-            serviceColorIndex.value++;
-          }
-          (searchObj.data.traceDetails.selectedTrace as any).services[
-            service.service_name
-          ] = service.count;
-        },
-      );
+          serviceColorIndex.value++;
+        }
+        selected.services![service.service_name] = service.count;
+      });
     };
 
     const showTraceDetailsError = () => {
       showErrorNotification(
-        `Trace ${router.currentRoute.value.query.trace_id} not found`,
+        t("traces.traceDetails.traceNotFound", {
+          traceId: router.currentRoute.value.query.trace_id,
+        }),
       );
       const query = cloneDeep(router.currentRoute.value.query);
       delete query.trace_id;
@@ -1856,7 +2302,7 @@ export default defineComponent({
     }
 
     const calculateTracePosition = () => {
-      const tics = [];
+      const tics: { value: number; label: I18nText; left: string }[] = [];
       baseTracePosition.value["durationMs"] = timeRange.value.end;
       baseTracePosition.value["durationUs"] = timeRange.value.end * 1000;
       baseTracePosition.value["startTimeUs"] =
@@ -1866,7 +2312,8 @@ export default defineComponent({
       for (let i = 0; i <= 4; i++) {
         tics.push({
           value: Number(time.toFixed(2)),
-          label: `${formatTimeWithSuffix(time * 1000)}`,
+          label: raw(formatTimeWithSuffix(time * 1000)),
+          // eslint-disable-next-line local/no-hardcoded-px -- hairline: a 1-device-pixel offset that pulls the first tick onto the axis line; scaling it with text would misalign it
           left: i === 0 ? "-1px" : `${25 * i}%`,
         });
         time += quarterMs;
@@ -1904,10 +2351,7 @@ export default defineComponent({
         }
 
         const formattedSpan = getFormattedSpan(spanData);
-        const spanId =
-          spanData.span_id ||
-          formattedSpan.spanId ||
-          `span_${idx}_${Date.now()}`;
+        const spanId = spanData.span_id || formattedSpan.spanId || `span_${idx}_${Date.now()}`;
         formattedSpanMap[spanId] = formattedSpan;
       });
 
@@ -1921,7 +2365,7 @@ export default defineComponent({
 
         const span = formattedSpanMap[spanList.value[i].span_id];
 
-        span.style.color = searchObj.meta.serviceColors[span.serviceName];
+        span.style.color = getOrSetServiceColor(span.resolvedIdentity);
 
         span.style.backgroundColor = adjustOpacity(span.style.color, 0.2);
 
@@ -1950,11 +2394,9 @@ export default defineComponent({
 
       // Purposely converting to microseconds to avoid floating point precision issues
       // In updateChart method, we are using start and end time to set the time range of trace
-      traceTree.value[0].lowestStartTime =
-        convertTimeFromNsToUs(lowestStartTime);
+      traceTree.value[0].lowestStartTime = convertTimeFromNsToUs(lowestStartTime);
       traceTree.value[0].highestEndTime = convertTimeFromNsToUs(highestEndTime);
-      traceTree.value[0].style.color =
-        searchObj.meta.serviceColors[traceTree.value[0].serviceName];
+      traceTree.value[0].style.color = getOrSetServiceColor(traceTree.value[0].resolvedIdentity);
 
       traceTree.value.forEach((span: any) => {
         addSpansPositions(span, 0);
@@ -1971,6 +2413,8 @@ export default defineComponent({
       buildServiceTree();
       flatSpans.value = useTraceProcessing(
         treeForFlameGraph as any,
+        spanMap as any,
+        serviceDetectionConfig,
       ).flatSpans.value;
 
       // After the tree is built, scroll the pre-selected span into view (e.g.
@@ -1978,11 +2422,20 @@ export default defineComponent({
       if (selectedSpanId.value) {
         if (!spanMap.value[selectedSpanId.value]) {
           showErrorNotification(
-            `Span ${selectedSpanId.value} not found in trace`,
+            t("traces.traceDetails.spanNotFound", {
+              spanId: selectedSpanId.value,
+            }),
           );
           searchObj.data.traceDetails.selectedSpanId = "";
           searchObj.data.traceDetails.showSpanDetails = false;
         } else {
+          // A span selected from the URL is set before `spanMap` is populated,
+          // so the selectedSpanId watcher cannot classify it on first pass.
+          // Re-apply the default now that the span exists: evaluator/LLM spans
+          // land directly on Preview, while ordinary spans use Attributes.
+          sidebarActiveTab.value = hasTracePreview(spanMap.value[selectedSpanId.value])
+            ? "preview"
+            : "attributes";
           scrollSpanIntoView(selectedSpanId.value);
         }
       }
@@ -2046,17 +2499,17 @@ export default defineComponent({
         depth: number,
         height: number,
       ) => {
-        maxHeight[depth] =
-          maxHeight[depth] === undefined ? 1 : maxHeight[depth] + 1;
-        if (serviceName !== span.serviceName) {
+        maxHeight[depth] = maxHeight[depth] === undefined ? 1 : maxHeight[depth] + 1;
+        const serviceIdentity = span.resolvedIdentity || span.serviceName || "unknown";
+        if (serviceName !== serviceIdentity) {
           const children: any[] = [];
           currentColumn.push({
-            name: `${span.serviceName} \n (${span.durationMs}ms)`,
+            name: `${serviceIdentity} \n (${span.durationMs}ms)`,
             parent: serviceName,
             duration: span.durationMs,
             children: children,
             itemStyle: {
-              color: searchObj.meta.serviceColors[span.serviceName],
+              color: getOrSetServiceColor(span.resolvedIdentity),
             },
             emphasis: {
               disabled: true,
@@ -2064,7 +2517,7 @@ export default defineComponent({
           });
           if (span.spans && span.spans.length) {
             span.spans.forEach((_span: any) =>
-              getService(_span, children, span.serviceName, depth + 1, height),
+              getService(_span, children, serviceIdentity, depth + 1, height),
             );
           } else {
             if (maxDepth < depth) maxDepth = depth;
@@ -2079,12 +2532,23 @@ export default defineComponent({
           if (maxDepth < depth) maxDepth = depth;
         }
       };
+
+      // Handle multiple root nodes - process each root span to ensure
+      // all root services appear in the service map
       traceTree.value.forEach((span: any) => {
         getService(span, serviceTree, "", 1, 1);
       });
+
+      // Build consolidated patterns for pattern view
+      consolidatedPatterns.value = buildPatternConsolidatedTree(traceTree.value);
+      // console.log('[DEBUG] consolidatedPatterns size:', consolidatedPatterns.value?.size || 0);
+      // console.log('[DEBUG] consolidatedPatterns keys:', Array.from(consolidatedPatterns.value?.keys() || []));
+      // Pattern consolidation completed successfully
+
       traceServiceMap.value = convertTraceServiceMapData(
         cloneDeep(serviceTree),
         maxDepth,
+        true, // Enable multi-root handling for trace service maps
       );
     };
 
@@ -2117,46 +2581,32 @@ export default defineComponent({
     // Convert span object to required format
     // Converting ns to ms
     const getFormattedSpan = (span: any) => {
-      // Parse usage details from split fields
-      span = {
-        ...span,
-        llm_usage_details_input: span.llm_usage_tokens_input,
-        llm_usage_details_output: span.llm_usage_tokens_output,
-        llm_usage_details_total: span.llm_usage_tokens_total,
-        llm_cost_details_total: span.llm_usage_cost_total,
-        llm_input: span.llm_input || {},
-      };
-
       const usage = parseUsageDetails(span);
       const cost = parseCostDetails(span);
 
       return {
-        [store.state.zoConfig.timestamp_column]:
-          span[store.state.zoConfig.timestamp_column],
+        [store.state.zoConfig.timestamp_column]: span[store.state.zoConfig.timestamp_column],
         startTimeUs: Math.floor(span.start_time / 1000),
         startTimeMs: convertTimeFromNsToMs(span.start_time),
         endTimeMs: convertTimeFromNsToMs(span.end_time),
         endTimeUs: Math.floor(span.end_time / 1000),
-        durationMs: span?.duration
-          ? Number((span?.duration / 1000).toFixed(4))
-          : 0, // This key is standard, we use for calculating width of span block. This should always be in ms
-        durationUs: span?.duration ? Number(span?.duration?.toFixed(4)) : 0, // This key is used for displaying duration in span block. We convert this us to ms, s in span block
+        durationMs: span?.duration ? Number((span?.duration / 1000).toFixed(4)) : 0,
+        durationUs: span?.duration ? Number(span?.duration?.toFixed(4)) : 0,
         idleMs: span.idle_ns ? convertTime(span.idle_ns) : 0,
         busyMs: span.busy_ns ? convertTime(span.busy_ns) : 0,
         spanId: span.span_id || `generated_${Date.now()}_${Math.random()}`,
-        operationName: span.operation_name || "Unknown Operation",
-        serviceName: span.service_name || "Unknown Service",
+        operationName: span.operation_name || t("traces.traceDetails.unknownOperation"),
+        serviceName: span.service_name || t("traces.traceDetails.unknownService"),
         spanStatus: span.span_status || "UNSET",
         spanKind: getSpanKind(span.span_kind),
         parentId: span.reference_parent_span_id || "",
         spans: [],
         index: 0,
-        style: {
-          color: "",
-        },
+        style: {},
         links: JSON.parse(span.links || "[]"),
-        llm_usage: usage,
-        llm_cost: cost,
+        genAiUsage: usage,
+        genAiCost: cost,
+        resolvedIdentity: resolveSpanIdentity(span),
       };
     };
 
@@ -2185,8 +2635,12 @@ export default defineComponent({
     };
 
     const closeSidebar = () => {
+      hoveredSpanId.value = "";
       searchObj.data.traceDetails.showSpanDetails = false;
       searchObj.data.traceDetails.selectedSpanId = null;
+      // Stop any pending/in-flight programmatic scroll so the closed span no
+      // longer snaps back into view while the user scrolls the tree.
+      traceTreeRef.value?.cancelScroll?.();
     };
     const toggleSpanCollapse = (spanId: number | string) => {
       collapseMapping.value[spanId] = !collapseMapping.value[spanId];
@@ -2203,9 +2657,7 @@ export default defineComponent({
           spanPositionList.value[i].startTimeUs -
           convertTimeFromNsToUs(traceTree.value[0].lowestStartTime * 1000);
 
-        const x1 = Number(
-          (absoluteStartTime + spanPositionList.value[i].durationMs).toFixed(4),
-        );
+        const x1 = Number((absoluteStartTime + spanPositionList.value[i].durationMs).toFixed(4));
 
         data.push({
           x0: absoluteStartTime,
@@ -2234,10 +2686,7 @@ export default defineComponent({
           traceTree.value[0].lowestStartTime > 0 &&
           traceTree.value[0].highestEndTime > traceTree.value[0].lowestStartTime
         ) {
-          newEnd =
-            (traceTree.value[0].highestEndTime -
-              traceTree.value[0].lowestStartTime) /
-            1000;
+          newEnd = (traceTree.value[0].highestEndTime - traceTree.value[0].lowestStartTime) / 1000;
         } else {
           newEnd = 0;
         }
@@ -2256,68 +2705,25 @@ export default defineComponent({
       updateHeight();
     };
 
-    onMounted(() => {
-      throttledResizing.value = throttle(resizing, 50);
-    });
-
-    const startResize = (event: any) => {
-      initialX.value = event.clientX;
-      initialWidth.value = leftWidth.value;
-
-      window.addEventListener("mousemove", throttledResizing.value);
-      window.addEventListener("mouseup", stopResize);
-      document.body.classList.add("no-select");
-    };
-
-    const resizing = (event: any) => {
-      const deltaX = event.clientX - initialX.value;
-      leftWidth.value = initialWidth.value + deltaX;
-    };
-
-    const stopResize = () => {
-      window.removeEventListener("mousemove", throttledResizing.value);
-      window.removeEventListener("mouseup", stopResize);
-      document.body.classList.remove("no-select");
-    };
-
-    // DAG panel resize handlers
-    const startDagResize = (event: MouseEvent) => {
-      dagInitialX.value = event.clientX;
-      dagInitialWidth.value = dagLeftWidth.value;
-
-      throttledDagResizing.value = throttle(dagResizing, 16);
-      window.addEventListener("mousemove", throttledDagResizing.value);
-      window.addEventListener("mouseup", stopDagResize);
-      document.body.classList.add("no-select");
-    };
-
-    const dagResizing = (event: MouseEvent) => {
-      if (!parentContainer.value) return;
-      const containerWidth = parentContainer.value.clientWidth;
-      const deltaX = event.clientX - dagInitialX.value;
-      const deltaPercent = (deltaX / containerWidth) * 100;
-      const newWidth = dagInitialWidth.value + deltaPercent;
-      // Constrain between 20% and 80%
-      dagLeftWidth.value = Math.max(20, Math.min(80, newWidth));
-    };
-
-    const stopDagResize = () => {
-      window.removeEventListener("mousemove", throttledDagResizing.value);
-      window.removeEventListener("mouseup", stopDagResize);
-      document.body.classList.remove("no-select");
-    };
+    // Resizers are handled by useResizer composable
 
     const toggleTimeline = () => {
       isTimelineExpanded.value = !isTimelineExpanded.value;
     };
 
     const copyTraceId = () => {
-      $q.notify({
-        type: "positive",
-        message: "Trace ID copied to clipboard",
-        timeout: 2000,
+      copyToClipboard(spanList.value[0]["trace_id"], t, {
+        successMessage: t("traces.traceDetails.traceIdCopied"),
       });
-      copyToClipboard(spanList.value[0]["trace_id"]);
+    };
+
+    const sessionId = computed<string>(() => resolveSessionId(spanList.value));
+
+    const copySessionId = () => {
+      if (!sessionId.value) return;
+      copyToClipboard(sessionId.value, t, {
+        successMessage: t("traces.traceDetails.sessionIdCopied"),
+      });
     };
 
     /**
@@ -2333,6 +2739,10 @@ export default defineComponent({
 
       if (customFrom) queryParams.from = customFrom;
       if (customTo) queryParams.to = customTo;
+
+      if (effectiveStreamName.value) {
+        queryParams.stream = effectiveStreamName.value as string;
+      }
 
       const searchParams = new URLSearchParams();
       for (const [key, value] of Object.entries(queryParams)) {
@@ -2357,15 +2767,15 @@ export default defineComponent({
       store.dispatch("logs/setIsInitialized", false);
 
       const stream: string =
-        searchObj.data.traceDetails.selectedLogStreams.join(",");
-      const from =
-        searchObj.data.traceDetails.selectedTrace?.trace_start_time - 60000000;
-      const to =
-        searchObj.data.traceDetails.selectedTrace?.trace_end_time + 60000000;
+        config.isEnterprise === "true"
+          ? logStreams.value.join(",")
+          : searchObj.data.traceDetails.selectedLogStreams.join(",");
+      const from = searchObj.data.traceDetails.selectedTrace?.trace_start_time - 60000000;
+      const to = searchObj.data.traceDetails.selectedTrace?.trace_end_time + 60000000;
       const refresh = 0;
 
       const query = b64EncodeUnicode(
-        `${store.state.organizationData?.organizationSettings?.trace_id_field_name}='${spanList.value[0]["trace_id"]}'`,
+        `${quoteSqlIdentifierIfNeeded(String(store.state.organizationData?.organizationSettings?.trace_id_field_name))}='${escapeSingleQuotes(String(spanList.value[0]["trace_id"]))}'`,
       );
 
       router.push({
@@ -2386,25 +2796,36 @@ export default defineComponent({
       });
     };
 
-    const redirectToSessionReplay = () => {
-      if (
-        !firstRumSessionData.value ||
-        !firstRumSessionData.value.rum_session_id
-      ) {
-        return;
+    const handleTreeViewCorrelatedLogs = (span: any) => {
+      const spanId = span.spanId || span.span_id;
+      updateSelectedSpan(spanId);
+
+      const correlationData = searchObj.data.traceDetails.correlationProps;
+      if (correlationData?.logStreams?.length) {
+        navigateToCorrelatedLogs(correlationData);
+      } else {
+        // The sidebar owns the correlation lookup; when it produced nothing there
+        // is no log stream to open, so tell the user rather than doing nothing.
+        toast({
+          variant: "warning",
+          message: t("traces.noCorrelatedLogsFound"),
+        });
       }
+    };
+
+    const redirectToSessionReplay = () => {
+      const span = replaySpan.value;
+      if (!span) return;
 
       router.push({
         name: "SessionViewer",
         params: {
-          id: firstRumSessionData.value.rum_session_id,
+          id: span.rum_session_id,
         },
         query: {
-          start_time:
-            Math.floor(firstRumSessionData.value.start_time / 1000) - 1000000,
-          end_time:
-            Math.ceil(firstRumSessionData.value.end_time / 1000) + 1000000,
-          event_time: firstRumSessionData.value.rum_date,
+          start_time: Math.floor(span.start_time / 1000) - 1000000,
+          end_time: Math.ceil(span.end_time / 1000) + 1000000,
+          event_time: span.rum_date,
         },
       });
     };
@@ -2426,15 +2847,47 @@ export default defineComponent({
       });
     };
 
-    const updateSelectedSpan = (
-      spanId: string,
-      swichToWaterfall: boolean = false,
-    ) => {
+    const focusedEventIndex = ref<number | null>(null);
+
+    /**
+     * A waterfall marker click. Selecting the span hides the timeline the
+     * marker lived on, so route the event's index into the sidebar and open the
+     * Events tab, which carries its own span-scoped mini-timeline.
+     */
+    const onSelectSpanEvent = (payload: { spanId: string; eventIndex: number }) => {
+      // Record the tab before the selection, so the watcher this triggers sees
+      // the request rather than overwriting it with the default.
+      pendingSidebarTab.value = { spanId: payload.spanId, tab: "events" };
+      markerEventsSpanId.value = payload.spanId;
+      updateSelectedSpan(payload.spanId);
+      sidebarActiveTab.value = "events";
+      // Re-assign through null so clicking the same marker twice re-triggers
+      // the sidebar's watcher.
+      focusedEventIndex.value = null;
+      nextTick(() => {
+        focusedEventIndex.value = payload.eventIndex;
+      });
+    };
+
+    /**
+     * An explicit tab choice from the sidebar. Clears marker provenance: once
+     * the user has picked a tab themselves, it persists across span
+     * navigation like any other.
+     */
+    const onSidebarTabChange = (tab: string) => {
+      sidebarActiveTab.value = tab;
+      markerEventsSpanId.value = null;
+    };
+
+    const updateSelectedSpan = (spanId: string, swichToWaterfall: boolean = false) => {
+      hoveredSpanId.value = ""; // clear any hover state on click
       showTraceDetails.value = false;
       searchObj.data.traceDetails.showSpanDetails = true;
       searchObj.data.traceDetails.selectedSpanId = spanId;
       if (swichToWaterfall && activeTab.value !== "waterfall") {
-        activeTab.value = "waterfall";
+        // Goes through updateActiveTab so the persisted last-viewed tab stays
+        // in sync with what's actually on screen.
+        updateActiveTab("waterfall");
       }
 
       scrollSpanIntoView(spanId);
@@ -2477,9 +2930,6 @@ export default defineComponent({
     };
 
     const handleExpandToFullView = () => {
-      // Navigate to full trace details page from embedded mode
-      if (props.mode !== "embedded") return;
-
       const query: any = {
         trace_id: effectiveTraceId.value,
         stream: effectiveStreamName.value,
@@ -2507,10 +2957,13 @@ export default defineComponent({
       window.open(route.href, "_blank");
     };
 
-    const routeToTracesList = () => {
-      // Only navigate if in standalone mode
-      if (props.mode !== "standalone") return;
-
+    // Real browser back when there's history to pop — this trace can be
+    // reached from many AI Observability pages (Sessions, Discovery, Queue
+    // Workbench, Experiments, Eval Jobs, LLM Insights) as well as the plain
+    // Traces search, and router.back() returns to whichever one it actually
+    // was, filters and all. The hand-built push below only fires as a
+    // fallback (direct link / reload, no history to pop).
+    const { goBack: backToTracesList } = useSmartBack(() => {
       const query = cloneDeep(router.currentRoute.value.query);
       delete query.trace_id;
 
@@ -2521,12 +2974,13 @@ export default defineComponent({
         query.to = searchObj.data.datetime.endTime.toString();
       }
 
-      router.push({
-        name: "traces",
-        query: {
-          ...query,
-        },
-      });
+      return { name: "traces", query: { ...query } };
+    });
+
+    const routeToTracesList = () => {
+      // Only navigate if in standalone mode
+      if (props.mode !== "standalone") return;
+      backToTracesList();
     };
 
     const openTraceLink = async () => {
@@ -2534,134 +2988,42 @@ export default defineComponent({
       await setupTraceDetails();
     };
 
-    /**
-     * Fetch LLM evaluation pipeline for the current trace stream
-     */
-    const fetchEvalPipeline = async () => {
-      if (!currentTraceStreamName.value) {
-        evalPipelineExists.value = false;
-        return;
-      }
-
-      try {
-        const orgId = store.state.selectedOrganization.identifier;
-        const res = await pipelineService.getPipelines(orgId);
-        const pipelines: any[] = res.data?.list || [];
-
-        console.log(
-          "[TraceEval] Fetched pipelines:",
-          pipelines.length,
-          "Stream:",
-          currentTraceStreamName.value,
-        );
-
-        // Find pipeline with matching source stream and llm_evaluation node
-        const evalPipeline = pipelines.find(
-          (p: any) =>
-            p.source?.stream_name === currentTraceStreamName.value &&
-            p.source?.stream_type === "traces" &&
-            p.nodes?.some((n: any) => n.data?.node_type === "llm_evaluation"),
-        );
-
-        if (evalPipeline) {
-          evalPipelineExists.value = true;
-          // Get the evaluation output stream name
-          const evalOutputNode = evalPipeline.nodes.find(
-            (n: any) =>
-              n.io_type === "output" && n.data?.stream_type === "logs",
-          );
-          evalPipelineStreamName.value =
-            evalOutputNode?.data?.stream_name ||
-            `${currentTraceStreamName.value}_evaluations`;
-          console.log(
-            "[TraceEval] Found eval pipeline, stream:",
-            evalPipelineStreamName.value,
-          );
-        } else {
-          console.log(
-            "[TraceEval] No eval pipeline found for stream:",
-            currentTraceStreamName.value,
-          );
-          evalPipelineExists.value = false;
-          evalPipelineStreamName.value = null;
-        }
-      } catch (error) {
-        console.error("Error fetching evaluation pipeline:", error);
-        evalPipelineExists.value = false;
-        evalPipelineStreamName.value = null;
-      }
+    // ── Keyboard shortcuts — span navigation ─────────────────────────────
+    const nextSpanHandler = () => {
+      if (isInputFocused()) return;
+      const list = spanList.value;
+      if (!list?.length) return;
+      const idx = list.findIndex((s: any) => s.span_id === selectedSpanId.value);
+      if (idx < list.length - 1) updateSelectedSpan(list[idx + 1].span_id);
+    };
+    const prevSpanHandler = () => {
+      if (isInputFocused()) return;
+      const list = spanList.value;
+      if (!list?.length) return;
+      const idx = list.findIndex((s: any) => s.span_id === selectedSpanId.value);
+      if (idx > 0) updateSelectedSpan(list[idx - 1].span_id);
     };
 
-    /**
-     * Fetch evaluation data for the current trace
-     */
-    const fetchEvalData = async () => {
-      if (
-        !evalPipelineExists.value ||
-        !evalPipelineStreamName.value ||
-        !effectiveTraceId.value
-      ) {
-        evalData.value = [];
-        return;
-      }
-
-      isLoadingEvalData.value = true;
-      try {
-        console.log(
-          "[TraceEval] Fetching data from stream:",
-          evalPipelineStreamName.value,
-          "traceId:",
-          effectiveTraceId.value,
-        );
-
-        const req = {
-          query: {
-            sql: `SELECT * FROM "${evalPipelineStreamName.value}" WHERE trace_id = '${sanitizeTraceId(effectiveTraceId.value)}' ORDER BY _timestamp ASC`,
-            start_time: effectiveTimeRange.value.from - 60000000,
-            end_time: effectiveTimeRange.value.to + 60000000,
-            from: 0,
-            size: 100,
-          },
-        };
-
-        const res = await searchService.search(
-          {
-            org_identifier:
-              (router.currentRoute.value.query?.org_identifier as string) ||
-              store.state.selectedOrganization.identifier,
-            query: req,
-            page_type: "logs",
-          },
-          "ui",
-        );
-
-        evalData.value = res.data?.hits || [];
-        console.log(
-          "[TraceEval] Fetched evaluation records:",
-          evalData.value.length,
-        );
-
-        // Load templates for the current org
-        if (
-          traceEvaluationsViewRef.value?.loadTemplates &&
-          effectiveOrgIdentifier.value
-        ) {
-          await traceEvaluationsViewRef.value.loadTemplates(
-            effectiveOrgIdentifier.value,
-          );
-        }
-      } catch (error) {
-        console.error("Error fetching evaluation data:", error);
-        evalData.value = [];
-      } finally {
-        isLoadingEvalData.value = false;
-      }
-    };
-
+    useShortcuts([
+      // `traceNextSpan` registers j + ↓, `tracePrevSpan` registers k + ↑
+      // (both bindings live in the registry under `keys`).
+      { id: "traceNextSpan", handler: nextSpanHandler },
+      { id: "tracePrevSpan", handler: prevSpanHandler },
+    ]);
     return {
       router,
       t,
+      raw,
+      // Exposed for the template `v-if` gating the LLM Observability
+      // surfaces (Thread tab toggle + ThreadView body) behind
+      // `config.showLLMUI`.
+      config,
       activeTab,
+      traceTabs,
+      onTabReorder,
+      sidebarActiveTab,
+      pendingSidebarTab,
+      markerEventsSpanId,
       traceTree,
       collapseMapping,
       traceRootSpan,
@@ -2670,6 +3032,10 @@ export default defineComponent({
       spanList,
       isSidebarOpen,
       selectedSpanId,
+      hoveredSpanId,
+      effectiveSpanId,
+      onHoverSpan,
+      onUnhoverSpan,
       spanMap,
       closeSidebar,
       toggleSpanCollapse,
@@ -2680,6 +3046,8 @@ export default defineComponent({
       traceChart,
       updateChart,
       traceServiceMap,
+      traceServiceMapChartOptions,
+      chartRendererRef,
       activeVisual,
       traceVisuals,
       getImageURL,
@@ -2691,21 +3059,27 @@ export default defineComponent({
       toggleTimeline,
       copyToClipboard,
       copyTraceId,
+      sessionId,
+      copySessionId,
       traceDetailsShareURL,
-      outlinedInfo,
-      outlinedPlayCircle,
+      info: "info",
+      outlinedPlayCircle: "play-circle",
       redirectToLogs,
+      handleTreeViewCorrelatedLogs,
       redirectToSessionReplay,
-      hasRumSessionId,
-      firstRumSessionData,
+      hasReplaySession,
       filteredStreamOptions,
       filterStreamFn,
       streamSearchValue,
       selectedStreamsString,
+      isViewLogsDisabled,
       openTraceDetails,
       showTraceDetails,
       traceDetails,
       updateSelectedSpan,
+      onSelectSpanEvent,
+      onSidebarTabChange,
+      focusedEventIndex,
       routeToTracesList,
       handleExpandToFullView,
       openTraceLink,
@@ -2721,6 +3095,7 @@ export default defineComponent({
       searchResults,
       parentContainer,
       traceScrollContainer,
+      scrollContainerForTree,
       parentHeight,
       updateHeight,
       getSpanKind,
@@ -2748,6 +3123,7 @@ export default defineComponent({
       handleDAGNodeClick,
       // Filter-from-trace-details
       areFiltersAdded,
+      isStandaloneMode,
       showFilterPopover,
       filterDialogReady,
       localEditorValue,
@@ -2760,572 +3136,41 @@ export default defineComponent({
       startDagResize,
       // LLM traces check
       hasLLMSpans,
+      hasPreviewableSpans,
       // New header computed properties
       errorSpansCount,
       rootServiceName,
       traceStartTime,
+      canManualEvaluate,
+      manualEvaluationOpen,
+      manualEvaluationTarget,
+      canAnnotate,
+      traceEvaluationRange,
+      datasetOpen,
+      datasetTarget,
+      openTraceDataset,
+      openSpanDataset,
+      updateDatasetOpen,
+      openTraceEvaluation,
+      openSpanEvaluation,
+      updateManualEvaluationOpen,
       formatTimestamp,
-      traceTabs,
       // FlameGraph data
       flatSpans,
       traceMetadata,
-      // Evaluation data
-      evalPipelineExists,
-      evalPipelineStreamName,
-      evalData,
-      isLoadingEvalData,
-      traceEvaluationsViewRef,
-      fetchEvalPipeline,
-      fetchEvalData,
       formatLargeNumber,
+      updateActiveTab,
     };
   },
 });
 </script>
 
-<style scoped lang="scss">
-$sidebarWidth: 84%;
-$separatorWidth: 2px;
-$toolbarHeight: 36px;
-$traceHeaderHeight: 30px;
-$traceChartHeight: 210px;
-$appNavbarHeight: 57px;
-
-$traceChartCollapseHeight: 42px;
-
-.toolbar {
-  height: $toolbarHeight;
-}
-.trace-details {
-  overflow: hidden;
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  position: relative;
-}
-
-.trace-details-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  padding: 0.325rem 0.625rem;
-  box-sizing: border-box;
-}
-.histogram-container-full {
-  flex: 1;
-  min-height: 0;
-}
-.histogram-container {
-  flex: 1;
-  min-height: 0;
-}
-
-.histogram-sidebar-inner {
-  flex-shrink: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  min-height: 0;
-  transition: all 0.3s ease-in-out;
-}
-
-.histogram-spans-container {
-  min-height: 0;
-  position: relative;
-  padding-bottom: 0.5rem;
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-}
-
-.trace-tree-wrapper {
-  overflow: hidden;
-  flex: 1;
-  min-height: 0;
-  box-sizing: border-box;
-  display: flex;
-  flex-direction: column;
-}
-
-.trace-tree-container {
-  padding-top: 0;
-  padding-bottom: 0;
-  margin-bottom: 0;
-  min-height: 100%;
-}
-
-.trace-chart-btn {
-  cursor: pointer;
-  padding-right: 8px;
-  border-radius: 2px;
-  padding-top: 3px;
-  padding-bottom: 2px;
-
-  &:hover {
-    background-color: var(--o2-primary-btn-bg);
-    color: #ffffff;
-
-    .q-icon {
-      color: #ffffff !important;
-    }
-  }
-}
-
-.log-stream-search-input {
-  width: 20rem;
-
-  .q-field .q-field__control {
-    padding: 0px 8px;
-  }
-}
-
-.toolbar-operation-name {
-  max-width: 225px;
-}
-
-.dag-left-panel {
-  height: calc(100vh - 200px);
-  padding: 16px;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.dag-right-panel {
-  height: calc(100vh - 200px);
-  overflow-y: auto;
-  overflow-x: hidden;
-  min-height: 0;
-}
-
-.dag-resizer {
-  width: 8px;
-  cursor: col-resize;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  position: relative;
-  z-index: 10;
-
-  &:hover .dag-resizer-line {
-    background-color: var(--o2-theme-color, #1976d2);
-  }
-}
-
-.dag-resizer-line {
-  width: 3px;
-  height: 100%;
-  background-color: #e0e0e0;
-  border-radius: 2px;
-  transition: background-color 0.2s ease;
-}
-
-body.body--dark .dag-resizer-line {
-  background-color: #3c3c3c;
-}
-
-body.body--dark .dag-resizer:hover .dag-resizer-line {
-  background-color: #90caf9;
-}
-</style>
-<style lang="scss">
-// Prevent parent containers from adding scrollbars
-body:has(.trace-details),
-html:has(.trace-details) {
+<style scoped>
+/* keep(complex-state): body/html :has() overflow lock reaches ancestor DOM the component doesn't own,
+   and the dark-only unified-search-group color states can't be tokenized as
+   utilities. */
+:global(body:has(.trace-details)),
+:global(html:has(.trace-details)) {
   overflow: hidden !important;
-}
-
-.histogram-container .trace-content-scroll {
-  flex: 1 !important;
-  max-width: 100% !important;
-}
-
-.histogram-container-full .trace-content-scroll {
-  flex: 1 !important;
-  max-width: 100% !important;
-}
-
-.trace-content-scroll {
-  overflow-y: auto !important;
-  overflow-x: hidden !important;
-  min-height: 0 !important;
-  scrollbar-gutter: stable !important;
-}
-
-.trace-details {
-  .q-splitter__before,
-  .q-splitter__after {
-    overflow: revert !important;
-  }
-
-  .q-splitter__before {
-    z-index: 999 !important;
-  }
-
-  .trace-details-chart {
-    .rangeslider-slidebox {
-      fill: #7076be !important;
-      opacity: 0.3 !important;
-    }
-    .rangeslider-mask-max,
-    .rangeslider-mask-min {
-      fill: #d2d2d2 !important;
-      fill-opacity: 0.15 !important;
-    }
-    .rangeslider-grabber {
-      fill: #7076be !important;
-      stroke: #ffffff !important;
-      stroke-width: 2 !important;
-      opacity: 1 !important;
-    }
-    .rangeslider-grabber:hover {
-      fill: #5a5fa0 !important;
-      cursor: ew-resize !important;
-    }
-    // Enhance the line graph (trace duration) visibility
-    .trace {
-      stroke-width: 2 !important;
-      opacity: 0.8 !important;
-    }
-    .scatterlayer .trace {
-      opacity: 1 !important;
-    }
-  }
-
-  .visual-selection-btn {
-    .q-icon {
-      padding-right: 5px;
-      font-size: 15px;
-    }
-  }
-
-  .visual-selector-container {
-    backdrop-filter: blur(0.625rem);
-    border-radius: 0.25rem;
-    border: 0.0625rem solid var(--o2-border-color);
-  }
-
-  .trace-combined-header-wrapper {
-    padding: 0.375rem;
-    margin-bottom: 0.625rem;
-    flex-shrink: 0;
-  }
-
-  .trace-combined-header-wrapper.bg-white {
-    // background: rgba(240, 240, 245, 0.8);
-    // border: 0.125rem solid rgba(100, 100, 120, 0.3);
-  }
-  .chart-container-inner {
-    min-height: 12.5rem;
-    overflow: hidden;
-  }
-
-  .trace-chart-height {
-    height: 12.5rem !important;
-    min-height: 12.5rem !important;
-  }
-}
-
-.no-select {
-  user-select: none !important;
-  -moz-user-select: none !important;
-  -webkit-user-select: none !important;
-  -ms-user-select: none !important;
-}
-
-.trace-copy-icon {
-  &:hover {
-    &.q-icon {
-      text-shadow: 0px 2px 8px rgba(0, 0, 0, 0.5);
-    }
-  }
-}
-
-.trace-logs-selector {
-  .q-field {
-    border-radius: 0.2rem 0 0 0.2rem;
-
-    span {
-      display: inline-block;
-      width: 180px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      text-align: left;
-    }
-
-    .q-field__control {
-      border-radius: 0.2rem 0 0 0.2rem !important;
-    }
-
-    .q-field__control:before,
-    .q-field__control:after {
-      border: none !important;
-    }
-  }
-}
-
-.log-stream-search-input {
-  .q-field {
-    height: 1.875rem !important;
-    min-height: 1.875rem !important;
-  }
-
-  .q-field .q-field__control {
-    padding: 0px 4px;
-    border-radius: 0.2rem;
-  }
-
-  .q-field .q-field__control:before,
-  .q-field .q-field__control:after {
-    border: none !important;
-    content: none !important;
-  }
-
-  .q-field {
-    &.showLabelOnTop {
-      padding-top: 26px;
-    }
-
-    .q-field__inner {
-      align-self: center;
-      height: 1.875rem !important;
-      min-height: 1.875rem !important;
-    }
-
-    .q-field__control {
-      height: 1.875rem !important;
-      min-height: 1.875rem !important;
-      background-color: var(--o2-page-bg);
-      border: 1px solid var(--o2-border-color);
-      padding: 0 0.5rem !important;
-
-      .q-field__control-container {
-        height: calc(100% - 1px) !important;
-        padding-top: 0px;
-
-        .q-field__native {
-          min-height: calc(100% - 2px) !important;
-          height: 1.875rem !important;
-        }
-
-        .q-field__label {
-          top: 8px;
-        }
-      }
-
-      .q-field__marginal {
-        height: 1.875rem !important;
-
-        .q-icon {
-          font-size: 1.125rem;
-        }
-      }
-    }
-
-    &.q-field--dark .q-field__control {
-      background-color: var(--o2-dark-page-bg);
-    }
-
-    .q-field__bottom {
-      padding: 0.1rem 0 0;
-      min-height: fit-content !important;
-    }
-  }
-}
-
-// Unified Search Group - input and navigation as one element
-.unified-search-group {
-  display: flex;
-  align-items: stretch;
-  width: fit-content;
-  border-radius: 0.2rem;
-  overflow: hidden;
-  border: 0.0625rem solid var(--o2-border-color);
-  background-color: var(--o2-page-bg);
-  transition: border-color 0.2s ease;
-
-  &:hover,
-  &:focus-within {
-    border-color: var(--o2-theme-color);
-  }
-
-  // Remove borders from child elements
-  .log-stream-search-input {
-    border: none;
-
-    .q-field {
-      .q-field__control {
-        border: none !important;
-        border-radius: 0 !important;
-        box-shadow: none !important;
-
-        &:before,
-        &:after {
-          border: none !important;
-        }
-      }
-    }
-  }
-}
-
-// Search Navigation Container - integrated with input
-.search-navigation-container {
-  display: inline-flex;
-  align-items: center;
-  height: 1.875rem;
-  border-left: 0.0625rem solid var(--o2-border-color);
-  background-color: transparent;
-  padding: 0 0.125rem;
-  transition: all 0.2s ease;
-
-  .search-results-counter {
-    display: flex;
-    align-items: center;
-    font-size: 0.75rem;
-    font-weight: 500;
-    padding: 0 0.25rem;
-    gap: 0.0625rem;
-    user-select: none;
-
-    .counter-separator {
-      color: var(--o2-text-secondary);
-      margin: 0 0.125rem;
-    }
-
-    .counter-total,
-    .counter-current {
-      color: var(--o2-text-secondary);
-    }
-  }
-
-  .navigation-buttons {
-    display: flex;
-    align-items: center;
-    height: 100%;
-    margin-left: 0.25rem;
-
-    .button-separator {
-      width: 0.0625rem;
-      height: 1.125rem;
-      background-color: var(--o2-border-color);
-      margin: 0 0.125rem;
-    }
-
-    .nav-btn {
-      min-width: 1.25rem;
-      height: 1.25rem;
-      padding: 0;
-      border-radius: 0.125rem;
-      transition: all 0.2s ease;
-
-      .q-icon {
-        font-size: 1.125rem;
-      }
-
-      &:hover:not(:disabled) {
-        background-color: var(--o2-hover-accent);
-      }
-
-      &:disabled {
-        opacity: 0.4;
-      }
-    }
-  }
-}
-
-// Dark mode support
-body.body--dark {
-  .unified-search-group {
-    background-color: var(--o2-dark-page-bg);
-
-    &:hover,
-    &:focus-within {
-      border-color: var(--o2-theme-color);
-    }
-  }
-
-  .search-navigation-container {
-    &:hover {
-      border-color: var(--o2-theme-color);
-    }
-  }
-}
-
-.traces-view-logs-btn {
-  height: 1.875rem;
-  margin-left: -1px;
-  border-top-left-radius: 0 !important;
-  border-bottom-left-radius: 0 !important;
-  border-top-right-radius: 0.2rem !important;
-  border-bottom-right-radius: 0.2rem !important;
-}
-
-.traces-view-logs-btn,
-.traces-view-session-replay-btn {
-  .q-btn__content {
-    span {
-      font-size: 12px;
-    }
-  }
-}
-
-.custom-height {
-  height: 30px;
-}
-
-.trace-search-container {
-  border-radius: 0.5rem;
-}
-
-.q-menu .q-item.q-item--active {
-  background-color: rgba(25, 118, 210, 0.2) !important;
-  font-weight: 600 !important;
-}
-
-.q-dark .q-menu .q-item.q-item--active {
-  background-color: rgba(144, 202, 249, 0.2) !important;
-}
-
-.q-menu .q-item.q-manual-focusable--focused {
-  background-color: rgba(25, 118, 210, 0.1) !important;
-}
-
-.q-dark .q-menu .q-item.q-manual-focusable--focused {
-  background-color: rgba(144, 202, 249, 0.1) !important;
-}
-
-.trace-back-btn {
-  border: 0.09375rem solid;
-  border-radius: 50%;
-  width: 1.375rem;
-  height: 1.375rem;
-}
-
-.custom-height .q-field__control,
-.custom-height .q-field__append {
-  height: 100%; /* Ensures the input control fills the container height */
-  line-height: 36px; /* Vertically centers the text inside */
-}
-.resize::after {
-  content: " ";
-  position: absolute;
-  height: 100%;
-  left: -10px;
-  right: -10px;
-  top: 0;
-  bottom: 0;
-  z-index: 999;
-}
-</style>
-
-<style lang="scss">
-.trace-details-view-tabs {
-  .o2-tabs .active {
-    background-color: transparent !important;
-    color: var(--q-primary) !important;
-    border-color: var(--q-primary) !important;
-  }
 }
 </style>

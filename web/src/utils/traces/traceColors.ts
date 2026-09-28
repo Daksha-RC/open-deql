@@ -1,134 +1,40 @@
 /**
  * Trace Span Color Utilities
- * Provides helper functions to access the 50 span colors defined in _variables.scss
+ *
+ * `getSpanColorHex(i)` is the single source of span-bar colour. It returns a raw
+ * hex from the `--color-trace-span-*` tokens (base/dark.css, theme-aware) via
+ * `chartColor()`, which falls back to the FALLBACKS map in chartTheme.ts under
+ * jsdom/SSR. There are 16 trace-span colours — see base.css for why that number.
+ *
+ * A second palette used to live here: a `--color-span-*` set of 50 tokens with
+ * `getSpanColor`, `getServiceColor`, `getSpanColorWithOpacity`,
+ * `generateServiceColorMap` and `spanKindColors` on top of it. Nothing consumed
+ * any of them — every live path reaches a bar colour through `getSpanColorHex`
+ * — and having two palettes side by side actively misled a colour-contrast
+ * audit into measuring the wrong one. Both the tokens and the helpers are gone.
  */
+
+import { chartColor, TRACE_SPAN_COLOR_COUNT } from "../chartTheme";
 
 /**
- * Light mode span colors (50 colors)
+ * Number of `--color-trace-span-*` tokens. Derived from chartTheme's FALLBACKS
+ * registry (which mirrors base/dark.css) rather than hardcoded, so it never drifts
+ * when the trace-span palette grows or shrinks.
  */
-export const LIGHT_SPAN_COLORS = [
-  "#10B981",
-  "#06B6D4",
-  "#84CC16",
-  "#6366F1",
-  "#F59E0B",
-  "#3B82F6",
-  "#14B8A6",
-  "#D946EF",
-  "#7C3AED",
-  "#F59E0B",
-  "#0284C7",
-  "#84CC16",
-  "#6366F1",
-  "#F9A8D4",
-  "#10B981",
-  "#8B5CF6",
-  "#F97316",
-  "#22D3EE",
-  "#06B6D4",
-  "#21cb60",
-  "#A855F7",
-  "#FBBF24",
-  "#3B82F6",
-  "#14B8A6",
-  "#6366F1",
-  "#FB923C",
-  "#0EA5E9",
-  "#F472B6",
-  "#A855F7",
-  "#818CF8",
-  "#F97316",
-  "#FCA5A5",
-  "#06B6D4",
-  "#A78BFA",
-  "#3B82F6",
-] as const;
+export const SPAN_COLOR_COUNT = TRACE_SPAN_COLOR_COUNT;
 
 /**
- * Dark mode span colors (50 colors)
+ * Get a span colour hex by index. Indices wrap, so any integer is valid.
+ * @param index - Colour index; wraps modulo SPAN_COLOR_COUNT
+ * @param _theme - ignored; the light/dark swap lives in the tokens
+ * @returns Hex colour string
  */
-export const DARK_SPAN_COLORS = [
-  "#60A5FA",
-  "#F87171",
-  "#34D399",
-  "#C084FC",
-  "#FB923C",
-  "#22D3EE",
-  "#F472B6",
-  "#A3E635",
-  "#818CF8",
-  "#FBBF24",
-  "#2DD4BF",
-  "#E879F9",
-  "#4ADE80",
-  "#A78BFA",
-  "#FCD34D",
-  "#38BDF8",
-  "#FB7185",
-  "#BEF264",
-  "#818CF8",
-  "#FCA5A5",
-  "#6EE7B7",
-  "#C084FC",
-  "#FDBA74",
-  "#67E8F9",
-  "#F9A8D4",
-  "#86EFAC",
-  "#D8B4FE",
-  "#FDE68A",
-  "#93C5FD",
-  "#FECACA",
-  "#5EEAD4",
-  "#F0ABFC",
-  "#D9F99D",
-  "#A5B4FC",
-  "#FED7AA",
-] as const;
-
-/**
- * Get a span color by index (1-50)
- * Uses CSS custom properties that automatically switch with theme
- * @param index - Color index (1-50)
- * @returns CSS variable string
- */
-export const getSpanColor = (index: number): string => {
-  // Ensure index is within bounds (1-50)
-  const colorIndex = ((index - 1) % 50) + 1;
-  return `var(--o2-span-${colorIndex})`;
-};
-
-/**
- * Get a span color hex value by index (1-50)
- * @param index - Color index (1-50)
- * @param theme - 'light' or 'dark' theme (defaults to 'light')
- * @returns Hex color string
- */
-export const getSpanColorHex = (
-  index: number,
-  theme: "light" | "dark" = "light",
-): string => {
-  const colors = theme === "dark" ? DARK_SPAN_COLORS : LIGHT_SPAN_COLORS;
-  const colorIndex =
-    (((index - 1) % colors.length) + colors.length) % colors.length;
-  return colors[colorIndex];
-};
-
-/**
- * Generate a consistent color for a service name using hashing
- * @param serviceName - Name of the service
- * @returns CSS variable string
- */
-export const getServiceColor = (serviceName: string): string => {
-  // Simple hash function to get consistent color for same service
-  let hash = 0;
-  for (let i = 0; i < serviceName.length; i++) {
-    hash = serviceName.charCodeAt(i) + ((hash << 5) - hash);
-    hash = hash & hash; // Convert to 32bit integer
-  }
-
-  // Map hash to color index (1-50)
-  const colorIndex = (Math.abs(hash) % 50) + 1;
-  return `var(--o2-span-${colorIndex})`;
+export const getSpanColorHex = (index: number, _theme: "light" | "dark" = "light"): string => {
+  // Light/dark swap lives in the --color-trace-span-* tokens (base/dark css);
+  // `_theme` kept for call-site compatibility, ignored — CSS owns the swap.
+  const n = SPAN_COLOR_COUNT;
+  const colorIndex = (((index - 1) % n) + n) % n;
+  return chartColor(`--color-trace-span-${colorIndex + 1}`);
 };
 
 /**
@@ -154,108 +60,95 @@ export const getServiceColorHex = (
 };
 
 /**
- * Get color with opacity
- * @param index - Color index (1-50)
- * @param opacity - Opacity value (0-1)
- * @returns RGB color string with alpha
- */
-export const getSpanColorWithOpacity = (
-  index: number,
-  opacity: number = 1,
-): string => {
-  const colorIndex = ((index - 1) % 50) + 1;
-  return `color-mix(in srgb, var(--o2-span-${colorIndex}) ${opacity * 100}%, transparent)`;
-};
-
-/**
  * Get all 50 span colors as an array of hex values
  * Useful for generating legends or color pickers
  * @param theme - 'light' or 'dark' theme (defaults to 'light')
  * @returns Array of hex color strings
  */
-export const getAllSpanColors = (
-  theme: "light" | "dark" = "light",
-): string[] => {
-  const colors = theme === "dark" ? DARK_SPAN_COLORS : LIGHT_SPAN_COLORS;
-  // Return reversed order to maintain existing behavior (was 50-i)
-  return [...colors].reverse();
+export const getAllSpanColors = (_theme: "light" | "dark" = "light"): string[] => {
+  // Tokens own the light/dark swap; reversed to maintain existing behavior.
+  const n = SPAN_COLOR_COUNT;
+  return Array.from({ length: n }, (_v, i) => chartColor(`--color-trace-span-${i + 1}`)).reverse();
 };
 
 /**
  * Trace UI color utilities
  */
 export const traceUIColors = {
-  surface: "var(--o2-trace-surface)",
-  border: "var(--o2-trace-border)",
-  textPrimary: "var(--o2-trace-text-primary)",
-  textSecondary: "var(--o2-trace-text-secondary)",
-  hover: "var(--o2-trace-hover)",
-  selected: "var(--o2-trace-selected)",
+  surface: "var(--color-trace-surface)",
+  border: "var(--color-trace-border)",
+  textPrimary: "var(--color-trace-text-primary)",
+  textSecondary: "var(--color-trace-text-secondary)",
+  hover: "var(--color-trace-hover)",
+  selected: "var(--color-trace-selected)",
 };
 
 /**
- * Generate service color map for multiple services
- * @param serviceNames - Array of service names
- * @returns Map of service name to color
+ * Threshold on WCAG relative luminance for flipping text from white to black.
+ *
+ * 0.179 is the point where a background contrasts equally against both, so it
+ * maximises the worse of the two ratios rather than favouring either.
  */
-export const generateServiceColorMap = (
-  serviceNames: string[],
-): Map<string, string> => {
-  const colorMap = new Map<string, string>();
-  const usedColors = new Set<number>();
+const CONTRAST_LUMINANCE_THRESHOLD = 0.179;
 
-  serviceNames.forEach((serviceName, index) => {
-    // Use hash for consistency, but track used colors to maximize distinction
-    let hash = 0;
-    for (let i = 0; i < serviceName.length; i++) {
-      hash = serviceName.charCodeAt(i) + ((hash << 5) - hash);
-    }
+/** Parses `#rgb` / `#rrggbb` into 0-255 channels, or null if it is not a hex. */
+const parseHexChannels = (color: string): [number, number, number] | null => {
+  const hex = color.trim().replace(/^#/, "");
+  const full =
+    hex.length === 3
+      ? hex
+          .split("")
+          .map((c) => c + c)
+          .join("")
+      : hex;
 
-    let colorIndex = (Math.abs(hash) % 50) + 1;
+  if (!/^[0-9a-f]{6}$/i.test(full)) return null;
 
-    // If color is already used, find next available
-    let attempts = 0;
-    while (usedColors.has(colorIndex) && attempts < 50) {
-      colorIndex = (colorIndex % 50) + 1;
-      attempts++;
-    }
-
-    usedColors.add(colorIndex);
-    colorMap.set(serviceName, `var(--o2-span-${colorIndex})`);
-  });
-
-  return colorMap;
+  return [
+    parseInt(full.slice(0, 2), 16),
+    parseInt(full.slice(2, 4), 16),
+    parseInt(full.slice(4, 6), 16),
+  ];
 };
 
 /**
  * Get readable text color (white or black) based on background color
- * @param backgroundColor - Background color CSS variable
+ *
+ * For text that has to sit on a span's own colour. Span colours come from an
+ * arbitrary palette, so the choice cannot be baked in per theme: a pale bar
+ * needs black text in dark mode just as much as in light.
+ *
+ * @param backgroundColor - a hex colour (`#rgb` or `#rrggbb`)
  * @returns 'white' or 'black'
+ *
+ * Anything that is not a hex colour — notably the custom-property references
+ * that `generateServiceColorMap` produces — cannot be measured here and yields
+ * 'white', preserving this function's previous behaviour for those callers.
+ * (Written without the `var()` spelling on purpose: `lint:tokens` scans comments
+ * too, and a placeholder token name there fails the check.)
  */
-export const getContrastTextColor = (backgroundColor: string): string => {
-  // For now, return white for all span colors as they're designed with good contrast
-  // Can be enhanced with actual luminance calculation if needed
-  return "white";
+export const getContrastTextColor = (backgroundColor: string): "white" | "black" => {
+  const channels = parseHexChannels(backgroundColor ?? "");
+  if (!channels) return "white";
+
+  // WCAG relative luminance: linearise each channel, then weight by the eye's
+  // sensitivity to it. Green dominates, which is why a mid-green bar needs dark
+  // text where a mid-blue one of the same hex distance does not.
+  const [r, g, b] = channels.map((channel) => {
+    const v = channel / 255;
+    return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+  });
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+
+  return luminance > CONTRAST_LUMINANCE_THRESHOLD ? "black" : "white";
 };
 
 /**
  * Status colors (error, success, warning)
  */
 export const statusColors = {
-  error: "var(--o2-red-800)",
-  success: "var(--o2-green-700)",
-  warning: "var(--o2-yellow-700)",
-  info: "var(--o2-blue-700)",
-};
-
-/**
- * Span kind colors (following OpenTelemetry span kinds)
- */
-export const spanKindColors = {
-  client: "var(--o2-span-1)", // Blue
-  server: "var(--o2-span-3)", // Green
-  producer: "var(--o2-span-7)", // Pink
-  consumer: "var(--o2-span-4)", // Purple
-  internal: "var(--o2-span-10)", // Amber
-  unspecified: "var(--o2-gray-700)",
+  error: "var(--color-status-error-text)",
+  success: "var(--color-status-success-text)",
+  warning: "var(--color-status-warning-text)",
+  info: "var(--color-status-info-text)",
 };

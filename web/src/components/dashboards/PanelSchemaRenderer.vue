@@ -16,19 +16,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <template>
   <div
-    style="width: 100%; height: 100%"
+    class="h-full w-full"
     @mouseleave="hidePopupsAndOverlays"
     @mouseenter="showPopupsAndOverlays"
   >
-    <div
-      ref="chartPanelRef"
-      style="height: 100%; position: relative"
-      :class="chartPanelClass"
-    >
-      <div
-        v-if="!errorDetail?.message"
-        :style="{ height: chartPanelHeight, width: '100%' }"
-      >
+    <div class="relative h-full" ref="chartPanelRef" :class="chartPanelClass">
+      <div v-if="!errorDetail?.message" :style="{ height: chartPanelHeight, width: '100%' }">
         <MapsRenderer
           v-if="panelSchema.type == 'maps'"
           :data="panelData.chartType == 'maps' ? panelData : { options: {} }"
@@ -42,39 +35,36 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           "
         />
         <PromQLTableChart
-          v-else-if="
-            panelSchema.type == 'table' && panelSchema.queryType === 'promql'
-          "
+          v-else-if="panelSchema.type == 'table' && panelSchema.queryType === 'promql'"
           ref="tableRendererRef"
           :data="tableRendererData"
           :config="panelSchema.config"
+          :enable-filtering="!!panelSchema.config?.table_filtering && !store.state.printMode"
           @row-click="onChartClick"
         />
         <TableRenderer
           v-else-if="panelSchema.type == 'table'"
-          :data="
-            panelData.chartType == 'table'
-              ? panelData
-              : { options: { backgroundColor: 'transparent' } }
-          "
+          :data="tableRendererData"
           :value-mapping="panelSchema?.config?.mappings ?? []"
           @row-click="onChartClick"
+          @explore-cell="(params) => exploreCellInLogs(params.columnId, params.value, params.row)"
+          @format-column="onFormatColumn"
           ref="tableRendererRef"
           :wrap-cells="panelSchema.config?.wrap_table_cells"
-          :show-pagination="
-            panelSchema.config?.table_pagination && !store.state.printMode
-          "
+          :show-pagination="panelSchema.config?.table_pagination && !store.state.printMode"
           :rows-per-page="panelSchema.config?.table_pagination_rows_per_page"
+          :enable-filtering="!!panelSchema.config?.table_filtering && !store.state.printMode"
+          :enable-column-format="enableColumnFormat"
+          :drilldown-columns="store.state.printMode ? [] : drilldownColumnAliases"
+          :drilldown-all-columns="!store.state.printMode && drilldownAllColumns"
         />
         <div
           v-else-if="panelSchema.type == 'html'"
-          class="col column"
-          style="width: 100%; height: 100%; flex: 1"
+          class="column flex h-full w-full flex-1 flex-col"
         >
           <HTMLRenderer
             :htmlContent="panelSchema.htmlContent"
-            style="width: 100%; height: 100%"
-            class="col"
+            class="flex h-full w-full flex-col"
             :variablesData="currentVariablesData || variablesData"
             :tabId="tabId"
             :panelId="panelSchema.id"
@@ -82,13 +72,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         </div>
         <div
           v-else-if="panelSchema.type == 'markdown'"
-          class="col column"
-          style="width: 100%; height: 100%; flex: 1"
+          class="column flex h-full w-full flex-1 flex-col"
         >
           <MarkdownRenderer
             :markdownContent="panelSchema.markdownContent"
-            style="width: 100%; height: 100%"
-            class="col"
+            class="flex h-full w-full flex-col"
             :variablesData="currentVariablesData || variablesData"
             :tabId="tabId"
             :panelId="panelSchema.id"
@@ -98,61 +86,103 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         <CustomChartRenderer
           v-else-if="panelSchema.type == 'custom_chart'"
           :data="panelData"
-          style="width: 100%; height: 100%"
-          class="col"
+          class="flex h-full w-full flex-col"
           @error="errorDetail = $event"
         />
         <ChartRenderer
           v-else
           ref="chartRendererRef"
-          :data="
-            panelSchema.queryType === 'promql' ||
-            (panelData.chartType != 'geomap' &&
-              panelData.chartType != 'table' &&
-              panelData.chartType != 'maps' &&
-              loading)
-              ? panelData
-              : noData == 'No Data'
-                ? {
-                    options: {
-                      backgroundColor: 'transparent',
-                    },
-                  }
-                : panelData
-          "
+          :data="chartRendererData"
           :height="chartPanelHeight"
+          :render-type="panelSchema?.type === 'metric' ? 'svg' : 'canvas'"
           @updated:data-zoom="onDataZoom"
           @error="errorDetail = $event"
           @click="onChartClick"
           @contextmenu="onChartContextMenu"
           @domcontextmenu="onChartDomContextMenu"
+          @mouseover="exemplarInteraction.onMouseOver"
+          @mouseout="exemplarInteraction.onMouseOut"
+          @finished="onChartFinished"
+        />
+        <ExemplarMarkerList
+          v-if="exemplarPoints.length"
+          :points="exemplarPoints"
+          :timezone="store.state.timezone"
+          :format-value="formatExemplarValue"
+          @focus-marker="(point) => exemplarInteraction.openCard(point.marker, true)"
+          @activate-marker="(point) => exemplarInteraction.follow(point.marker)"
+        />
+        <ExemplarCard
+          v-if="exemplarActiveMarker"
+          :marker="exemplarActiveMarker"
+          :query-labels="exemplarQueryLabels"
+          :unit="exemplarActiveUnit.unit"
+          :unit-custom="exemplarActiveUnit.unitCustom ?? undefined"
+          :decimals="panelSchema.config?.decimals"
+          :timezone="store.state.timezone"
+          :verdict="exemplarVerdict"
+          :anchor="exemplarCardAnchor"
+          :clamped="exemplarActiveClamp"
+          @enter="exemplarInteraction.onCardEnter"
+          @leave="exemplarInteraction.onCardLeave"
+          @open-trace="exemplarInteraction.openTrace"
         />
       </div>
       <div
+        v-if="metricItems.length && !noData && !loading"
+        class="pointer-events-none absolute inset-0 z-8"
+        data-test="dashboard-metric-copy-overlay"
+      >
+        <div
+          class="pointer-events-auto absolute"
+          v-for="m in metricItems"
+          :key="m.idx"
+          :style="metricZoneStyle(m)"
+          @mouseenter="hoveredMetricIdx = m.idx"
+          @mouseleave="hoveredMetricIdx = null"
+        >
+          <OButton
+            class="absolute"
+            v-show="hoveredMetricIdx === m.idx || metricCopiedIdx === m.idx"
+            variant="ghost"
+            size="icon-xs-sq"
+            :style="m.iconStyle"
+            @click="copyMetricItem(m)"
+            data-test="dashboard-metric-copy-btn"
+            :data-copied="metricCopiedIdx === m.idx ? 'true' : undefined"
+          >
+            <OIcon :name="metricCopiedIdx === m.idx ? 'check' : 'content-copy'" size="sm" />
+          </OButton>
+        </div>
+      </div>
+      <OEmptyState
         v-if="
+          noData &&
           !errorDetail?.message &&
           panelSchema.type != 'geomap' &&
           panelSchema.type != 'maps' &&
-          !loading
+          panelSchema.type != 'table' &&
+          !loading &&
+          !panelSchema.config?.curated_no_data_eligible
         "
-        class="noData"
+        size="inline"
+        icon="bar-chart"
+        :title="t('panel.noData')"
+        :backdrop="false"
         data-test="no-data"
-      >
-        {{ noData }}
-      </div>
+        class="noData [container-type:size] absolute! inset-0 h-full !min-h-0 w-full !p-2"
+      />
       <div
-        v-if="
-          errorDetail?.message &&
-          !panelSchema?.error_config?.custom_error_handeling
-        "
-        class="errorMessage"
+        v-if="errorDetail?.message && !panelSchema?.error_config?.custom_error_handeling"
+        class="absolute top-[20%] h-[80%] w-full overflow-hidden text-center text-ellipsis"
+        data-test="panel-schema-renderer-error-message"
       >
-        <q-icon size="md" name="warning" />
-        <div style="height: 80%; width: 100%">
+        <OIcon size="md" name="warning" />
+        <div class="h-4/5 w-full">
           {{
             errorDetail?.code?.toString().startsWith("4")
               ? errorDetail.message
-              : "Error Loading Data"
+              : t("common.errorLoadingData")
           }}
         </div>
       </div>
@@ -163,154 +193,48 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           !panelSchema?.error_config?.default_data_on_error &&
           panelSchema?.error_config?.custom_error_message
         "
-        class="customErrorMessage"
+        class="absolute top-[20%] h-[80%] w-full overflow-hidden text-center text-ellipsis"
+        data-test="panel-schema-renderer-custom-error-message"
       >
         {{ panelSchema?.error_config?.custom_error_message }}
       </div>
-      <div
-        class="row"
-        style="position: absolute; top: 0px; width: 100%; z-index: 999"
-      >
+      <div class="absolute top-0 z-999 flex w-full">
         <LoadingProgress
           :loading="loading"
           :loadingProgressPercentage="loadingProgressPercentage"
         />
       </div>
+
       <div
-        v-if="isCursorOverPanel"
-        class="flex items-center q-gutter-x-xs"
-        style="
-          position: absolute;
-          top: 0px;
-          right: 0px;
-          z-index: 9;
-          padding-right: 2px;
-          padding-top: 2px;
-        "
-        @click.stop
-      >
-        <q-btn
-          v-if="
-            showLegendsButton &&
-            noData !== 'No Data' &&
-            ![
-              'table',
-              'html',
-              'markdown',
-              'custom_chart',
-              'geomap',
-              'maps',
-              'heatmap',
-              'metric',
-              'gauge',
-            ].includes(panelSchema.type)
-          "
-          color="primary"
-          icon="format_list_bulleted"
-          round
-          outline
-          size="sm"
-          @click="$emit('show-legends')"
-          class="el-border"
-        >
-          <q-tooltip anchor="top middle" self="bottom right">
-            Show Legends
-          </q-tooltip>
-        </q-btn>
-        <q-btn
-          v-if="
-            [
-              'area',
-              'area-stacked',
-              'bar',
-              'h-bar',
-              'line',
-              'scatter',
-              'stacked',
-              'h-stacked',
-            ].includes(panelSchema.type) &&
-            checkIfPanelIsTimeSeries === true &&
-            allowAnnotationsAdd &&
-            !viewOnly
-          "
-          color="primary"
-          :icon="isAddAnnotationMode ? 'cancel' : 'edit'"
-          round
-          outline
-          size="sm"
-          @click="toggleAddAnnotationMode"
-          class="el-border"
-        >
-          <q-tooltip anchor="top middle" self="bottom right">
-            {{
-              isAddAnnotationMode ? "Exit Annotations Mode" : "Add Annotations"
-            }}
-          </q-tooltip>
-        </q-btn>
-      </div>
-      <div
-        class="crosslink-drilldown-menu"
-        :class="{
-          'crosslink-drilldown-menu--dark': store.state.theme === 'dark',
-        }"
+        class="rounded-default border-dropdown-border bg-dropdown-bg absolute top-0 left-0 z-9999999 hidden min-w-50 border px-0 py-1 whitespace-nowrap shadow-sm dark:shadow-sm"
+        data-test="drilldown-menu"
         ref="drilldownPopUpRef"
         @mouseleave="hidePopupsAndOverlays"
       >
-        <template
-          v-for="(drilldown, index) in drilldownArray"
-          :key="JSON.stringify(drilldown)"
-        >
-          <q-separator
+        <template v-for="(drilldown, index) in drilldownArray" :key="JSON.stringify(drilldown)">
+          <OSeparator
             v-if="
               drilldown._isCrossLink &&
-              index > 0 &&
-              !drilldownArray[index - 1]._isCrossLink
+              Number(index) > 0 &&
+              !drilldownArray[Number(index) - 1]._isCrossLink
             "
           />
           <div
-            class="crosslink-drilldown-menu-item"
+            class="text-dropdown-item-text hover:bg-dropdown-item-hover-bg active:bg-dropdown-item-active-bg flex cursor-pointer items-center px-4 py-2 text-sm transition-colors duration-200"
+            :data-test="`drilldown-menu-item-${drilldown.name}`"
             @click="openDrilldown(index)"
           >
-            <q-icon
-              size="xs"
-              class="q-mr-sm"
-              :name="drilldown._isCrossLink ? 'open_in_new' : 'link'"
-            />
-            <span>{{ drilldown.name }}</span>
+            <OIcon size="xs" class="me-2" :name="drilldown._isCrossLink ? 'open-in-new' : 'link'" />
+            <span class="select-none">{{ drilldown.name }}</span>
           </div>
         </template>
       </div>
       <div
-        style="
-          border: 1px solid gray;
-          border-radius: 4px;
-          padding: 3px;
-          position: absolute;
-          top: 0px;
-          left: 0px;
-          display: none;
-          max-width: 200px;
-          white-space: normal;
-          word-wrap: break-word;
-          overflow-wrap: break-word;
-          z-index: 9999999;
-        "
-        :class="store.state.theme === 'dark' ? 'bg-dark' : 'bg-white'"
+        class="border-border-default rounded-default bg-surface-base absolute top-0 left-0 z-9999999 hidden max-w-50 border p-0.75 [overflow-wrap:break-word] whitespace-normal [word-wrap:break-word]"
         ref="annotationPopupRef"
       >
-        <div
-          class="q-px-sm q-py-xs"
-          style="
-            display: flex;
-            flex-direction: row;
-            align-items: center;
-            position: relative;
-            word-break: break-word;
-          "
-        >
-          <span style="word-break: break-word">{{
-            selectedAnnotationData.text
-          }}</span>
+        <div class="relative flex flex-row items-center px-2 py-1 break-words">
+          <span class="break-words">{{ selectedAnnotationData.text }}</span>
         </div>
       </div>
       <!-- Annotation Dialog -->
@@ -319,6 +243,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :dashboardId="dashboardId"
         :annotation="annotationToAddEdit"
         @close="closeAddAnnotation"
+        @saved="reloadAnnotations"
         :panelsList="panelsList"
       />
       <!-- Alert Context Menu -->
@@ -331,6 +256,29 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         @close="hideContextMenu"
       />
     </div>
+
+    <!-- Cell explorer drawer -->
+    <ODrawer
+      v-model:open="cellDrawer.open"
+      side="right"
+      :width="85"
+      bleed
+      :title="t('panel.logExplorer.title')"
+      data-test="dashboard-cell-explorer-drawer"
+      @update:open="onCellDrawerOpenChange"
+    >
+      <DashboardLogDrawer
+        v-if="cellDrawer.open"
+        :stream="cellDrawer.stream"
+        :stream-type="cellDrawer.streamType"
+        :field="cellDrawer.field"
+        :value="cellDrawer.value"
+        :start-time="cellDrawer.startTime"
+        :end-time="cellDrawer.endTime"
+        :base-where="cellDrawer.baseWhere"
+        @send-to-ai-chat="onCellSendToAiChat"
+      />
+    </ODrawer>
   </div>
 </template>
 
@@ -347,8 +295,12 @@ import {
   defineAsyncComponent,
   onMounted,
   onUnmounted,
+  type PropType,
 } from "vue";
 import { useStore } from "vuex";
+import { useTheme } from "@/composables/useTheme";
+import { chartColor } from "@/utils/chartTheme";
+import { raw, useI18nTyped } from "@/types/i18n";
 import { usePanelDataLoader } from "@/composables/dashboard/usePanelDataLoader";
 import { convertPanelData } from "@/utils/dashboard/convertPanelData";
 import { getDataValue } from "@/utils/dashboard/aliasUtils";
@@ -358,15 +310,29 @@ import useNotifications from "@/composables/useNotifications";
 import { validateSQLPanelFields } from "@/utils/dashboard/panelValidation";
 import { useAnnotationsData } from "@/composables/dashboard/useAnnotationsData";
 import LoadingProgress from "@/components/common/LoadingProgress.vue";
-import {
-  usePanelAlertCreation,
-  usePanelDownload,
-} from "@/composables/dashboard/usePanelActions";
+import { usePanelAlertCreation, usePanelDownload } from "@/composables/dashboard/usePanelActions";
 import { usePanelDrilldown } from "@/composables/dashboard/usePanelDrilldown";
+import { overlayNewDataOnOldOptions, isOverlayEligible } from "@/utils/dashboard/streaming";
+import { usePanelExemplars } from "@/composables/dashboard/usePanelExemplars";
+import { usePanelExemplarInteraction } from "@/composables/dashboard/usePanelExemplarInteraction";
+import { useExemplarTraceLookup } from "@/composables/dashboard/useExemplarTraceLookup";
 import {
-  overlayNewDataOnOldOptions,
-  isOverlayEligible,
-} from "@/utils/dashboard/streaming";
+  applyExemplarSeries,
+  seriesValueExtent,
+  toChartTimeMs,
+} from "@/utils/dashboard/exemplars/applyExemplarSeries";
+import { isExemplarEligible } from "@/utils/dashboard/exemplars/exemplarEligibility";
+import { buildExemplarTraceRoute } from "@/utils/dashboard/exemplars/exemplarTraceRoute";
+import {
+  exemplarBaseUnit,
+  exemplarPlacement,
+  interpolateParsed,
+  parseSeries,
+} from "@/utils/dashboard/exemplars/exemplarPlacement";
+import { formatUnitValue, getUnitValue } from "@/utils/dashboard/convertDataIntoUnitValue";
+import ExemplarCard from "@/components/dashboards/exemplars/ExemplarCard.vue";
+import ExemplarMarkerList from "@/components/dashboards/exemplars/ExemplarMarkerList.vue";
+import type { ExemplarMarker, InjectedExemplars, TraceVerdict } from "@/ts/interfaces/exemplars";
 import { detectChunkingDirection } from "@/utils/dashboard/chunkingDirection";
 
 const ChartRenderer = defineAsyncComponent(() => {
@@ -400,17 +366,31 @@ const MarkdownRenderer = defineAsyncComponent(() => {
 const AddAnnotation = defineAsyncComponent(() => {
   return import("./addPanel/AddAnnotation.vue");
 });
-const CustomChartRenderer = defineAsyncComponent(() => {
-  return import("./panels/CustomChartRenderer.vue");
-});
+// Statically imported by several route-level components, so it cannot be
+// code-split into its own chunk — import it statically to avoid the mixed
+// dynamic/static import build warning.
+import CustomChartRenderer from "./panels/CustomChartRenderer.vue";
 
 const AlertContextMenu = defineAsyncComponent(() => {
   return import("./AlertContextMenu.vue");
 });
 
+const DashboardLogDrawer = defineAsyncComponent(() => {
+  return import("./DashboardLogDrawer.vue");
+});
+
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
+import OSeparator from "@/lib/core/Separator/OSeparator.vue";
+import { copyToClipboard } from "@/utils/clipboard";
+import { calculateWidthText } from "@/utils/dashboard/chartDimensionUtils";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+
 export default defineComponent({
   name: "PanelSchemaRenderer",
   components: {
+    OSeparator,
     ChartRenderer,
     AlertContextMenu,
     TableRenderer,
@@ -422,6 +402,13 @@ export default defineComponent({
     AddAnnotation,
     CustomChartRenderer,
     LoadingProgress,
+    OButton,
+    OIcon,
+    OEmptyState,
+    ODrawer,
+    DashboardLogDrawer,
+    ExemplarCard,
+    ExemplarMarkerList,
   },
   props: {
     selectedTimeObj: {
@@ -470,6 +457,11 @@ export default defineComponent({
       required: false,
       type: Boolean,
     },
+    allowAnnotationsAPI: {
+      default: true,
+      required: false,
+      type: Boolean,
+    },
     allowAlertCreation: {
       default: false,
       required: false,
@@ -508,6 +500,11 @@ export default defineComponent({
       type: Boolean,
       default: false,
     },
+    // Table preview's per-column format icon; explicit opt-in, not derived from `viewOnly` (which tracks print mode) — only PanelEditor sets this.
+    enableColumnFormat: {
+      type: Boolean,
+      default: false,
+    },
     shouldRefreshWithoutCache: {
       type: Boolean,
       required: false,
@@ -519,6 +516,31 @@ export default defineComponent({
       default: false,
     },
     regionClusterParams: {
+      type: Object,
+      required: false,
+      default: undefined,
+    },
+    /**
+     * Pre-fetched PromQL results to render instead of the panel running its own
+     * query. `{ data, metadata?, resultMetaData? }`, where `data` is one entry
+     * per query (the shape the PromQL executor writes to `state.data`). Used by
+     * the metrics explorer, which owns the fetch lifecycle via its preview
+     * queue but still wants to render through this component. Undefined for
+     * normal dashboard panels, which fetch their own data.
+     */
+    injectedPromqlData: {
+      type: Object,
+      required: false,
+      default: undefined,
+    },
+    // A viewer's session choice; null defers to the panel's saved `show_exemplars`.
+    exemplarsOverride: {
+      type: Boolean as PropType<boolean | null>,
+      required: false,
+      default: null,
+    },
+    // Exemplar state owned by a caller that fetches them itself (the metrics explorer).
+    injectedExemplars: {
       type: Object,
       required: false,
       default: undefined,
@@ -535,13 +557,18 @@ export default defineComponent({
     "updated:vrlFunctionFieldList",
     "loading-state-change",
     "limit-number-of-series-warning-message-update",
+    "sparkline-warning-update",
     "is-partial-data-update",
     "series-data-update",
     "contextmenu",
     "show-legends",
+    "format-column",
+    "sendToAiChat",
   ],
   setup(props, { emit }) {
     const store = useStore();
+    const { isDark } = useTheme();
+    const { t } = useI18nTyped();
     const route = useRoute();
     const router = useRouter();
 
@@ -560,11 +587,6 @@ export default defineComponent({
     // - PreviewAlert.vue (no page key) - doesn't need it
     // - PanelContainer.vue (no page key) - doesn't need it
     // - PreviewPromqlQuery.vue (no page key) - doesn't need it
-    //
-    // To avoid breaking these other contexts, we:
-    // 1. Inject with null default to detect if page key was explicitly provided
-    // 2. Only call useDashboardPanelData if a page key exists
-    // 3. Return empty array [] if no hiddenQueries (no filtering applied)
     // ============================================================================
 
     const dashboardPanelDataPageKey: any = inject(
@@ -577,7 +599,7 @@ export default defineComponent({
     // wrong panel data in contexts that don't need the hiding feature
     let dashboardPanelDataForHiding: any = null;
     if (dashboardPanelDataPageKey) {
-      const result = useDashboardPanelData(dashboardPanelDataPageKey);
+      const result = useDashboardPanelData(dashboardPanelDataPageKey, t);
       dashboardPanelDataForHiding = result.dashboardPanelData;
     }
 
@@ -587,7 +609,6 @@ export default defineComponent({
       return dashboardPanelDataForHiding?.layout?.hiddenQueries || [];
     });
 
-    // stores the converted data which can be directly used for rendering different types of panels
     const panelData: any = shallowRef({}); // holds the data to render the panel after getting data from the api based on panel config
     const chartPanelRef: any = ref(null); // holds the ref to the whole div
     const chartRendererRef: any = ref(null); // holds the ref to the ChartRenderer component
@@ -608,6 +629,97 @@ export default defineComponent({
       isCursorOverPanel.value = true;
     };
 
+    // Metric chart: one copy icon per rendered value (multi-SQL renders many).
+    // Values are already unit/decimal/timestamp formatted at the metric level;
+    // _metricLayout gives the canvas pixel position so the icon sits beside it.
+    // Values whose cell has no overlap-free spot for the icon are dropped —
+    // no copy affordance beats covering the digits.
+    const metricItems = computed(() => {
+      if (props.panelSchema?.type !== "metric") return [];
+      const series = panelData.value?.options?.series ?? [];
+      return series
+        .map((s: any, idx: number) => ({
+          idx,
+          text: s?._metricText,
+          layout: s?._metricLayout,
+        }))
+        .filter((m: any) => {
+          if (!m.layout || m.text == null || String(m.text).trim() === "") return false;
+          const num = parseFloat(
+            String(m.text)
+              .replace(/,/g, "")
+              .replace(/[^0-9.eE+-]/g, ""),
+          );
+          return Number.isNaN(num) || num !== 0;
+        })
+        .map((m: any) => ({ ...m, iconStyle: metricIconStyle(m) }))
+        .filter((m: any) => m?.iconStyle !== null);
+    });
+    // Hover zone = each value's grid cell.
+    const metricZoneStyle = (m: any) => ({
+      left: `${m?.layout?.left ?? 0}px`,
+      top: `${m?.layout?.top ?? 0}px`,
+      width: `${m?.layout?.width ?? 0}px`,
+      height: `${m?.layout?.height ?? 0}px`,
+    });
+    // Fixed copy-button size (icon-xs-sq), matching the table chart.
+    const COPY_BTN_PX = 28;
+    // Icon placement: beside the value (the font fit reserves the slot),
+    // else wrapped below/above it, else docked at the right edge (tiny cells).
+    const metricIconStyle = (m: any) => {
+      const layout = m?.layout;
+      if (!layout) return null;
+      const fs = layout?.fontSize || 24;
+      const width = layout?.width ?? 0;
+      const height = layout?.height ?? 0;
+      const cxLocal = (layout?.cx ?? 0) - (layout?.left ?? 0);
+      const cyLocal = (layout?.cy ?? 0) - (layout?.top ?? 0);
+      const textWidth = calculateWidthText(String(m?.text ?? ""), `${fs}px`);
+
+      const besideLeft = cxLocal + textWidth / 2 + 2;
+      if (besideLeft + COPY_BTN_PX + 2 <= width && height >= COPY_BTN_PX) {
+        return {
+          left: `${besideLeft}px`,
+          top: `${Math.min(Math.max(cyLocal, COPY_BTN_PX / 2), height - COPY_BTN_PX / 2)}px`,
+          transform: "translateY(-50%)",
+        };
+      }
+
+      const centeredLeft = Math.max(0, Math.min(cxLocal - COPY_BTN_PX / 2, width - COPY_BTN_PX));
+      // rendered line is ~1.2em tall around the vertical center
+      const halfTextHeight = (fs * 1.2) / 2;
+      const belowTop = cyLocal + halfTextHeight + (layout?.labelClearance ?? 0) + 2;
+      if (belowTop + COPY_BTN_PX <= height) {
+        return { left: `${centeredLeft}px`, top: `${belowTop}px` };
+      }
+      const aboveTop = cyLocal - halfTextHeight - 2 - COPY_BTN_PX;
+      if (aboveTop >= 0) {
+        return { left: `${centeredLeft}px`, top: `${aboveTop}px` };
+      }
+
+      // cell too small for any clean spot — dock at the right edge with a
+      // solid background so the icon stays legible over the value's edge
+      return {
+        left: `${Math.max(0, width - COPY_BTN_PX - 2)}px`,
+        top: `${Math.max(cyLocal, COPY_BTN_PX / 2)}px`,
+        transform: "translateY(-50%)",
+        backgroundColor: (void isDark.value, chartColor("--color-surface-base")),
+        // eslint-disable-next-line local/no-hardcoded-px -- optical effect, not layout — scaling it with text makes elevation bloom
+        boxShadow: "0 0 3px rgba(0, 0, 0, 0.35)",
+      };
+    };
+    const hoveredMetricIdx = ref<number | null>(null);
+    const metricCopiedIdx = ref<number | null>(null);
+    const copyMetricItem = (m: any) => {
+      if (m?.text == null) return;
+      copyToClipboard(String(m.text), t, { silent: true }).then(() => {
+        metricCopiedIdx.value = m?.idx;
+        setTimeout(() => {
+          if (metricCopiedIdx.value === m.idx) metricCopiedIdx.value = null;
+        }, 3000);
+      });
+    };
+
     // get refs from props
     const {
       panelSchema,
@@ -619,6 +731,7 @@ export default defineComponent({
       folderId,
       reportId,
       allowAnnotationsAdd,
+      allowAnnotationsAPI,
       allowAlertCreation,
       runId,
       tabId,
@@ -628,8 +741,10 @@ export default defineComponent({
       searchResponse,
       is_ui_histogram,
       shouldRefreshWithoutCache,
-      showLegendsButton,
       regionClusterParams,
+      injectedPromqlData,
+      exemplarsOverride,
+      injectedExemplars,
     } = toRefs(props);
     // calls the apis to get the data based on the panel config
     let {
@@ -638,12 +753,15 @@ export default defineComponent({
       errorDetail,
       metadata,
       resultMetaData,
+      sparklineData,
+      sparklineWarning,
       annotations,
       lastTriggeredAt,
       isCachedDataDifferWithCurrentTimeRange,
       searchRequestTraceIds,
       loadingProgressPercentage,
       isPartialData,
+      reloadAnnotations,
     } = usePanelDataLoader(
       panelSchema,
       selectedTimeObj,
@@ -663,6 +781,8 @@ export default defineComponent({
       folderName,
       shouldRefreshWithoutCache,
       regionClusterParams,
+      allowAnnotationsAPI,
+      injectedPromqlData,
     );
 
     const {
@@ -681,6 +801,7 @@ export default defineComponent({
       dashboardId.value,
       panelSchema.value.id,
       folderId.value,
+      t,
     );
 
     // Filter data based on hiddenQueries for PromQL panels
@@ -690,27 +811,44 @@ export default defineComponent({
         return data.value;
       }
 
-      // Only filter for PromQL queries
-      if (panelSchema.value.queryType !== "promql") {
-        return data.value;
-      }
-
       // If no hidden queries or empty array, return as is
-      if (
-        !hiddenQueries.value ||
-        hiddenQueries.value.length === 0 ||
-        !Array.isArray(data.value)
-      ) {
+      if (!hiddenQueries.value || hiddenQueries.value.length === 0 || !Array.isArray(data.value)) {
         return data.value;
       }
 
-      // Filter out hidden queries
+      // Filter out hidden queries by index (works for both SQL and PromQL)
       const filtered = data.value.filter(
         (_: any, index: number) => !hiddenQueries.value.includes(index),
       );
 
-      // Return filtered data
       return filtered;
+    });
+
+    // Keep metric sparkline hits index-aligned with filteredData (same filter).
+    const filteredSparklineData = computed(() => {
+      const sd = sparklineData?.value;
+      if (!Array.isArray(sd)) return sd;
+      if (!hiddenQueries.value || hiddenQueries.value.length === 0) return sd;
+      return sd.filter((_: any, index: number) => !hiddenQueries.value.includes(index));
+    });
+
+    // Also filter panelSchema.queries in sync with filteredData
+    // to keep data[i] aligned with queries[i] in convertMultiSQLData
+    const filteredPanelSchema = computed(() => {
+      if (
+        panelSchema.value.queryType === "promql" ||
+        !hiddenQueries.value?.length ||
+        !Array.isArray(panelSchema.value.queries)
+      ) {
+        return panelSchema.value;
+      }
+
+      return {
+        ...panelSchema.value,
+        queries: panelSchema.value.queries.filter(
+          (_: any, i: number) => !hiddenQueries.value.includes(i),
+        ),
+      };
     });
 
     // The latest metadata chunk's time_offset.start_time (┬╡s) marks the left boundary
@@ -755,6 +893,205 @@ export default defineComponent({
       return { boundaryTime, queryStart, queryEnd, isLTR };
     });
 
+    const exemplarsEligible = computed(() => isExemplarEligible(panelSchema.value as any));
+    const exemplarsEnabled = computed(
+      () => exemplarsOverride.value ?? !!panelSchema.value?.config?.show_exemplars,
+    );
+    const exemplarRequestMeta = computed(() => ({
+      dashboard_id: dashboardId.value || undefined,
+      dashboard_name: dashboardName.value || undefined,
+      folder_id: folderId.value || undefined,
+      folder_name: folderName.value || undefined,
+      panel_id: panelSchema.value?.id,
+      panel_name: panelSchema.value?.title,
+      run_id: runId.value || undefined,
+      tab_id: tabId.value || undefined,
+      tab_name: tabName.value || undefined,
+    }));
+    const {
+      status: exemplarsStatus,
+      markers: exemplarMarkers,
+      errorMessage: exemplarsError,
+      retry: retryExemplars,
+    } = usePanelExemplars({
+      panelSchema: panelSchema as any,
+      metadata: metadata as any,
+      enabled: exemplarsEnabled,
+      hiddenQueries,
+      injected: injectedExemplars as any,
+      meta: exemplarRequestMeta,
+    });
+    const exemplarsCount = computed(() => exemplarMarkers.value.length);
+
+    const toExemplarChartX = (tsMs: number) => toChartTimeMs(tsMs, store.state.timezone);
+    const exemplarSeriesExtent = computed<[number, number]>(() =>
+      seriesValueExtent(
+        Array.isArray(filteredData.value) ? filteredData.value : [],
+        panelSchema.value?.config?.y_axis_min,
+        panelSchema.value?.config?.y_axis_max,
+      ),
+    );
+    const exemplarWindowMs = computed<[number, number]>(() => {
+      const first = metadata.value?.queries?.[0];
+      const start = Number(first?.startTime) / 1000;
+      const end = Number(first?.endTime) / 1000;
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return [NaN, NaN];
+      return [toExemplarChartX(start), toExemplarChartX(end)];
+    });
+    const navigateToExemplarTrace = (marker: ExemplarMarker, verdict: TraceVerdict) => {
+      const target = buildExemplarTraceRoute(
+        marker,
+        verdict,
+        store.state.selectedOrganization?.identifier,
+      );
+      if (target) router.push(target).catch(() => {});
+    };
+    const exemplarQueryText = (index: number): string =>
+      String(
+        metadata.value?.queries?.[index]?.query ?? panelSchema.value?.queries?.[index]?.query ?? "",
+      );
+    const exemplarValueUnits = computed(() =>
+      (panelSchema.value?.queries ?? []).map((_: unknown, index: number) => {
+        const injected = injectedExemplars.value as InjectedExemplars | undefined;
+        if (injected?.valueUnit) {
+          return { unit: injected.valueUnit, unitCustom: injected.valueUnitCustom ?? null };
+        }
+        return exemplarBaseUnit(exemplarQueryText(index));
+      }),
+    );
+    const exemplarPlacements = computed(() =>
+      exemplarValueUnits.value.map((unit: { unit: string }, index: number) =>
+        exemplarPlacement(exemplarQueryText(index), panelSchema.value?.config?.unit, unit as any),
+      ),
+    );
+    const exemplarLineSeries = computed(() =>
+      (Array.isArray(filteredData.value) ? filteredData.value : []).map((query: any) =>
+        parseSeries(query?.result?.[0]?.values),
+      ),
+    );
+    // Every chart paint re-asks for each marker's y, so it is computed once per data or placement change.
+    const exemplarLineYs = computed(() => {
+      void exemplarLineSeries.value;
+      void exemplarPlacements.value;
+      return new Map<string, number | null>();
+    });
+    const placeExemplarY = (marker: ExemplarMarker): number | null => {
+      const queryIndex = marker.queryIndexes[0];
+      if (exemplarPlacements.value[queryIndex] !== "line") return null;
+      const cache = exemplarLineYs.value;
+      if (cache.has(marker.id)) return cache.get(marker.id) ?? null;
+      const series = exemplarLineSeries.value[visibleQueryIndexes.value.indexOf(queryIndex)];
+      const y = series ? interpolateParsed(series, marker.tsMs / 1000) : null;
+      cache.set(marker.id, y);
+      return y;
+    };
+    const exemplarUnitOf = (marker: ExemplarMarker | null | undefined) =>
+      exemplarValueUnits.value[marker?.queryIndexes[0] ?? 0] ?? { unit: "", unitCustom: null };
+    const formatExemplarValue = (point: { marker: ExemplarMarker }): string => {
+      const unit = exemplarUnitOf(point.marker);
+      return String(
+        formatUnitValue(
+          getUnitValue(
+            point.marker.value,
+            unit.unit,
+            unit.unitCustom ?? "",
+            panelSchema.value?.config?.decimals,
+          ),
+        ),
+      );
+    };
+
+    const exemplarInteraction = usePanelExemplarInteraction({
+      chartRendererRef,
+      markers: exemplarMarkers,
+      seriesExtent: exemplarSeriesExtent,
+      windowMs: exemplarWindowMs,
+      lookup: useExemplarTraceLookup(),
+      toChartX: toExemplarChartX,
+      navigate: navigateToExemplarTrace,
+      placeY: placeExemplarY,
+    });
+    const {
+      points: exemplarPoints,
+      activeMarker: exemplarActiveMarker,
+      cardAnchor: exemplarCardAnchor,
+      verdict: exemplarVerdict,
+    } = exemplarInteraction;
+    const exemplarActiveUnit = computed(() => exemplarUnitOf(exemplarActiveMarker.value));
+    const exemplarActiveClamp = computed(
+      () =>
+        exemplarPoints.value.find((p) => p.marker.id === exemplarActiveMarker.value?.id)?.clamped ??
+        false,
+    );
+
+    const visibleQueryIndexes = computed(() =>
+      (panelSchema.value?.queries ?? [])
+        .map((_: unknown, i: number) => i)
+        .filter((i: number) => !hiddenQueries.value.includes(i)),
+    );
+    // First series per visible query, by panel query index.
+    const firstSeriesByQuery = (): Map<number, { series: any; seriesIndex: number }> => {
+      const out = new Map<number, { series: any; seriesIndex: number }>();
+      (panelData.value?.options?.series ?? []).forEach((series: any, seriesIndex: number) => {
+        if (typeof series?._queryIndex !== "number") return;
+        const queryIndex = visibleQueryIndexes.value[series._queryIndex];
+        if (queryIndex !== undefined && !out.has(queryIndex)) {
+          out.set(queryIndex, { series, seriesIndex });
+        }
+      });
+      return out;
+    };
+    // Configured colours are known before paint, so the first frame is already right in the common case.
+    const configuredQueryColors = computed(() => {
+      const colors: Record<number, string> = {};
+      firstSeriesByQuery().forEach(({ series }, queryIndex) => {
+        const color = series?.itemStyle?.color;
+        if (typeof color === "string") colors[queryIndex] = color;
+      });
+      return colors;
+    });
+    const paintedQueryColors = ref<Record<number, string>>({});
+    const exemplarQueryColors = computed(() => {
+      const fallback = (void isDark.value, chartColor("--color-accent"));
+      return visibleQueryIndexes.value.reduce((acc: string[], i: number) => {
+        acc[i] = paintedQueryColors.value[i] ?? configuredQueryColors.value[i] ?? fallback;
+        return acc;
+      }, []);
+    });
+    const readExemplarQueryColors = () => {
+      const chart = chartRendererRef.value?.chart;
+      const painted: Record<number, string> = {};
+      firstSeriesByQuery().forEach(({ seriesIndex }, queryIndex) => {
+        let color: unknown;
+        try {
+          color = chart?.getVisual?.({ seriesIndex }, "color");
+        } catch {
+          // The chart may not have painted this option yet; the configured colour stands in.
+        }
+        if (typeof color === "string" && color !== configuredQueryColors.value[queryIndex]) {
+          painted[queryIndex] = color;
+        }
+      });
+      if (JSON.stringify(painted) !== JSON.stringify(paintedQueryColors.value)) {
+        paintedQueryColors.value = painted;
+      }
+    };
+    const onChartFinished = () => {
+      if (!exemplarMarkers.value.length) return;
+      readExemplarQueryColors();
+      exemplarInteraction.onFinished();
+    };
+    const exemplarQueryLabels = computed(() => {
+      const injectedLabels: string[] | undefined = (injectedExemplars.value as any)?.queryLabels;
+      return (panelSchema.value?.queries ?? []).map((q: any, index: number) => ({
+        index,
+        name: injectedLabels?.[index]
+          ? raw(injectedLabels[index])
+          : t("dashboard.exemplars.query", { name: String.fromCharCode(65 + index) }),
+        query: String(metadata.value?.queries?.[index]?.query ?? q?.query ?? ""),
+      }));
+    });
+
     // need tableRendererRef to access downloadTableAsCSV method
     const tableRendererRef: any = ref(null);
 
@@ -794,26 +1131,19 @@ export default defineComponent({
 
       const currentXLabel =
         panelSchema?.value?.type == "table"
-          ? "First Column"
+          ? t("panel.firstColumn")
           : panelSchema?.value?.type == "h-bar"
-            ? "Y-Axis"
-            : "X-Axis";
+            ? t("panel.yAxisShort")
+            : t("panel.xAxisShort");
 
       const currentYLabel =
         panelSchema?.value?.type == "table"
-          ? "Other Columns"
+          ? t("panel.otherColumn")
           : panelSchema?.value?.type == "h-bar"
-            ? "X-Axis"
-            : "Y-Axis";
+            ? t("panel.xAxisShort")
+            : t("panel.yAxisShort");
 
-      validateSQLPanelFields(
-        panelSchema.value,
-        0,
-        currentXLabel,
-        currentYLabel,
-        errors,
-        true,
-      );
+      validateSQLPanelFields(t, panelSchema.value, 0, currentXLabel, currentYLabel, errors, true);
 
       return errors;
     });
@@ -822,10 +1152,11 @@ export default defineComponent({
 
     //inject variablesAndPanelsDataLoadingState from parent
     // default values will be empty object of panels and variablesData
-    const variablesAndPanelsDataLoadingState: any = inject(
-      "variablesAndPanelsDataLoadingState",
-      { panels: {}, variablesData: {}, searchRequestTraceIds: {} },
-    );
+    const variablesAndPanelsDataLoadingState: any = inject("variablesAndPanelsDataLoadingState", {
+      panels: {},
+      variablesData: {},
+      searchRequestTraceIds: {},
+    });
 
     // Watch loading state changes and emit them to parent
     watch(loading, (newLoadingState) => {
@@ -859,7 +1190,6 @@ export default defineComponent({
     onMounted(async () => {
       // fetch all panels
       await fetchAllPanels();
-      panelsList.value = panelsList.value;
     });
 
     // When switching of tab was done, reset the loading state of the panels in variablesAndPanelsDataLoadingState
@@ -883,13 +1213,25 @@ export default defineComponent({
       tableRendererRef.value = null;
     });
     const convertPanelDataCommon = async (applyOverlay = false) => {
-      if (
-        !errorDetail?.value?.message &&
-        validatePanelData?.value?.length === 0
-      ) {
+      // Preserve the previously rendered chart during a reload. While loading,
+      // if the new data buffer has no rows yet but a chart is already rendered,
+      // skip conversion so non-streaming callers (the panelSchema deep watcher,
+      // resize observer, etc.) can't replace it with an empty 0-series result
+      // before the first streaming chunk arrives. The streaming overlay path
+      // (applyOverlay=true) and loading=false final renders are unaffected.
+      const hasRows =
+        data.value?.length > 0 &&
+        (data.value[0]?.result?.length > 0 ||
+          (Array.isArray(data.value[0]) && data.value[0].length > 0));
+      const hasOldChart = panelData.value?.options?.series?.length > 0;
+      if (!applyOverlay && loading.value && !hasRows && hasOldChart) {
+        return;
+      }
+
+      if (!errorDetail?.value?.message && validatePanelData?.value?.length === 0) {
         try {
           const result = await convertPanelData(
-            panelSchema.value,
+            filteredPanelSchema.value,
             filteredData.value,
             store,
             chartPanelRef,
@@ -899,6 +1241,7 @@ export default defineComponent({
             chartPanelStyle.value,
             annotations,
             loading.value,
+            filteredSparklineData.value,
           );
 
           // Apply overlay BEFORE assigning to panelData.value.
@@ -926,7 +1269,7 @@ export default defineComponent({
             // 2. localStorage saved color
             // 3. Org settings color
             // 4. Default theme color from store
-            const _themeMode = store.state.theme === "dark" ? "dark" : "light";
+            const _themeMode = isDark.value ? "dark" : "light";
             const primaryColor: string =
               (_themeMode === "dark"
                 ? store.state.tempThemeColors?.dark
@@ -935,10 +1278,8 @@ export default defineComponent({
                 _themeMode === "dark" ? "customDarkColor" : "customLightColor",
               ) ||
               (_themeMode === "dark"
-                ? store.state?.organizationData?.organizationSettings
-                    ?.dark_mode_theme_color
-                : store.state?.organizationData?.organizationSettings
-                    ?.light_mode_theme_color) ||
+                ? store.state?.organizationData?.organizationSettings?.dark_mode_theme_color
+                : store.state?.organizationData?.organizationSettings?.light_mode_theme_color) ||
               (_themeMode === "dark"
                 ? store.state.defaultThemeColors?.dark
                 : store.state.defaultThemeColors?.light) ||
@@ -957,14 +1298,10 @@ export default defineComponent({
             let { boundaryTime } = boundaryInfo;
             if (!boundaryTime && boundaryInfo.isLTR && result.options?.series) {
               for (const s of result.options.series) {
-                if (!s.name || !Array.isArray(s.data) || !s.data.length)
-                  continue;
+                if (!s.name || !Array.isArray(s.data) || !s.data.length) continue;
                 const lastPt = s.data[s.data.length - 1];
                 if (!Array.isArray(lastPt)) continue;
-                const t =
-                  typeof lastPt[0] === "number"
-                    ? lastPt[0]
-                    : new Date(lastPt[0]).getTime();
+                const t = typeof lastPt[0] === "number" ? lastPt[0] : new Date(lastPt[0]).getTime();
                 if (!isNaN(t) && t * 1000 > boundaryTime) {
                   boundaryTime = t * 1000; // ms → µs
                 }
@@ -979,11 +1316,8 @@ export default defineComponent({
               try {
                 const chartInstance = chartRendererRef.value?.chart;
                 if (chartInstance) {
-                  const gridModel = chartInstance
-                    ?.getModel()
-                    ?.getComponent("grid");
-                  const freshRect =
-                    gridModel?.coordinateSystem?.getRect();
+                  const gridModel = chartInstance?.getModel()?.getComponent("grid");
+                  const freshRect = gridModel?.coordinateSystem?.getRect();
                   if (freshRect) {
                     previousOptionsSnapshot._gridRect = {
                       x: freshRect.x,
@@ -1034,9 +1368,7 @@ export default defineComponent({
           panelSchema.value?.error_config?.custom_error_handeling &&
           panelSchema.value?.error_config?.default_data_on_error
         ) {
-          data.value = JSON.parse(
-            panelSchema.value?.error_config?.default_data_on_error,
-          );
+          data.value = JSON.parse(panelSchema.value?.error_config?.default_data_on_error);
           errorDetail.value = {
             message: "",
             code: "",
@@ -1093,35 +1425,49 @@ export default defineComponent({
     );
 
     watch(
-      [
-        data,
-        () => store?.state?.theme,
-        () => store?.state?.timezone,
-        annotations,
-      ],
+      [data, () => store?.state?.theme, () => store?.state?.timezone, annotations, sparklineData],
       async () => {
-        // emit vrl function field list
-        if (data.value?.length && data.value[0] && data.value[0].length) {
-          // Find the index of the record with max attributes
-          const maxAttributesIndex = data.value[0].reduce(
-            (
-              maxIndex: string | number | any,
-              obj: {},
-              currentIndex: any,
-              array: Array<Record<string, unknown>>,
-            ) => {
-              const numAttributes = Object.keys(obj).length;
-              const maxNumAttributes = Object.keys(array[maxIndex]).length;
-              return numAttributes > maxNumAttributes ? currentIndex : maxIndex;
-            },
-            0,
-          );
-
-          const recordwithMaxAttribute = data.value[0][maxAttributesIndex];
-
-          const responseFields = Object.keys(recordwithMaxAttribute);
-
-          emit("updated:vrlFunctionFieldList", responseFields);
+        // emit vrl function field list per query index
+        if (data.value?.length) {
+          // data.value is in compacted/executor order (empty queries are
+          // skipped, time-shift queries expand into multiple entries), which
+          // does NOT line up with the panel query (tab) index. Re-key the
+          // detected fields by panelQueryIndex so downstream per-query field
+          // storage maps to the correct query tab. Build a DENSE array (one
+          // slot per panel query, default []) so the consumer's
+          // Array.isArray(fieldList[0]) format check and forEach both see every
+          // index even when a query returned no rows.
+          // Size the array to cover BOTH the panel's queries and the actual
+          // data results (data.value can have more entries than panel queries,
+          // e.g. time-shift expansion), so no query's fields are dropped.
+          const totalQueries = Math.max(panelSchema.value?.queries?.length ?? 0, data.value.length);
+          const perQueryFields: string[][] = Array.from({ length: totalQueries }, () => []);
+          for (let qi = 0; qi < data.value.length; qi++) {
+            const panelIdx = metadata.value?.queries?.[qi]?.panelQueryIndex ?? qi;
+            const queryData = data.value[qi];
+            if (
+              queryData &&
+              queryData.length &&
+              panelIdx >= 0 &&
+              panelIdx < perQueryFields.length
+            ) {
+              const maxAttributesIndex = queryData.reduce(
+                (
+                  maxIndex: string | number | any,
+                  obj: {},
+                  currentIndex: any,
+                  array: Array<Record<string, unknown>>,
+                ) => {
+                  const numAttributes = Object.keys(obj).length;
+                  const maxNumAttributes = Object.keys(array[maxIndex]).length;
+                  return numAttributes > maxNumAttributes ? currentIndex : maxIndex;
+                },
+                0,
+              );
+              perQueryFields[panelIdx] = Object.keys(queryData[maxAttributesIndex]);
+            }
+          }
+          emit("updated:vrlFunctionFieldList", perQueryFields);
         }
         if (panelData.value.chartType == "custom_chart")
           errorDetail.value = {
@@ -1188,12 +1534,9 @@ export default defineComponent({
       if (oldLoading === false && newLoading === true) {
         const hasOldChart = panelData.value?.options?.series?.length > 0;
         if (hasOldChart) {
-          previousOptionsSnapshot = JSON.parse(
-            JSON.stringify(panelData.value.options),
-          );
+          previousOptionsSnapshot = JSON.parse(JSON.stringify(panelData.value.options));
           previousOptionsSnapshot._chartType = panelSchema.value?.type;
-          previousOptionsSnapshot._queryCount =
-            panelSchema.value?.queries?.length;
+          previousOptionsSnapshot._queryCount = panelSchema.value?.queries?.length;
 
           // Capture actual grid pixel rect from the ECharts instance.
           // With containLabel: true, the actual plot area differs from raw grid config.
@@ -1255,7 +1598,7 @@ export default defineComponent({
 
     // ResizeObserver to detect chartPanelRef dimension changes
     let resizeObserver: ResizeObserver | null = null;
-    let resizeTimeout: ReturnType<typeof setTimeout> | null = null;
+    let resizeTimeout: number | null = null;
 
     onMounted(() => {
       if (chartPanelRef.value) {
@@ -1278,6 +1621,37 @@ export default defineComponent({
       }
     });
 
+    // Restore the cell drawer when navigating to a URL that already carries cell-explorer params.
+    onMounted(() => {
+      const query = route?.query;
+      if (!query || String(query.cell_panel) !== String(props.panelSchema.id)) return;
+      if (props.panelSchema.type !== "table" || props.panelSchema.queryType === "promql") return;
+      const field = String(query.cell_field ?? "");
+      const rawValue = String(query.cell_value ?? "");
+      const value: string | number =
+        String(query.cell_vtype) === "number" &&
+        rawValue !== "" &&
+        Number.isFinite(Number(rawValue))
+          ? Number(rawValue)
+          : rawValue;
+      const stream = String(query.cell_stream ?? "");
+      const stype = String(query.cell_stype ?? "logs");
+      const t0 = Number(query.cell_t0 ?? 0);
+      const t1 = Number(query.cell_t1 ?? 0);
+      const SQL_IDENT = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+      if (!SQL_IDENT.test(field) || !SQL_IDENT.test(stream) || !t0 || !t1) return;
+      cellDrawer.value = {
+        open: true,
+        field,
+        value,
+        stream,
+        streamType: stype,
+        startTime: t0,
+        endTime: t1,
+        baseWhere: "",
+      };
+    });
+
     onUnmounted(() => {
       if (resizeObserver) {
         resizeObserver.disconnect();
@@ -1289,13 +1663,11 @@ export default defineComponent({
       }
     });
 
-    watch(
-      panelData,
-      () => {
-        emit("series-data-update", panelData.value);
-      },
-      { deep: true },
-    );
+    // panelData is a shallowRef replaced wholesale, so no deep watch needed —
+    // deep would traverse every data point of the chart options per update.
+    watch(panelData, () => {
+      emit("series-data-update", panelData.value);
+    });
 
     // when we get the new limitNumberOfSeriesWarningMessage from the convertPanelData, emit the limitNumberOfSeriesWarningMessage
     watch(
@@ -1334,116 +1706,108 @@ export default defineComponent({
       }
     };
 
-    const handleNoData = (panelType: any) => {
-      const xAlias = panelSchema.value.queries[0].fields.x.map(
-        (it: any) => it.alias || [],
-      );
-      const yAlias = panelSchema.value.queries[0].fields.y.map(
-        (it: any) => it.alias || [],
-      );
-      const zAlias = panelSchema.value.queries[0].fields.z.map(
-        (it: any) => it.alias || [],
-      );
+    // Compute the value of the 'noData' variable.
+    // Instead of re-scanning raw rows, this checks the conversion output
+    // (panelData) which the pipeline already computed — O(1) property access.
+    // Multi-SQL note: panelData is built from filteredData (visible queries only)
+    // by convertSQLData and friends, so the type-specific checks below
+    // already reflect the multi-query aggregate.
+    const noData = computed(() => {
+      const type = panelSchema.value.type;
 
-      const firstRow = data.value[0]?.[0];
-
-      switch (panelType) {
-        case "area":
-        case "area-stacked":
-        case "bar":
-        case "h-bar":
-        case "stacked":
-        case "h-stacked":
-        case "line":
-        case "scatter":
-        case "gauge": {
-          return (
-            data.value[0]?.length > 1 ||
-            (xAlias.every((x: any) => getDataValue(firstRow, x) != null) &&
-              yAlias.every((y: any) => getDataValue(firstRow, y) != null))
-          );
-        }
-        case "table": {
-          // For tables, simply check if there's any data in the array
-          return (
-            data.value[0]?.length > 1 ||
-            (data.value[0]?.length == 1 &&
-              (xAlias.some((x: any) => getDataValue(firstRow, x) != null) ||
-                yAlias.some((y: any) => getDataValue(firstRow, y) != null)))
-          );
-        }
-        case "metric": {
-          return (
-            data.value[0]?.length > 1 ||
-            yAlias.every((y: any) => getDataValue(firstRow, y) != null)
-          );
-        }
-        case "heatmap": {
-          return (
-            data.value[0]?.length > 1 ||
-            (xAlias.every((x: any) => getDataValue(firstRow, x) != null) &&
-              yAlias.every((y: any) => getDataValue(firstRow, y) != null) &&
-              zAlias.every((z: any) => getDataValue(firstRow, z) != null))
-          );
-        }
-        case "pie":
-        case "donut": {
-          return (
-            data.value[0]?.length > 1 ||
-            yAlias.every((y: any) => getDataValue(firstRow, y) != null)
-          );
-        }
-        case "maps":
-        case "geomap": {
-          return true;
-        }
-        case "sankey": {
-          const source = panelSchema.value.queries[0].fields.source.alias;
-          const target = panelSchema.value.queries[0].fields.target.alias;
-          const value = panelSchema.value.queries[0].fields.value.alias;
-          return (
-            data.value[0]?.length > 1 ||
-            source.every((s: any) => getDataValue(firstRow, s) != null) ||
-            target.every((t: any) => getDataValue(firstRow, t) != null) ||
-            value.every((v: any) => getDataValue(firstRow, v) != null)
-          );
-        }
-        default:
-          break;
+      if (type === "html" || type === "markdown" || type === "custom_chart") {
+        return "";
       }
+
+      if (panelSchema.value?.queryType === "promql") {
+        const hasResults =
+          filteredData.value?.length &&
+          filteredData.value.some((item: any) => item?.result?.length);
+        if (hasResults) return "";
+        // During a reload the executor clears state.data before the new results
+        // stream in. Keep showing the previously rendered chart while loading
+        // (matching the SQL branch below); only show "No Data" once the load
+        // completes with no results.
+        return loading.value && panelData.value?.options?.series?.length > 0 ? "" : "No Data";
+      }
+
+      const hasRawData = data.value?.length && data.value[0]?.length;
+
+      // During data buffer reset (executor clears state.data before reload),
+      // suppress "No Data" only while still loading to avoid flicker.
+      // Once loading completes with empty data, show "No Data".
+      if (!hasRawData) {
+        return loading.value && panelData.value?.chartType ? "" : "No Data";
+      }
+
+      // Raw data exists but conversion hasn't produced output yet — wait.
+      if (!panelData.value?.chartType) {
+        return "";
+      }
+
+      // Table renders raw rows; the conversion returns { rows, columns }.
+      if (type === "table") {
+        return panelData.value?.rows?.length > 0 ? "" : "No Data";
+      }
+
+      // Maps/geomap handle their own empty state.
+      if (type === "geomap" || type === "maps") {
+        return "";
+      }
+
+      // Sankey returns { options: null } when data is invalid.
+      if (type === "sankey") {
+        return panelData.value?.options != null ? "" : "No Data";
+      }
+
+      // Metric/gauge series are always created by the converter
+      // (they use renderItem, not data arrays), so check the raw Y value.
+      if (type === "metric" || type === "gauge") {
+        const firstRow = data.value[0]?.[0];
+        const yAlias = panelSchema.value.queries[0].fields.y.map((it: any) => it.alias || []);
+        return yAlias.every((y: any) => getDataValue(firstRow, y) != null) ? "" : "No Data";
+      }
+
+      // For all other chart types (line, area, bar, scatter, heatmap, etc.),
+      // the series filter in the conversion pipeline already excluded series
+      // whose data is entirely null. Just check what survived.
+      return panelData.value?.options?.series?.length > 0 ? "" : "No Data";
+    });
+
+    // Determines what data to pass to ChartRenderer.
+    // noData check is evaluated first so promql panels with no results
+    // also get the transparent background instead of showing a skeleton.
+    const withExemplars = (value: any) => {
+      if (!exemplarMarkers.value.length || !value?.options) return value;
+      if (!exemplarsEligible.value && !injectedExemplars.value) return value;
+      return {
+        ...value,
+        options: applyExemplarSeries(value.options, exemplarMarkers.value, {
+          yExtent: exemplarInteraction.yExtent.value,
+          xExtent: exemplarInteraction.xExtent.value,
+          queryColors: exemplarQueryColors.value,
+          haloColor: (void isDark.value, chartColor("--color-surface-base")),
+          edgeColor: (void isDark.value, chartColor("--color-text-heading")),
+          toChartX: toExemplarChartX,
+          placeY: placeExemplarY,
+        }),
+      };
     };
 
-    // Compute the value of the 'noData' variable
-    const noData = computed(() => {
-      // if panel type is 'html' or 'markdown', return an empty string
+    const chartRendererData = computed(() => {
+      if (noData.value === "No Data") {
+        return { options: { backgroundColor: "transparent" } };
+      }
       if (
-        panelSchema.value.type == "html" ||
-        panelSchema.value.type == "markdown" ||
-        panelSchema.value.type == "custom_chart"
+        panelSchema.value.queryType === "promql" ||
+        (panelData.value.chartType !== "geomap" &&
+          panelData.value.chartType !== "table" &&
+          panelData.value.chartType !== "maps" &&
+          loading.value)
       ) {
-        return "";
+        return withExemplars(panelData.value);
       }
-      // A rendered chart is already on screen — suppress "No Data" even if
-      // the raw data buffer is momentarily empty. This prevents a flicker on
-      // refresh where the executor resets state.data = [] before loading
-      // flips to true, transiently firing this computed with empty data.
-      if (panelData.value?.options?.series?.length > 0) {
-        return "";
-      }
-      // Check if the queryType is 'promql'
-      if (panelSchema.value?.queryType == "promql") {
-        // Check if the 'filteredData' array has elements and every item has a non-empty 'result' array
-        return filteredData.value?.length &&
-          filteredData.value.some((item: any) => item?.result?.length)
-          ? "" // Return an empty string if there is data
-          : "No Data"; // Return "No Data" if there is no data
-      }
-      // The queryType is not 'promql'
-      return data.value.length &&
-        data.value[0]?.length &&
-        handleNoData(panelSchema.value.type)
-        ? ""
-        : "No Data"; // Return "No Data" if the 'data' array is empty, otherwise return an empty string
+      return withExemplars(panelData.value);
     });
 
     // when the error changes, emit the error
@@ -1453,14 +1817,21 @@ export default defineComponent({
       emit("error", errorDetail.value);
     });
 
-    const { showErrorNotification, showPositiveNotification } =
-      useNotifications();
+    const { showErrorNotification, showPositiveNotification } = useNotifications();
+
+    const onFormatColumn = (field: string) => emit("format-column", field);
 
     const {
       drilldownArray,
       onChartClick,
       openDrilldown,
       hidePopupsAndOverlays,
+      drilldownColumnAliases,
+      drilldownAllColumns,
+      getCellDrilldownField,
+      panelBaseWhere,
+      panelWhereByStream,
+      ensureDrilldownSchema,
     } = usePanelDrilldown({
       panelSchema,
       variablesData,
@@ -1484,20 +1855,31 @@ export default defineComponent({
       selectedAnnotationData,
       isCursorOverPanel,
       showErrorNotification,
+      t,
+      onExemplarClick: exemplarInteraction.onExemplarClick,
     });
 
-    const { downloadDataAsCSV, downloadDataAsJSON } = usePanelDownload({
+    const { downloadDataAsCSV, downloadDataAsJSON, getPanelCsvString } = usePanelDownload({
       panelSchema,
       data,
       filteredData,
       tableRendererRef,
       showErrorNotification,
       showPositiveNotification,
+      t,
     });
+
+    // Trellis only applies when EVERY query has a breakdown field (each
+    // breakdown value becomes a subplot). Mirrors the converter's isTrellis.
+    const allQueriesHaveBreakdown = computed(
+      () =>
+        (panelSchema.value?.queries?.length ?? 0) > 0 &&
+        panelSchema.value.queries.every((q: any) => (q?.fields?.breakdown?.length ?? 0) > 0),
+    );
 
     const chartPanelHeight = computed(() => {
       if (
-        panelSchema.value?.queries?.[0]?.fields?.breakdown?.length > 0 &&
+        allQueriesHaveBreakdown.value &&
         panelSchema.value.config?.trellis?.layout &&
         !loading.value
       ) {
@@ -1509,7 +1891,7 @@ export default defineComponent({
 
     const chartPanelClass = computed(() => {
       if (
-        panelSchema.value?.queries?.[0]?.fields?.breakdown?.length > 0 &&
+        allQueriesHaveBreakdown.value &&
         panelSchema.value.config?.trellis?.layout &&
         !loading.value
       ) {
@@ -1524,27 +1906,182 @@ export default defineComponent({
       emit("is-partial-data-update", newValue);
     });
 
-    // Computed property for table data with logging
+    // Surface the sparkline-unavailable warning (e.g. JOIN queries) on the header.
+    watch(sparklineWarning, (newValue) => {
+      emit("sparkline-warning-update", newValue);
+    });
+
     const tableRendererData = computed(() => {
       if (panelSchema.value.type === "table") {
-        let tableData;
-
+        // Once the underlying data is cleared (e.g. required columns removed
+        // after a successful run), convertPanelDataCommon bails on validation
+        // and never refreshes panelData — so guard on noData here to avoid
+        // rendering the stale converted rows behind the "No Data" state.
+        // Mirrors chartRendererData's noData guard for the chart path.
+        if (noData.value === "No Data") {
+          return { rows: [], columns: [] };
+        }
         if (panelSchema.value.queryType === "promql") {
           // For PromQL tables, the data is in panelData.options (same as pie/donut)
           // The TableConverter returns {columns, rows, ...} which gets placed in options
-          tableData = panelData.value?.options || { rows: [], columns: [] };
+          return panelData.value?.options || { rows: [], columns: [] };
         } else if (panelData.value?.chartType == "table") {
-          tableData = panelData.value;
-        } else {
-          tableData = { options: { backgroundColor: "transparent" } };
+          return panelData.value;
         }
-
-        return tableData;
+        return { options: { backgroundColor: "transparent" } };
       }
       return { options: { backgroundColor: "transparent" } };
     });
 
+    const cellDrawer = ref<{
+      open: boolean;
+      field: string;
+      value: string | number;
+      stream: string;
+      streamType: string;
+      startTime: number;
+      endTime: number;
+      baseWhere: string;
+    }>({
+      open: false,
+      field: "",
+      value: "",
+      stream: "",
+      streamType: "logs",
+      startTime: 0,
+      endTime: 0,
+      baseWhere: "",
+    });
+
+    function resolveAliasToColumn(alias: string, query: any, executedSql = ""): string {
+      // Field-config lookup (field-based panels).
+      const allConfigFields: any[] = [
+        ...(Array.isArray(query?.fields?.x) ? query.fields.x : []),
+        ...(Array.isArray(query?.fields?.y) ? query.fields.y : []),
+        ...(Array.isArray(query?.fields?.breakdown) ? query.fields.breakdown : []),
+      ];
+      const fromConfig = allConfigFields.find((f: any) => f.alias === alias && f.column);
+      if (fromConfig) return fromConfig.column;
+
+      // SQL fallback (custom SQL panels): aliases are double-quoted; column may carry a stream prefix.
+      const sql: string = executedSql || query?.query || "";
+      if (sql) {
+        const escaped = alias.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const re = new RegExp(
+          `([\\w.]+)\\s+(?:as\\s+)?"?${escaped}"?(?=\\s*,|\\s+from|\\s*\\)|\\s*$)`,
+          "i",
+        );
+        const m = re.exec(sql.replace(/\n/g, " "));
+        if (m?.[1]) {
+          const parts = m[1].split("."); // strip stream prefix
+          const col = parts[parts.length - 1];
+          if (col && col.toLowerCase() !== alias.toLowerCase()) return col;
+        }
+      }
+
+      return alias; // last resort — works when the alias IS the stream field name
+    }
+
+    // Dashboard timestamps are µs; Dates are built from µs so getTime() returns µs.
+    function toMicros(v: any): number {
+      if (v instanceof Date) return v.getTime();
+      const n = Number(v);
+      return Number.isFinite(n) && n > 0 ? n : 0;
+    }
+
+    function openCellDrawer(params: {
+      field: string;
+      value: string | number;
+      stream: string;
+      streamType: string;
+      startTime: number;
+      endTime: number;
+      baseWhere: string;
+    }) {
+      cellDrawer.value = { open: true, ...params };
+      // Sync to URL so the drawer state is shareable.
+      router.replace({
+        query: {
+          ...route.query,
+          cell_panel: props.panelSchema.id,
+          cell_field: params.field,
+          cell_value: String(params.value),
+          cell_vtype: typeof params.value,
+          cell_stream: params.stream,
+          cell_stype: params.streamType,
+          cell_t0: String(params.startTime),
+          cell_t1: String(params.endTime),
+        },
+      });
+    }
+
+    function onCellDrawerOpenChange(open: boolean) {
+      cellDrawer.value.open = open;
+      if (!open) {
+        // Clear cell-explorer URL params without touching other query params.
+        const q = { ...route.query };
+        for (const k of [
+          "cell_panel",
+          "cell_field",
+          "cell_value",
+          "cell_vtype",
+          "cell_stream",
+          "cell_stype",
+          "cell_t0",
+          "cell_t1",
+          "cell_where",
+          "cell_event_ts",
+        ]) {
+          delete (q as any)[k];
+        }
+        router.replace({ query: q });
+      }
+    }
+
+    // Opening the AI chat: close the cell explorer so the two panels don't overlap.
+    function onCellSendToAiChat(value: unknown, append?: boolean) {
+      onCellDrawerOpenChange(false);
+      emit("sendToAiChat", value, append);
+    }
+
+    // Called directly by the search icon so it works even with a panel drilldown config.
+    async function exploreCellInLogs(alias: string, value: unknown, row: any) {
+      const queries = props.panelSchema.queries ?? [];
+      const qi = Number.isInteger(row?.__q) && queries[row.__q] ? row.__q : 0;
+      const query = queries[qi];
+      const executedSql = String(metadata.value?.queries?.[qi]?.query ?? query?.query ?? "");
+
+      // Panel WHERE is fetched lazily (not on panel render) — resolve it for THIS query
+      await ensureDrilldownSchema(qi);
+
+      const cell = getCellDrilldownField(qi, alias);
+      const stream = cell?.streamName ?? query?.fields?.stream ?? query?.stream ?? "";
+      const streamType =
+        cell?.streamType ?? query?.fields?.stream_type ?? query?.stream_type ?? "logs";
+      const realField = cell?.column ?? resolveAliasToColumn(alias, query, executedSql);
+      // Base WHERE is BE-only (result_schema); no FE fallback — if the BE gives none, use none.
+      const baseWhere = cell?.isJoin
+        ? (panelWhereByStream.value[cell.streamName] ?? "")
+        : panelBaseWhere.value;
+
+      const metaStartMicros = Number(metadata.value?.queries?.[qi]?.startTime ?? 0);
+      const metaEndMicros = Number(metadata.value?.queries?.[qi]?.endTime ?? 0);
+      const selStartMicros = toMicros((props.selectedTimeObj as any).start_time);
+      const selEndMicros = toMicros((props.selectedTimeObj as any).end_time);
+
+      openCellDrawer({
+        field: realField,
+        value: value as string | number,
+        stream,
+        streamType,
+        startTime: metaStartMicros || selStartMicros,
+        endTime: metaEndMicros || selEndMicros || Date.now() * 1000,
+        baseWhere,
+      });
+    }
+
     return {
+      t,
       store,
       chartPanelRef,
       chartRendererRef,
@@ -1554,11 +2091,15 @@ export default defineComponent({
       errorDetail,
       panelData,
       noData,
+      chartRendererData,
       metadata,
       tableRendererRef,
       tableRendererData,
       onChartClick,
+      onFormatColumn,
       onDataZoom,
+      drilldownColumnAliases,
+      drilldownAllColumns,
       drilldownArray,
       selectedAnnotationData,
       openDrilldown,
@@ -1570,6 +2111,7 @@ export default defineComponent({
       validatePanelData,
       isAddAnnotationDialogVisible,
       closeAddAnnotation,
+      reloadAnnotations,
       isAddAnnotationMode,
       toggleAddAnnotationMode,
       annotationToAddEdit,
@@ -1577,8 +2119,26 @@ export default defineComponent({
       panelsList,
       isCursorOverPanel,
       showPopupsAndOverlays,
+      metricItems,
+      metricZoneStyle,
+      metricIconStyle,
+      hoveredMetricIdx,
+      metricCopiedIdx,
+      copyMetricItem,
       downloadDataAsCSV,
       downloadDataAsJSON,
+      getPanelCsvData: (title: string) => {
+        const csv = getPanelCsvString();
+        if (!csv) return null;
+        return {
+          title: title ?? panelSchema.value?.title ?? "panel",
+          csv,
+        };
+      },
+      logDataAsJSON: (title: string) => {
+        console.group(`[oo] ${title ?? panelSchema.value?.title ?? "panel"}`);
+        console.groupEnd();
+      },
       loadingProgressPercentage,
       isPartialData,
       contextMenuVisible,
@@ -1589,97 +2149,35 @@ export default defineComponent({
       onChartDomContextMenu,
       hideContextMenu,
       handleCreateAlert,
+      cellDrawer,
+      onCellSendToAiChat,
+      exploreCellInLogs,
+      onCellDrawerOpenChange,
+      exemplarsEligible,
+      exemplarsEnabled,
+      exemplarsStatus,
+      exemplarsCount,
+      exemplarsError,
+      retryExemplars,
+      exemplarInteraction,
+      exemplarPoints,
+      exemplarActiveMarker,
+      exemplarCardAnchor,
+      exemplarVerdict,
+      exemplarActiveClamp,
+      exemplarQueryLabels,
+      exemplarActiveUnit,
+      formatExemplarValue,
+      onChartFinished,
     };
   },
 });
 </script>
-
-<style lang="scss" scoped>
-// Cross-link drilldown popup — matches AlertContextMenu.vue exactly
-.crosslink-drilldown-menu {
-  position: absolute;
-  z-index: 9999999;
-  background: white;
-  border: 1px solid #e0e0e0;
-  border-radius: 4px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  min-width: 200px;
-  padding: 4px 0;
-  display: none;
-  white-space: nowrap;
-  top: 0;
-  left: 0;
-}
-
-.crosslink-drilldown-menu-item {
-  display: flex;
-  align-items: center;
-  padding: 8px 16px;
-  cursor: pointer;
-  transition: background-color 0.2s;
-  font-size: 14px;
-  color: #333;
-
-  &:hover {
-    background-color: #f5f5f5;
+<style scoped>
+/* keep(lib-override:o2-empty-state): container query hides OEmptyState's internally-rendered icon when the panel is too short — targets a deep descendant of the lib component, not expressible as a utility on this template */
+@container (max-height: 5rem) {
+  .noData :deep(.o2-empty-state__inline-icon) {
+    display: none;
   }
-
-  &:active {
-    background-color: #e0e0e0;
-  }
-
-  span {
-    user-select: none;
-  }
-}
-
-.crosslink-drilldown-menu--dark {
-  background: #2c2c2c;
-  border-color: #404040;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
-}
-
-.crosslink-drilldown-menu--dark .crosslink-drilldown-menu-item {
-  color: #e0e0e0;
-}
-
-.crosslink-drilldown-menu--dark .crosslink-drilldown-menu-item:hover {
-  background-color: #383838;
-}
-
-.crosslink-drilldown-menu--dark .crosslink-drilldown-menu-item:active {
-  background-color: #444444;
-}
-
-.drilldown-item:hover {
-  background-color: rgba(202, 201, 201, 0.908);
-}
-
-.errorMessage {
-  position: absolute;
-  top: 20%;
-  width: 100%;
-  height: 80%;
-  overflow: hidden;
-  text-align: center;
-  // color: rgba(255, 0, 0, 0.8);
-  text-overflow: ellipsis;
-}
-
-.customErrorMessage {
-  position: absolute;
-  top: 20%;
-  width: 100%;
-  height: 80%;
-  overflow: hidden;
-  text-align: center;
-  text-overflow: ellipsis;
-}
-
-.noData {
-  position: absolute;
-  top: 20%;
-  width: 100%;
-  text-align: center;
 }
 </style>

@@ -23,7 +23,10 @@ use std::{
 };
 
 use bytes::Bytes;
-use config::utils::time::get_ymdh_from_micros;
+use config::{
+    meta::promql::index::{MIDX_TRAILER_LEN, MidxTrailer},
+    utils::time::{HourFormat, get_ymdh_from_micros},
+};
 use hashbrown::HashSet;
 use hashlink::lru_cache::LruCache;
 use object_store::{GetOptions, GetResult};
@@ -52,6 +55,8 @@ enum CacheStrategy {
 enum FileType {
     Parquet,
     Ttv,
+    Vortex,
+    Midx,
 }
 
 impl CacheStrategy {
@@ -109,7 +114,7 @@ impl CacheStrategy {
                     return None;
                 }
                 let mut idx = None;
-                for (_, val) in map.iter() {
+                for val in map.values() {
                     if !cache[*val].is_empty() {
                         idx = Some(*val);
                         break;
@@ -220,6 +225,21 @@ async fn validate_file(bytes: &[u8], ftype: FileType) -> Result<(), anyhow::Erro
                 return Err(anyhow::anyhow!("payload size mismatch"));
             }
         }
+        FileType::Vortex => {
+            if bytes.len() < 12 {
+                return Err(anyhow::anyhow!("invalid vortex file"));
+            }
+            const VORTEX_MAGIC: &[u8; 4] = b"VTXF";
+            if &bytes[..4] != VORTEX_MAGIC || &bytes[bytes.len() - 4..] != VORTEX_MAGIC {
+                return Err(anyhow::anyhow!("vortex magic bytes mismatch"));
+            }
+        }
+        FileType::Midx => {
+            if bytes.len() < MIDX_TRAILER_LEN {
+                return Err(anyhow::anyhow!("invalid metrics index file"));
+            }
+            MidxTrailer::read(&bytes[bytes.len() - MIDX_TRAILER_LEN..], bytes.len() as u64)?;
+        }
     }
     Ok(())
 }
@@ -287,18 +307,24 @@ async fn download_from_storage(
             } else {
                 // the entry in db does not match what there is actually in the blob store
                 // so we check if the footer is valid. If it is, then the db entry is invalid
-                // and we reset it. If footer is invalid, the the store has a corrupted file
+                // and we reset it. If footer is invalid, the store has a corrupted file
                 // so we mark it as deleted, and return error.
+                // Only data files have standalone file-list rows whose size can be corrected.
+                let is_data_file = file.ends_with(".parquet") || file.ends_with(".vortex");
                 let valid_parquet = file.ends_with(".parquet")
                     && validate_file(&data_bytes, FileType::Parquet).await.is_ok();
+                let valid_vortex = file.ends_with(".vortex")
+                    && validate_file(&data_bytes, FileType::Vortex).await.is_ok();
                 let valid_ttv = file.ends_with(".ttv")
                     && validate_file(&data_bytes, FileType::Ttv).await.is_ok();
-                if valid_parquet || valid_ttv {
+                let valid_midx = file.ends_with(".midx")
+                    && validate_file(&data_bytes, FileType::Midx).await.is_ok();
+                if valid_parquet || valid_vortex || valid_ttv || valid_midx {
                     log::warn!(
                         "download file {file} found size mismatch, remote : {expected_blob_size}, db: {size}, correcting db as valid file",
                     );
-                    // only update for parquet files, not ttv files
-                    if file.ends_with(".parquet") {
+                    // only update for data files, not ttv files
+                    if is_data_file {
                         crate::file_list::update_compressed_size(file, data_len as i64).await?;
                         crate::file_list::LOCAL_CACHE
                             .update_compressed_size(file, data_len as i64)
@@ -309,8 +335,8 @@ async fn download_from_storage(
                     log::warn!(
                         "download file {file} found corrupt file, remote: {expected_blob_size}, db: {size}, deleting entry from file_list "
                     );
-                    // only update for parquet files, not ttv files
-                    if file.ends_with(".parquet") {
+                    // only update for data files, not ttv files
+                    if is_data_file {
                         crate::file_list::remove(file).await?;
                         crate::file_list::LOCAL_CACHE.remove(file).await?;
                     }
@@ -379,6 +405,10 @@ pub async fn get_opts(
     })
 }
 
+pub async fn exist(file: &str) -> bool {
+    memory::exist(file).await || disk::exist(file).await
+}
+
 pub async fn get_size(account: &str, file: &str) -> object_store::Result<usize> {
     get_size_opts(account, file, true).await
 }
@@ -410,6 +440,36 @@ pub async fn get_size_opts(account: &str, file: &str, remote: bool) -> object_st
     })
 }
 
+/// `remote = false` prevents a storage fallback after both file caches miss.
+pub async fn get_ranges_opts(
+    account: &str,
+    file: &str,
+    ranges: &[Range<u64>],
+    remote: bool,
+) -> object_store::Result<Vec<Bytes>> {
+    let cfg = config::get_config();
+    crate::storage::get_ranges_opt(ranges, |fetched_ranges| async move {
+        if cfg.memory_cache.enabled
+            && let Some(v) = memory::get_ranges(file, &fetched_ranges).await
+        {
+            return Ok(v);
+        }
+        if cfg.disk_cache.enabled
+            && let Ok(v) = disk::get_ranges(file, &fetched_ranges).await
+        {
+            return Ok(v);
+        }
+        if remote {
+            return crate::storage::get_ranges(account, file, &fetched_ranges).await;
+        }
+        Err(object_store::Error::NotFound {
+            path: file.to_string(),
+            source: Box::new(std::io::Error::other(file)),
+        })
+    })
+    .await
+}
+
 /// get the file time from the file name
 ///
 /// metrics_cache:
@@ -433,7 +493,7 @@ fn get_file_time(file: &str) -> Option<u64> {
         }
         "results" => {
             let (_, _, _, meta) = disk::parse_result_cache_key(file)?;
-            get_ymdh_from_micros(meta.start_time).replace("/", "")
+            get_ymdh_from_micros(meta.start_time, HourFormat::Real).replace("/", "")
         }
         "files" => {
             if parts.len() < 8 {
@@ -443,7 +503,7 @@ fn get_file_time(file: &str) -> Option<u64> {
         }
         "aggregations" => {
             let (_, _, _, meta) = disk::parse_aggregation_cache_key(file)?;
-            get_ymdh_from_micros(meta.start_time).replace("/", "")
+            get_ymdh_from_micros(meta.start_time, HourFormat::Real).replace("/", "")
         }
         _ => {
             return None;
@@ -455,6 +515,38 @@ fn get_file_time(file: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn validate_midx_checks_current_trailer() {
+        let mut bytes = b"sample-block{\"header\":1}".to_vec();
+        bytes.extend_from_slice(
+            &MidxTrailer {
+                label_len: 2,
+                directory_len: 4,
+                header_len: 13,
+            }
+            .encode(),
+        );
+
+        assert!(validate_file(&bytes, FileType::Midx).await.is_ok());
+        assert!(
+            validate_file(&bytes[..bytes.len() - 3], FileType::Midx)
+                .await
+                .is_err()
+        );
+        let mut oversized = bytes.clone();
+        let len = oversized.len();
+        oversized[len - 16..len - 12].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(validate_file(&oversized, FileType::Midx).await.is_err());
+        let mut previous = bytes.clone();
+        previous[len - 8..].copy_from_slice(b"O2MIDX02");
+        assert!(validate_file(&previous, FileType::Midx).await.is_err());
+        assert!(
+            validate_file(b"not a MIDX file", FileType::Midx)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn test_file_data_lru_cache_miss() {

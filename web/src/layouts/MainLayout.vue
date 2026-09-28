@@ -15,16 +15,41 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-layout
-    view="hHh Lpr lff"
-    :class="[store.state.printMode === true ? 'printMode' : '']"
+  <div
+    :class="[
+      store.state.printMode === true ? 'printMode' : '',
+      'o2-app-root',
+      'w-full',
+      'transition-[width]',
+      'duration-300',
+      'ease-[ease]',
+      'min-h-screen',
+      'h-screen',
+      'flex',
+      'flex-col',
+    ]"
   >
-    <q-header>
-      <!-- Webinar announcement bar: shown above toolbar for cloud users -->
-      <WebinarBanner v-if="config.isCloud === 'true'" variant="header" />
+    <header class="o2-app-header shrink-0" :class="store.state.printMode === true ? 'hidden' : ''">
+      <!-- Every bar that sits above the toolbar, in one measured wrapper so
+           `--navbar-height` accounts for whichever of them is actually showing.
+           The wrapper always renders — an unconditional ref keeps the observer
+           attached even when nothing is on screen yet. -->
+      <div ref="announcementBarRef">
+        <!-- Webinar announcement bar: shown above toolbar for cloud users -->
+        <div
+          v-if="config.isCloud === 'true'"
+          class="bg-button-primary text-button-primary-foreground text-center"
+        >
+          <WebinarBanner variant="header" />
+        </div>
+
+        <!-- Operator-authored announcement bars (enterprise) -->
+        <AnnouncementBanner v-if="config.isEnterprise === 'true'" />
+        <PasswordExpiryBanner v-if="config.isEnterprise === 'true'" />
+      </div>
 
       <!-- Header component containing logo, navigation, and user controls -->
-      <Header
+      <AppHeader
         :store="store"
         :router="router"
         :config="config"
@@ -35,13 +60,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         :selected-language="selectedLanguage"
         :selected-org="selectedOrg"
         :user-clicked-org="userClickedOrg"
-        :filtered-organizations="filteredOrganizations"
-        :search-query="searchQuery"
-        :rows-per-page="rowsPerPage"
+        :organizations="orgOptions"
         :is-hovered="isHovered"
         :get-btn-logo="getBtnLogo"
         @update:selected-org="selectedOrg = $event"
-        @update:search-query="searchQuery = $event"
         @update:is-hovered="isHovered = $event"
         @update-organization="updateOrganization"
         @go-to-home="goToHome"
@@ -52,104 +74,165 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         @navigate-to-docs="navigateToDocs"
         @change-language="changeLanguage"
         @open-predefined-themes="openPredefinedThemes"
+        @open-shortcuts="openShortcutsList"
+        @toggle-mobile-nav="mobileNavOpen = !mobileNavOpen"
         @signout="signout"
       />
-    </q-header>
+    </header>
 
-    <q-drawer
-      v-model="drawer"
-      show-if-above
-      :width="84"
-      :breakpoint="500"
-      role="navigation"
-      aria-label="Main navigation"
-      class="card-container q-mt-xs tw:mb-[0.675rem]"
-    >
-      <q-list class="leftNavList">
-        <menu-link
-          v-for="(nav, index) in linksList"
-          :key="nav.title"
-          :link-name="nav.name"
-          :animation-index="index"
-          v-bind="{ ...nav, mini: miniMode }"
-          @mouseenter="handleMenuHover(nav.link)"
-        />
-      </q-list>
-    </q-drawer>
-    <div class="row full-height no-wrap">
-      <!-- Left Panel -->
-      <div
-        class="col"
-        v-show="isLoading"
-        :style="{ width: store.state.isAiChatEnabled && !store.state.isAiChatExpanded ? '75%' : '100%' }"
-        :key="store.state.selectedOrganization?.identifier"
-      >
-        <q-page-container v-if="isLoading">
-          <router-view v-slot="{ Component }">
-            <component :is="Component" @sendToAiChat="sendToAiChat" />
-          </router-view>
-        </q-page-container>
-      </div>
+    <div class="flex min-h-0 flex-1">
+      <ONavbar
+        v-if="store.state.printMode !== true"
+        class="max-md:hidden"
+        :links-list="navLinks"
+        :mini-mode="miniMode"
+        @menu-hover="handleMenuHover"
+      />
 
-      <!-- Right Panel (AI Chat - unified for both general and context-specific usage) -->
-      <div
-        v-show="store.state.isAiChatEnabled && isLoading"
-        class="col-auto"
-        :class="store.state.theme == 'dark' ? 'dark-mode-chat-container' : 'light-mode-chat-container'"
-        :style="store.state.isAiChatExpanded
-          ? 'position: fixed; top: 0; right: 0; width: 50%; max-width: 100%; min-width: 300px; height: 100vh; z-index: 200; background: var(--o2-card-bg-solid); box-shadow: -4px 0 24px rgba(0, 0, 0, 0.15); padding-top: calc(var(--navbar-height) + 8px);'
-          : 'width: 25%; max-width: 100%; min-width: 75px; z-index: 10; padding-top: calc(var(--navbar-height) + 8px); padding-right: 0.625rem;'"
+      <!-- Not seamless: the scrim gives tap-outside-to-close a target. -->
+      <ODrawer
+        v-model:open="mobileNavOpen"
+        side="left"
+        :width="30"
+        bleed
+        :show-close="false"
+        data-test="main-layout-mobile-nav-drawer"
       >
-        <O2AIChat
-          :header-height="42.5"
-          :is-open="store.state.isAiChatEnabled"
-          @close="closeChat"
-          :aiChatInputContext="aiChatInputContext"
-          :appendMode="aiChatAppendMode"
-          :aiChatPayload="aiChatPayload"
-        />
+        <div class="flex h-full min-h-0 flex-col">
+          <div
+            class="border-border-default flex shrink-0 items-center justify-between border-b px-4 py-3"
+          >
+            <img
+              class="h-6 w-auto"
+              :src="
+                getImageURL(
+                  isDark
+                    ? 'images/common/openobserve_latest_dark_2.svg'
+                    : 'images/common/openobserve_latest_light_2.svg',
+                )
+              "
+              :alt="raw('OpenObserve')"
+            />
+            <OButton
+              variant="ghost"
+              size="icon"
+              icon-left="close"
+              data-test="main-layout-mobile-nav-close"
+              @click="mobileNavOpen = false"
+            />
+          </div>
+          <ONavbar
+            class="min-h-0 flex-1 overflow-y-auto"
+            :links-list="navLinks"
+            :visible="true"
+            @menu-hover="handleMenuHover"
+          />
+        </div>
+      </ODrawer>
+
+      <div class="flex h-full min-h-0 min-w-0 flex-1">
+        <!-- Main Panel -->
+        <main
+          data-test="main-content"
+          class="bg-surface-chrome-deeper flex min-h-0 flex-col pe-2 pb-2 max-md:pe-0"
+          :style="{
+            width:
+              !store.state.isAiChatEnabled || isChatOverlay
+                ? '100%'
+                : store.state.isAiChatExpanded
+                  ? '50%'
+                  : '75%',
+          }"
+        >
+          <!-- Content card — all pages render inside this. The border stays present in both
+               themes (transparent in light) so toggling dark mode can't shift page content by 1px. -->
+          <div
+            class="bg-surface-base rounded-surface flex min-h-0 flex-1 flex-col overflow-hidden border shadow-md"
+            :class="isDark ? 'border-border-default' : 'border-transparent'"
+          >
+            <div
+              v-if="isLoading"
+              :key="store.state.selectedOrganization?.identifier"
+              class="o2-content-scroll h-full flex-1 overflow-y-auto"
+            >
+              <router-view v-slot="{ Component }">
+                <component :is="Component" class="h-full" @sendToAiChat="sendToAiChat" />
+              </router-view>
+            </div>
+          </div>
+        </main>
+
+        <!-- Right Panel (AI Chat - unified for both general and context-specific usage) -->
+        <aside
+          v-show="store.state.isAiChatEnabled && isLoading"
+          class="o2-sidebar o2-sidebar-right bg-surface-chrome-deeper shrink-0 overflow-y-auto"
+          :class="[
+            isDark ? 'dark-mode-chat-container' : 'light-mode-chat-container',
+            { 'o2-sidebar--expanded': store.state.isAiChatExpanded },
+            // The chat is a floating card in both modes — match the main content
+            // card's right/bottom gap (+ rounded-surface corners) so they read as
+            // the same card. Expanding only widens it; it never overlays the header.
+            'pe-2 pb-2',
+            isChatOverlay
+              ? 'fixed inset-x-0 bottom-0 z-50 ps-2'
+              : 'sticky top-[var(--navbar-height,2.25rem)] self-start',
+          ]"
+          :style="[
+            {
+              height: 'calc(100vh - var(--navbar-height, 2.25rem))',
+              maxWidth: '100%',
+            },
+            isChatOverlay
+              ? { width: '100%', top: 'var(--navbar-height, 2.25rem)' }
+              : // Full-screen just widens the panel (25% → 50%) beside the content —
+                // same top position + height, so the main header stays visible.
+                store.state.isAiChatExpanded
+                ? { width: '50%', minWidth: '18.75rem' }
+                : { width: '25%', minWidth: '4.688rem' },
+          ]"
+        >
+          <O2AIChat
+            :header-height="40"
+            :is-open="store.state.isAiChatEnabled"
+            @close="closeChat"
+            :aiChatInputContext="aiChatInputContext"
+            :appendMode="aiChatAppendMode"
+            :aiChatPayload="aiChatPayload"
+          />
+        </aside>
       </div>
     </div>
 
-    <q-dialog v-model="showGetStarted"
-maximized full-height>
+    <ODialog
+      data-test="main-layout-get-started-dialog"
+      v-model:open="showGetStarted"
+      size="full"
+      :show-close="false"
+    >
       <GetStarted @removeFirstTimeLogin="removeFirstTimeLogin" />
-    </q-dialog>
+    </ODialog>
+    <ConnectDataSourcePopup />
+    <CommunitySlackInvite />
     <PredefinedThemes />
-  </q-layout>
+    <ShortcutCheatsheet v-model:open="showShortcuts" />
+  </div>
 </template>
 
 <script lang="ts">
-import {
-  QPage,
-  QPageContainer,
-  QLayout,
-  QDrawer,
-  QList,
-  QItem,
-  QItemLabel,
-  QItemSection,
-  QBtn,
-  QBtnDropdown,
-  QToolbarTitle,
-  QHeader,
-  QToolbar,
-  QAvatar,
-  QIcon,
-  QSelect,
-  useQuasar,
-} from "quasar";
-import MenuLink from "../components/MenuLink.vue";
-import Header from "../components/Header.vue";
-import { useI18n } from "vue-i18n";
+import { configFullQuery } from "@/services/config.queries";
+import { orgSettingsQuery } from "@/services/organizations.queries";
+import ONavbar from "@/lib/core/Navbar/ONavbar.vue";
+import type { NavItem } from "@/lib/core/Navbar/ONavbar.types";
+import AppHeader from "../components/Header.vue";
+import { raw, useI18nTyped } from "@/types/i18n";
 import {
   useLocalCurrentUser,
   useLocalOrganization,
   useLocalUserInfo,
   getImageURL,
   invalidateLoginData,
-  getDueDays,
-  trialPeriodAllowedPath,
+  shouldPaywallRoute,
+  isEmptyDataExempt,
 } from "../utils/zincutils";
 
 import {
@@ -158,12 +241,14 @@ import {
   KeepAlive,
   computed,
   onMounted,
+  onUnmounted,
   watch,
   markRaw,
   nextTick,
   onBeforeMount,
 } from "vue";
 import { useStore } from "vuex";
+import { useTheme } from "@/composables/useTheme";
 import { useRouter, RouterView } from "vue-router";
 import config from "../aws-exports";
 
@@ -173,40 +258,30 @@ import { getLocale } from "../locales";
 import MainLayoutOpenSourceMixin from "@/mixins/mainLayout.mixin";
 import MainLayoutCloudMixin from "@/enterprise/mixins/mainLayout.mixin";
 
-import configService from "@/services/config";
-import streamService from "@/services/stream";
-import billings from "@/services/billings";
 import ThemeSwitcher from "../components/ThemeSwitcher.vue";
 import PredefinedThemes from "../components/PredefinedThemes.vue";
 import { usePredefinedThemes } from "@/composables/usePredefinedThemes";
 import GetStarted from "@/components/login/GetStarted.vue";
-import {
-  outlinedHome,
-  outlinedSearch,
-  outlinedBarChart,
-  outlinedAccountTree,
-  outlinedDashboard,
-  outlinedWindow,
-  outlinedReportProblem,
-  outlinedFilterAlt,
-  outlinedPerson,
-  outlinedFormatListBulleted,
-  outlinedSettings,
-  outlinedManageAccounts,
-  outlinedDescription,
-  outlinedCode,
-  outlinedDevices,
-  outlinedNotificationsActive,
-} from "@quasar/extras/material-icons-outlined";
+import CommunitySlackInvite from "@/components/CommunitySlackInvite.vue";
+import ConnectDataSourcePopup from "@/components/ConnectDataSourcePopup.vue";
+import ODialog from "@/lib/overlay/Dialog/ODialog.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import useBreakpoint from "@/composables/useBreakpoint";
 import SlackIcon from "@/components/icons/SlackIcon.vue";
 import ManagementIcon from "@/components/icons/ManagementIcon.vue";
-import organizations from "@/services/organizations";
 import useStreams from "@/composables/useStreams";
 import { openobserveRum } from "@openobserve/browser-rum";
 import useSearchWebSocket from "@/composables/useSearchWebSocket";
 import O2AIChat from "@/components/O2AIChat.vue";
 import WebinarBanner from "@/components/WebinarBanner.vue";
+import AnnouncementBanner from "@/components/announcements/AnnouncementBanner.vue";
+import PasswordExpiryBanner from "@/components/common/PasswordExpiryBanner.vue";
 import useRoutePrefetch from "@/composables/useRoutePrefetch";
+import { toast, dismissAll } from "@/lib/feedback/Toast/useToast";
+import { purgeOrgQueries, queryClient } from "@/composables/query/queryClient";
+import { useShortcuts, ShortcutCheatsheet } from "@/lib/vue-shortcut-manager";
+import { useHomeDashboard } from "@/composables/useHomeDashboard";
 
 let mainLayoutMixin: any = null;
 if (config.isCloud == "true") {
@@ -219,41 +294,30 @@ export default defineComponent({
   name: "MainLayout",
   mixins: [mainLayoutMixin],
   components: {
-    "menu-link": MenuLink,
-    Header,
+    AppHeader,
     WebinarBanner,
+    AnnouncementBanner,
+    PasswordExpiryBanner,
     "keep-alive": KeepAlive,
-    "q-page": QPage,
-    "q-page-container": QPageContainer,
-    "q-layout": QLayout,
-    "q-drawer": QDrawer,
-    "q-list": QList,
-    "q-item": QItem,
-    "q-item-label": QItemLabel,
-    "q-item-section": QItemSection,
-    "q-btn": QBtn,
-    "q-btn-dropdown": QBtnDropdown,
-    "q-toolbar-title": QToolbarTitle,
-    "q-header": QHeader,
-    "q-toolbar": QToolbar,
+    ONavbar,
     "router-view": RouterView,
-    "q-avatar": QAvatar,
-    "q-icon": QIcon,
-    "q-select": QSelect,
     SlackIcon,
     ManagementIcon,
     ThemeSwitcher,
     PredefinedThemes,
     O2AIChat,
+    ShortcutCheatsheet,
     GetStarted,
+    CommunitySlackInvite,
+    ConnectDataSourcePopup,
+    ODialog,
+    ODrawer,
+    OButton,
   },
   methods: {
     navigateToDocs() {
       let docURL = "https://openobserve.ai/docs";
-      if (
-        this.config.isEnterprise == "true" &&
-        this.store.state.zoConfig.custom_docs_url != ""
-      ) {
+      if (this.config.isEnterprise == "true" && this.store.state.zoConfig.custom_docs_url != "") {
         docURL = this.store.state.zoConfig.custom_docs_url;
       }
       window.open(docURL, "_blank");
@@ -263,6 +327,14 @@ export default defineComponent({
     },
     signout() {
       this.closeSocket();
+
+      // AI chat streams outlive their component by design, so navigating away
+      // doesn't kill an answer. Logout has to stop them explicitly — otherwise
+      // they keep streaming and writing chat history after sign-out.
+      window.dispatchEvent(new Event("o2:abort-ai-streams"));
+
+      // Clear any open notifications so they don't carry over past logout.
+      dismissAll();
 
       // Stop session replay recording on logout
       if (this.store.state.zoConfig?.rum?.enabled) {
@@ -297,78 +369,54 @@ export default defineComponent({
         },
       });
     },
-    changeLanguage(item: { code: string; label: string; icon: string }) {
+    changeLanguage(item: { code: string; label: string }) {
       setLanguage(item.code);
       window.location.reload();
     },
   },
   setup() {
     const store: any = useStore();
+    const { isDark } = useTheme();
     const router: any = useRouter();
-    const { t } = useI18n();
-    const $q = useQuasar();
+    const { t } = useI18nTyped();
     const miniMode = ref(false);
+    const { isMobile, lgUp } = useBreakpoint();
+    // Below lg no split leaves room for pages with a folder rail, so the chat overlays instead.
+    const isChatOverlay = computed(() => !lgUp.value);
     const zoBackendUrl = store.state.API_ENDPOINT;
     const isLoading = ref(false);
 
-    const { getStreams, resetStreams } = useStreams();
+    const mobileNavOpen = ref(false);
+    watch(
+      () => router.currentRoute.value.fullPath,
+      () => {
+        mobileNavOpen.value = false;
+      },
+    );
+
+    const { getStreams, resetStreams } = useStreams(t);
     const { closeSocket } = useSearchWebSocket();
-    const { isOpen: isPredefinedThemesOpen, toggleThemes } =
-      usePredefinedThemes();
+    const { isOpen: isPredefinedThemesOpen, toggleThemes } = usePredefinedThemes();
     const { prefetchRoute } = useRoutePrefetch();
 
     const isMonacoEditorLoaded = ref(false);
-    const showGetStarted = ref(
-      (localStorage.getItem("isFirstTimeLogin") ?? "false") === "true",
-    );
+    const showGetStarted = ref((localStorage.getItem("isFirstTimeLogin") ?? "false") === "true");
     const isHovered = ref(false);
     const aiChatInputContext = ref("");
     const aiChatAppendMode = ref(true);
-    const aiChatAutoSend = ref(false);
-    const aiChatPayload = ref<{ text: string; autoSend: boolean; id: number } | null>(null);
-    const rowsPerPage = ref(10);
-    const searchQuery = ref("");
-
-    const filteredOrganizations = computed(() => {
-      //we will return all organizations if searchQuery is empty
-      //else we will search based upon label or identifier that we get from the search query
-      //if anyone of the orgs matches either label or identifier then we will return that orgs
-      if (!searchQuery.value) return orgOptions.value;
-      const toBeSearched = searchQuery.value.toLowerCase().trim();
-      return orgOptions.value.filter((org: any) => {
-        const labelMatch = org.label?.toLowerCase().includes(toBeSearched);
-        const identifierMatch = org.identifier
-          ?.toLowerCase()
-          .includes(toBeSearched);
-        return labelMatch || identifierMatch;
-      });
-    });
-
-    let customOrganization = router.currentRoute.value.query.hasOwnProperty(
+    const aiChatPayload = ref<{
+      text: string;
+      autoSend: boolean;
+      id: number;
+    } | null>(null);
+    let customOrganization = Object.prototype.hasOwnProperty.call(
+      router.currentRoute.value.query,
       "org_identifier",
     )
       ? router.currentRoute.value.query.org_identifier
       : undefined;
     const selectedOrg = ref(store.state.selectedOrganization);
     const userClickedOrg = ref(store.state.selectedOrganization);
-    const excludeParentRedirect = [
-      "pipeline",
-      "functionList",
-      "streamFunctions",
-      "enrichmentTables",
-      "alertList",
-      "alertDestinations",
-      "alertTemplates",
-      "/ingestion/",
-    ];
-
-    const isActionsEnabled = computed(() => {
-      return (
-        (config.isEnterprise == "true" || config.isCloud == "true") &&
-        store.state.zoConfig.actions_enabled
-      );
-    });
-
     const isIncidentsEnabled = computed(() => {
       return (
         (config.isEnterprise == "true" || config.isCloud == "true") &&
@@ -376,137 +424,215 @@ export default defineComponent({
       );
     });
 
-    const orgOptions = ref([{ label: Number, value: String }]);
+    // Workflows — enterprise/cloud only (FD3). Build-time gate, no runtime flag.
+    // Enterprise/cloud build AND the backend `/config` flag `workflows_enabled`
+    // (enterprise `O2_WORKFLOWS_ENABLED`). Reactive so the menu picks it up
+    // regardless of whether the config response arrived before or after mount.
+    // `=== true`, not truthy: /config is fetched without await, so the flag is
+    // briefly undefined and the entry must stay hidden rather than flash in.
+    const isWorkflowsEnabled = computed(
+      () =>
+        (config.isEnterprise == "true" || config.isCloud == "true") &&
+        store.state.zoConfig?.workflows_enabled === true,
+    );
+
+    // Backend `/config` flag `online_evals_enabled` — controlled by
+    // enterprise `O2_EVAL_ENABLED`. Reactive so the menu picks it up regardless
+    // of whether the config response arrived before or after this component
+    // mounted.
+    const isOnlineEvalsEnabled = computed(() => {
+      return (
+        (config.isEnterprise == "true" || config.isCloud == "true") &&
+        Boolean(store.state.zoConfig?.online_evals_enabled)
+      );
+    });
+
+    // The AI Observability menu entry itself ships on true OSS builds too —
+    // Monitor (LLM Insights + Sessions) needs no backend flag, unlike the rest
+    // of the module. AIObservabilityShell (Index.vue) shows only the Monitor
+    // group there; Evaluate/Experiment/Annotate/Agent Graph/Agent Behavior stay
+    // behind `isOnlineEvalsEnabled` as before.
+    const isOssBuild = !(config.isEnterprise == "true" || config.isCloud == "true");
+    const isAiObservabilityMenuVisible = computed(() => isOnlineEvalsEnabled.value || isOssBuild);
+
+    // Backend `/config` flag `synthetics_enabled` — `ZO_SYNTHETICS_ENABLED`, and
+    // no longer an enterprise build check: synthetics ships in OSS, and only the
+    // private-agent path behind it is enterprise. Reactive so the menu picks it
+    // up regardless of whether the config response arrived before or after mount.
+    const isSyntheticsEnabled = computed(() => {
+      return Boolean(store.state.zoConfig?.synthetics_enabled);
+    });
+
+    // `ZO_FEATURE_PROFILING_ENABLED` is off by default while Profiles is early-stage.
+    const isProfilingEnabled = computed(() => {
+      return Boolean(store.state.zoConfig?.profiling_enabled);
+    });
+
+    // Real entries carry `identifier`; the placeholder literal only sets label/value.
+    const orgOptions = ref<Array<{ identifier?: string; [key: string]: unknown }>>([
+      { label: Number, value: String },
+    ]);
     let slackURL = "https://short.openobserve.ai/community";
-    if (
-      config.isEnterprise == "true" &&
-      store.state.zoConfig.custom_slack_url != ""
-    ) {
+    if (config.isEnterprise == "true" && store.state.zoConfig.custom_slack_url) {
       slackURL = store.state.zoConfig.custom_slack_url;
     }
 
     let user = store.state.userInfo;
 
-    var linksList = ref([
+    var linksList = ref<NavItem[]>([
       {
         title: t("menu.home"),
-        icon: outlinedHome,
+        icon: "home",
         link: "/",
         exact: true,
         name: "home",
       },
       {
         title: t("menu.search"),
-        icon: outlinedSearch,
+        icon: "search",
         link: "/logs",
         name: "logs",
       },
       {
         title: t("menu.metrics"),
-        icon: outlinedBarChart,
+        icon: "bar-chart",
         link: "/metrics",
         name: "metrics",
       },
       {
         title: t("menu.traces"),
-        icon: outlinedAccountTree,
+        icon: "account-tree",
         link: "/traces",
         name: "traces",
       },
       {
-        title: t("menu.rum"),
-        icon: outlinedDevices,
+        title: raw("RUM"),
+        icon: "devices",
         link: "/rum",
         name: "rum",
       },
       {
         title: t("menu.dashboard"),
-        icon: outlinedDashboard,
+        icon: "dashboard",
         link: "/dashboards",
         name: "dashboards",
       },
       {
         title: t("menu.index"),
-        icon: outlinedWindow,
+        icon: "window",
         link: "/streams",
         name: "streams",
       },
       {
         title: t("menu.alerts"),
-        icon: outlinedReportProblem,
+        icon: "shield-alert-outline",
         link: "/alerts",
         name: "alertList",
       },
+      // Directly after Alerts, since an SLO is what an SLO alert burns against.
+      {
+        title: t("menu.slos"),
+        icon: "target",
+        link: "/slos",
+        name: "sloList",
+      },
       {
         title: t("menu.ingestion"),
-        icon: outlinedFilterAlt,
+        icon: "data-plus-line",
         link: "/ingestion",
         name: "ingestion",
       },
       {
         title: t("menu.iam"),
-        icon: outlinedManageAccounts,
+        icon: "manage-accounts",
         link: "/iam",
         display: store.state?.currentuser?.role == "admin" ? true : false,
         name: "iam",
       },
+      {
+        title: t("menu.settings"),
+        icon: "settings",
+        link: "/settings",
+        name: "settings",
+      },
     ]);
+
+    // Reveal the rail only once its item list is settled — true immediately when
+    // config is cached, else set when getConfig() resolves. Avoids config-driven
+    // tiles popping in and shifting the layout.
+    const menuReady = ref(
+      !!(
+        store.state.zoConfig &&
+        Object.prototype.hasOwnProperty.call(store.state.zoConfig, "version") &&
+        store.state.zoConfig.version != ""
+      ),
+    );
+    const navLinks = computed(() => (menuReady.value ? linksList.value : []));
 
     const langList = [
       {
-        label: "English",
-        code: "en-gb",
-        icon: "img:" + getImageURL("images/language_flags/en-gb.svg"),
+        label: raw("English"),
+        code: "en-us",
       },
       {
-        label: "Türkçe",
+        label: raw("العربية"),
+        code: "ar",
+      },
+      {
+        label: raw("Türkçe"),
         code: "tr-turk",
-        icon: "img:" + getImageURL("images/language_flags/tr-turk.svg"),
       },
       {
-        label: "简体中文",
+        label: raw("简体中文"),
         code: "zh-cn",
-        icon: "img:" + getImageURL("images/language_flags/zh-cn.svg"),
       },
       {
-        label: "Français",
+        label: raw("繁體中文"),
+        code: "zh-tw",
+      },
+      {
+        label: raw("Français"),
         code: "fr",
-        icon: "img:" + getImageURL("images/language_flags/fr.svg"),
       },
       {
-        label: "Español",
+        label: raw("Español"),
         code: "es",
-        icon: "img:" + getImageURL("images/language_flags/es.svg"),
       },
       {
-        label: "Deutsch",
+        label: raw("Deutsch"),
         code: "de",
-        icon: "img:" + getImageURL("images/language_flags/de.svg"),
       },
       {
-        label: "Italiano",
+        label: raw("Italiano"),
         code: "it",
-        icon: "img:" + getImageURL("images/language_flags/it.svg"),
       },
       {
-        label: "日本語",
+        label: raw("日本語"),
         code: "ja",
-        icon: "img:" + getImageURL("images/language_flags/ja.svg"),
       },
       {
-        label: "한국어",
+        label: raw("한국어"),
         code: "ko",
-        icon: "img:" + getImageURL("images/language_flags/ko.svg"),
       },
       {
-        label: "Nederlands",
+        label: raw("Nederlands"),
         code: "nl",
-        icon: "img:" + getImageURL("images/language_flags/nl.svg"),
       },
       {
-        label: "Português",
+        label: raw("Português"),
         code: "pt",
-        icon: "img:" + getImageURL("images/language_flags/pt.svg"),
+      },
+      {
+        label: raw("Русский"),
+        code: "ru",
+      },
+      {
+        label: raw("Polski"),
+        code: "pl",
+      },
+      {
+        label: raw("Tiếng Việt"),
+        code: "vi",
       },
     ];
 
@@ -532,33 +658,68 @@ export default defineComponent({
       }
     });
 
+    // Measured rather than assumed. The strip now holds two independent bars
+    // (the cloud webinar promo and any number of operator-authored banners),
+    // each of which wraps its own text, so no fixed value can describe it — the
+    // old `isWebinarBannerVisible` two-value calc only ever fit one bar of one
+    // line. WebinarBanner still dispatches that flag; nothing reads it for
+    // height any more.
+    const announcementBarRef = ref<HTMLElement | null>(null);
+    let announcementBarObserver: ResizeObserver | null = null;
+
+    const setNavbarHeight = (barHeightPx: number) => {
+      const barHeightRem = barHeightPx / 16;
+      document.documentElement.style.setProperty("--navbar-height", `${2.5 + barHeightRem}rem`);
+    };
+
+    onMounted(() => {
+      setNavbarHeight(announcementBarRef.value?.offsetHeight ?? 0);
+
+      if (announcementBarRef.value && typeof ResizeObserver !== "undefined") {
+        announcementBarObserver = new ResizeObserver(([entry]) => {
+          setNavbarHeight(entry.contentRect.height);
+        });
+        announcementBarObserver.observe(announcementBarRef.value);
+      }
+    });
+
+    onUnmounted(() => {
+      announcementBarObserver?.disconnect();
+      announcementBarObserver = null;
+    });
+
+    const needsFullConfig = () =>
+      !Object.prototype.hasOwnProperty.call(store.state.zoConfig, "version") ||
+      store.state.zoConfig.version == "";
+
+    // Which org the full config was fetched for — the response carries
+    // org-scoped fields (e.g. per-user permission flags), so an org switch
+    // must refetch even when a config is already loaded.
+    let fullConfigOrg = "";
+
+    // The full config endpoint is authenticated and org-scoped; on a fresh
+    // session the org can resolve after this component mounts.
     watch(
-      () => store.state.isWebinarBannerVisible,
-      (visible) => {
-        const navbarHeight = visible
-          ? "calc(36px + 27px)"
-          : "36px";
-        document.documentElement.style.setProperty("--navbar-height", navbarHeight);
+      () => store.state.selectedOrganization?.identifier,
+      (identifier) => {
+        if (identifier && (needsFullConfig() || identifier !== fullConfigOrg)) {
+          getConfig();
+        }
       },
-      { immediate: true },
     );
 
     onMounted(async () => {
       filterMenus();
 
       // TODO OK : Clean get config functions which sets rum user and functions menu. Move it to common method.
-      if (
-        !store.state.zoConfig.hasOwnProperty("version") ||
-        store.state.zoConfig.version == ""
-      ) {
+      if (needsFullConfig()) {
         getConfig();
       } else {
         if (config.isCloud == "false") {
-          linksList.value = mainLayoutMixin
-            .setup()
-            .leftNavigationLinks(linksList, t);
+          linksList.value = mainLayoutMixin.setup().leftNavigationLinks(linksList, t);
           filterMenus();
         }
+        menuReady.value = true;
         await nextTick();
         // if rum enabled then setUser to capture session details.
         if (store.state.zoConfig.rum?.enabled) {
@@ -569,18 +730,14 @@ export default defineComponent({
 
     const updateIncidentsMenu = () => {
       if (isIncidentsEnabled.value) {
-        const alertIndex = linksList.value.findIndex(
-          (link) => link.name === "alertList",
-        );
+        const alertIndex = linksList.value.findIndex((link) => link.name === "alertList");
 
-        const incidentExists = linksList.value.some(
-          (link) => link.name === "incidentList",
-        );
+        const incidentExists = linksList.value.some((link) => link.name === "incidentList");
 
         if (alertIndex !== -1 && !incidentExists) {
           linksList.value.splice(alertIndex + 1, 0, {
             title: t("menu.incidents"),
-            icon: outlinedNotificationsActive,
+            icon: "notifications-active",
             link: "/incidents",
             name: "incidentList",
           });
@@ -588,38 +745,132 @@ export default defineComponent({
       }
     };
 
-    const updateActionsMenu = () => {
-      if (isActionsEnabled.value) {
-        const incidentIndex = linksList.value.findIndex(
-          (link) => link.name === "incidentList",
-        );
+    // Insert the Workflows entry after Alerts. Idempotent.
+    const updateWorkflowsMenu = () => {
+      const existingIndex = linksList.value.findIndex((link) => link.name === "workflows");
 
-        const actionExists = linksList.value.some(
-          (link) => link.name === "actionScripts",
-        );
+      if (isWorkflowsEnabled.value) {
+        if (existingIndex !== -1) return;
 
-        if (incidentIndex !== -1 && !actionExists) {
-          linksList.value.splice(incidentIndex + 1, 0, {
-            title: t("menu.actions"),
-            icon: outlinedCode,
-            link: "/actions",
-            name: "actionScripts",
-          });
-        }
+        const anchor = linksList.value.findIndex((link) => link.name === "alertList");
+        if (anchor === -1) return;
+
+        linksList.value.splice(anchor + 1, 0, {
+          title: t("menu.workflows"),
+          icon: "schema",
+          link: "/workflows",
+          name: "workflows",
+        });
+      } else if (existingIndex !== -1) {
+        // The entry must be REMOVED, not just skipped: the menu is rebuilt on
+        // org switch and `workflows_enabled` can differ per deployment, so an
+        // add-only guard would leave a stale entry behind.
+        linksList.value.splice(existingIndex, 1);
       }
     };
-    const splitterModel = ref(100);
-    const selectedLanguage: any =
-      langList.find((l) => l.code == getLocale()) || langList[0];
 
+    // If `/config` resolves after this component mounted (or the flag flips),
+    // keep the menu in sync — same contract as the other flag-driven entries.
+    watch(isWorkflowsEnabled, () => updateWorkflowsMenu(), { immediate: false });
+    const splitterModel = ref(100);
+    const selectedLanguage: any = langList.find((l) => l.code == getLocale()) || langList[0];
+
+    // Insert / remove the AI Observability menu entry based on the live config
+    // flag. Position: directly after Traces. Idempotent — safe to call from
+    // multiple lifecycle hooks.
+    const updateAIObservabilityMenu = () => {
+      const existingIndex = linksList.value.findIndex(
+        (link: any) => link.name === "aiObservability",
+      );
+
+      if (isAiObservabilityMenuVisible.value) {
+        if (existingIndex !== -1) return;
+        const anchorIndex = linksList.value.findIndex(
+          (link: any) => link.name === "profiles" || link.name === "traces",
+        );
+        const insertAt = anchorIndex === -1 ? linksList.value.length : anchorIndex + 1;
+        linksList.value.splice(insertAt, 0, {
+          title: t("menu.aiObservability"),
+          icon: "auto-awesome",
+          link: "/ai",
+          name: "aiObservability",
+        });
+      } else if (existingIndex !== -1) {
+        linksList.value.splice(existingIndex, 1);
+      }
+    };
+
+    // If `/config` resolves after this component mounted (or if the flag
+    // ever flips at runtime), keep the menu in sync.
+    watch(isAiObservabilityMenuVisible, () => updateAIObservabilityMenu(), { immediate: false });
+
+    const updateSyntheticMenu = () => {
+      const existingIndex = linksList.value.findIndex((l: any) => l.name === "synthetics");
+
+      if (!isSyntheticsEnabled.value) {
+        if (existingIndex !== -1) linksList.value.splice(existingIndex, 1);
+        return;
+      }
+      if (existingIndex !== -1) return;
+
+      const incidentIndex = linksList.value.findIndex((l: any) => l.name === "incidentList");
+      const alertIndex = linksList.value.findIndex((l: any) => l.name === "alertList");
+      const insertAt =
+        incidentIndex !== -1
+          ? incidentIndex + 1
+          : alertIndex !== -1
+            ? alertIndex + 1
+            : linksList.value.length;
+
+      linksList.value.splice(insertAt, 0, {
+        title: t("menu.synthetic"),
+        icon: "radar",
+        link: "/synthetics",
+        name: "synthetics",
+      });
+    };
+
+    // Keep the menu in sync if /config resolves after mount.
+    watch(isSyntheticsEnabled, () => updateSyntheticMenu(), {
+      immediate: false,
+    });
+
+    const updateProfilesMenu = () => {
+      const existingIndex = linksList.value.findIndex((l: any) => l.name === "profiles");
+
+      if (!isProfilingEnabled.value) {
+        if (existingIndex !== -1) linksList.value.splice(existingIndex, 1);
+        return;
+      }
+      if (existingIndex !== -1) return;
+
+      const tracesIndex = linksList.value.findIndex((l: any) => l.name === "traces");
+      const insertAt = tracesIndex === -1 ? linksList.value.length : tracesIndex + 1;
+
+      linksList.value.splice(insertAt, 0, {
+        title: t("menu.profiles"),
+        icon: "account-tree",
+        link: "/profiles",
+        name: "profiles",
+      });
+    };
+
+    watch(isProfilingEnabled, () => updateProfilesMenu(), { immediate: false });
+
+    // On-call's Pages/Teams/Routing entries live entirely inside the
+    // `reliability` flyout (navGroups.ts), gated there by `gate: "oncall"`.
+    // A separate top-level rail item here would be a second gate to keep in
+    // sync.
     const filterMenus = () => {
       updateIncidentsMenu();
-      updateActionsMenu();
+      updateWorkflowsMenu();
+      updateSyntheticMenu();
+      updateProfilesMenu();
+      updateAIObservabilityMenu();
 
       const disableMenus = new Set(
-        store.state.zoConfig?.custom_hide_menus
-          ?.split(",")
-          ?.filter((val: string) => val?.trim()) || [],
+        store.state.zoConfig?.custom_hide_menus?.split(",")?.filter((val: string) => val?.trim()) ||
+          [],
       );
 
       store.dispatch("setHiddenMenus", disableMenus);
@@ -633,56 +884,26 @@ export default defineComponent({
 
     // additional links based on environment and conditions
     if (config.isCloud == "true") {
-      linksList.value = mainLayoutMixin
-        .setup()
-        .leftNavigationLinks(linksList, t);
+      linksList.value = mainLayoutMixin.setup().leftNavigationLinks(linksList, t);
       filterMenus();
     } else {
       linksList.value.splice(7, 0, {
         title: t("menu.report"),
-        icon: outlinedDescription,
+        icon: "description",
         link: "/reports",
         name: "reports",
       });
+      filterMenus();
     }
 
     //orgIdentifier query param exists then clear the localstorage and store.
     if (store.state.selectedOrganization != null) {
       if (
         mainLayoutMixin.setup().customOrganization != undefined &&
-        mainLayoutMixin.setup().customOrganization !=
-          store.state.selectedOrganization?.identifier
+        mainLayoutMixin.setup().customOrganization != store.state.selectedOrganization?.identifier
       ) {
         useLocalOrganization("");
         store.dispatch("setSelectedOrganization", {});
-      }
-    }
-
-    const triggerRefreshToken = () => {
-      const expirationTimeUnix = store.state.userInfo.exp;
-
-      // Convert the expiration time to milliseconds
-      const expirationTimeMilliseconds = expirationTimeUnix * 1000;
-
-      // Get the current time in milliseconds
-      const currentTimeMilliseconds = Date.now();
-
-      // Calculate the time difference
-      const timeUntilNextAPICall =
-        expirationTimeMilliseconds - currentTimeMilliseconds - 100;
-
-      // Convert the time difference from milliseconds to seconds
-      const timeUntilNextAPICallInSeconds = timeUntilNextAPICall / 1000;
-
-      // setTimeout(() => {
-      //   mainLayoutMixin.setup().getRefreshToken();
-      // }, timeUntilNextAPICallInSeconds);
-    };
-
-    //get refresh token for cloud environment
-    if (store.state.hasOwnProperty("userInfo") && store.state.userInfo.email) {
-      if (config.isCloud == "true") {
-        triggerRefreshToken();
       }
     }
 
@@ -692,9 +913,7 @@ export default defineComponent({
       store.dispatch("setIsDataIngested", false);
       const orgIdentifier = selectedOrg.value.identifier;
       const queryParams =
-        router.currentRoute.value.path.indexOf(".logs") > -1
-          ? router.currentRoute.value.query
-          : {};
+        router.currentRoute.value.path.indexOf(".logs") > -1 ? router.currentRoute.value.query : {};
       router.push({
         path: router.currentRoute.value.path,
         query: {
@@ -725,7 +944,8 @@ export default defineComponent({
       //     });
       // } else {
       if (
-        store.state.zoConfig.hasOwnProperty(
+        Object.prototype.hasOwnProperty.call(
+          store.state.zoConfig,
           "restricted_routes_on_empty_data",
         ) &&
         store.state.zoConfig.restricted_routes_on_empty_data == true &&
@@ -742,12 +962,7 @@ export default defineComponent({
         });
         if (response.list.length == 0) {
           store.dispatch("setIsDataIngested", false);
-          $q.notify({
-            type: "warning",
-            message:
-              "You haven't initiated the data ingestion process yet. To explore other pages, please start the data ingestion.",
-            timeout: 5000,
-          });
+          if (isEmptyDataExempt(router.currentRoute.value)) return;
           router.push({ name: "ingestion" });
         } else {
           store.dispatch("setIsDataIngested", true);
@@ -757,7 +972,8 @@ export default defineComponent({
 
     const setSelectedOrganization = async () => {
       try {
-        customOrganization = router.currentRoute.value.query.hasOwnProperty(
+        customOrganization = Object.prototype.hasOwnProperty.call(
+          router.currentRoute.value.query,
           "org_identifier",
         )
           ? router.currentRoute.value.query.org_identifier
@@ -765,6 +981,32 @@ export default defineComponent({
         let tempDefaultOrg = {};
         let localOrgFlag = false;
         const url = new URL(window.location.href);
+
+        // If the org the user is currently on (URL or stored) is no longer in the
+        // available list, it is being deleted (the backend hides deleting orgs from
+        // this list). Warn the user, then fall through to default-org selection and
+        // redirect home so the stale org_identifier query param is dropped.
+        const intendedOrgId =
+          customOrganization || (useLocalOrganization()?.value?.identifier ?? "");
+        const orgs = store.state.organizations || [];
+        if (
+          intendedOrgId &&
+          orgs.length > 0 &&
+          !orgs.some((o: any) => o.identifier === intendedOrgId)
+        ) {
+          toast({
+            variant: "warning",
+            message: t("organization.orgBeingDeletedSwitching"),
+          });
+          // Clear stale selection so the logic below picks the default org.
+          customOrganization = "";
+          useLocalOrganization("");
+          selectedOrg.value = {};
+          store.dispatch("setSelectedOrganization", {});
+          if (router.currentRoute.value.query.org_identifier) {
+            router.replace({ path: "/", query: {} });
+          }
+        }
         if (store.state.organizations?.length > 0) {
           const localOrg: any = useLocalOrganization();
           if (
@@ -796,11 +1038,14 @@ export default defineComponent({
                   user_email: store.state.userInfo.email,
                   ingest_threshold: data.ingest_threshold,
                   search_threshold: data.search_threshold,
-                  subscription_type: data.hasOwnProperty("CustomerBillingObj")
+                  subscription_type: Object.prototype.hasOwnProperty.call(
+                    data,
+                    "CustomerBillingObj",
+                  )
                     ? data.CustomerBillingObj.subscription_type
                     : "",
                   status: data.status,
-                  note: data.hasOwnProperty("CustomerBillingObj")
+                  note: Object.prototype.hasOwnProperty.call(data, "CustomerBillingObj")
                     ? data.CustomerBillingObj.note
                     : "",
                 };
@@ -827,15 +1072,11 @@ export default defineComponent({
                   (Object.keys(selectedOrg.value).length == 0 &&
                     data.type == "default" &&
                     store.state.userInfo.email == data.UserObj.email &&
-                    (customOrganization == "" ||
-                      customOrganization == undefined)) ||
+                    (customOrganization == "" || customOrganization == undefined)) ||
                   (store.state.organizations?.length == 1 &&
-                    (customOrganization == "" ||
-                      customOrganization == undefined))
+                    (customOrganization == "" || customOrganization == undefined))
                 ) {
-                  selectedOrg.value = localOrg.value
-                    ? localOrg.value
-                    : optiondata;
+                  selectedOrg.value = localOrg.value ? localOrg.value : optiondata;
                   useLocalOrganization(optiondata);
                   store.dispatch("setSelectedOrganization", optiondata);
                 } else if (data.identifier == customOrganization) {
@@ -860,10 +1101,7 @@ export default defineComponent({
           store.dispatch("setSelectedOrganization", tempDefaultOrg);
         }
 
-        if (
-          Object.keys(selectedOrg.value).length == 0 &&
-          store.state.organizations.length > 0
-        ) {
+        if (Object.keys(selectedOrg.value).length == 0 && store.state.organizations.length > 0) {
           let data = store.state.organizations[0];
           let optiondata = {
             label: data.name,
@@ -872,11 +1110,11 @@ export default defineComponent({
             user_email: store.state.userInfo.email,
             ingest_threshold: data.ingest_threshold,
             search_threshold: data.search_threshold,
-            subscription_type: data.hasOwnProperty("CustomerBillingObj")
+            subscription_type: Object.prototype.hasOwnProperty.call(data, "CustomerBillingObj")
               ? data.CustomerBillingObj.subscription_type
               : "",
             status: data.status,
-            note: data.hasOwnProperty("CustomerBillingObj")
+            note: Object.prototype.hasOwnProperty.call(data, "CustomerBillingObj")
               ? data.CustomerBillingObj.note
               : "",
           };
@@ -915,6 +1153,7 @@ export default defineComponent({
         span_id_field_name: "spanId",
         trace_id_field_name: "traceId",
         toggle_ingestion_logs: false,
+        usage_stream_enabled: false,
         enable_websocket_search: false,
         enable_streaming_search: false,
         streaming_aggregation_enabled: false,
@@ -922,29 +1161,33 @@ export default defineComponent({
         light_mode_theme_color: undefined,
         dark_mode_theme_color: undefined,
         claim_parser_function: "",
+        org_storage_enabled: false,
+        domain_org_mappings: [],
       };
 
       try {
         //get organizations settings
-        const orgSettings: any = await organizations.get_organization_settings(
-          store.state?.selectedOrganization?.identifier,
-        );
+        // Cached: MainLayout re-reads this on every org switch, and the
+        // settings pages read it again on mount.
+        const orgSettings: any = {
+          data: await queryClient.fetchQuery(
+            orgSettingsQuery(store.state?.selectedOrganization?.identifier),
+          ),
+        };
 
         //set settings in store
         //scrape interval will be in number
         store.dispatch("setOrganizationSettings", {
           scrape_interval:
-            orgSettings?.data?.data?.scrape_interval ??
-            defaultSettings.scrape_interval,
+            orgSettings?.data?.data?.scrape_interval ?? defaultSettings.scrape_interval,
           span_id_field_name:
-            orgSettings?.data?.data?.span_id_field_name ??
-            defaultSettings.span_id_field_name,
+            orgSettings?.data?.data?.span_id_field_name ?? defaultSettings.span_id_field_name,
           trace_id_field_name:
-            orgSettings?.data?.data?.trace_id_field_name ??
-            defaultSettings.trace_id_field_name,
+            orgSettings?.data?.data?.trace_id_field_name ?? defaultSettings.trace_id_field_name,
           toggle_ingestion_logs:
-            orgSettings?.data?.data?.toggle_ingestion_logs ??
-            defaultSettings.toggle_ingestion_logs,
+            orgSettings?.data?.data?.toggle_ingestion_logs ?? defaultSettings.toggle_ingestion_logs,
+          usage_stream_enabled:
+            orgSettings?.data?.data?.usage_stream_enabled ?? defaultSettings.usage_stream_enabled,
           enable_websocket_search:
             orgSettings?.data?.data?.enable_websocket_search ??
             defaultSettings.enable_websocket_search,
@@ -955,42 +1198,38 @@ export default defineComponent({
             orgSettings?.data?.data?.streaming_aggregation_enabled ??
             defaultSettings.streaming_aggregation_enabled,
           free_trial_expiry:
-            orgSettings?.data?.data?.free_trial_expiry ??
-            defaultSettings.free_trial_expiry,
-          light_mode_theme_color:
-            orgSettings?.data?.data?.light_mode_theme_color,
+            orgSettings?.data?.data?.free_trial_expiry ?? defaultSettings.free_trial_expiry,
+          light_mode_theme_color: orgSettings?.data?.data?.light_mode_theme_color,
           dark_mode_theme_color: orgSettings?.data?.data?.dark_mode_theme_color,
           claim_parser_function:
-            orgSettings?.data?.data?.claim_parser_function ??
-            defaultSettings.claim_parser_function,
+            orgSettings?.data?.data?.claim_parser_function ?? defaultSettings.claim_parser_function,
           cross_links: orgSettings?.data?.data?.cross_links ?? [],
+          org_storage_enabled:
+            orgSettings?.data?.data?.org_storage_enabled ?? defaultSettings.org_storage_enabled,
+          domain_org_mappings: orgSettings?.data?.data?.domain_org_mappings ?? [],
         });
 
+        // Load the org's home dashboard (settings/v2 KV) alongside the legacy org
+        // settings so it's available on boot and every org switch.
+        await useHomeDashboard(t).load(store.state?.selectedOrganization?.identifier);
+
         if (
-          orgSettings?.data?.data?.free_trial_expiry != null &&
-          orgSettings?.data?.data?.free_trial_expiry != ""
-        ) {
-          const trialDueDays = getDueDays(
+          shouldPaywallRoute(
             orgSettings?.data?.data?.free_trial_expiry,
-          );
-          if (
-            trialDueDays <= 0 &&
-            trialPeriodAllowedPath.indexOf(router.currentRoute.value.name) == -1
-          ) {
-            router.push({
-              name: "plans",
-              query: {
-                org_identifier: selectedOrg.value.identifier,
-              },
-            });
-          }
+            router.currentRoute.value.name,
+          )
+        ) {
+          router.push({
+            name: "plans",
+            query: {
+              org_identifier: selectedOrg.value.identifier,
+            },
+          });
         }
       } catch (error: any) {
         // Handle permission errors gracefully (403 = Forbidden)
         if (error?.response?.status === 403) {
-          console.warn(
-            "Organization settings access denied (403). Using default settings.",
-          );
+          console.warn("Organization settings access denied (403). Using default settings.");
           // Set default settings when access is denied
           store.dispatch("setOrganizationSettings", defaultSettings);
         } else {
@@ -1003,30 +1242,85 @@ export default defineComponent({
     };
 
     /**
-     * Get configuration from the backend.
-     * @return {"version":"","instance":"","commit_hash":"","build_date":"","default_fts_keys":["field1","field2"],"telemetry_enabled":true,"default_functions":[{"name":"function name","text":"match_all('v')"}}
+     * Get the full authenticated configuration from the backend. The
+     * unauthenticated bootstrap fetched in main.ts carries only the login-page
+     * fields; everything menu- and feature-related arrives here.
      * @throws {Error} If the request fails.
      */
-    const getConfig = async () => {
-      await configService
-        .get_config()
-        .then(async (res: any) => {
+    const FULL_CONFIG_RETRY_DELAYS_MS = [2000, 5000, 15000];
+
+    const getConfig = async (attempt = 0) => {
+      const orgIdentifier = store.state.selectedOrganization?.identifier;
+      if (!orgIdentifier) {
+        // No org yet on a fresh session — the selectedOrganization watcher
+        // retries as soon as one is resolved. Fail open meanwhile: a user whose
+        // org never resolves (org-list failure, zero orgs) must still see the
+        // base menu, not a blank shell.
+        menuReady.value = true;
+        return;
+      }
+      // Cached per org, so a return to the shell inside the session does not
+      // re-download the config the menu is already filtered from. The retry
+      // below forces a real fetch, since the failure it recovers from is the
+      // reason there is nothing cached to serve.
+      if (attempt > 0) {
+        await queryClient.invalidateQueries({
+          queryKey: configFullQuery(orgIdentifier).queryKey,
+          exact: true,
+          refetchType: "none",
+        });
+      }
+      await queryClient
+        .fetchQuery(configFullQuery(orgIdentifier))
+        .then(async (data: any) => {
+          const res = { data };
           if (config.isCloud == "false") {
-            linksList.value = mainLayoutMixin
-              .setup()
-              .leftNavigationLinks(linksList, t);
+            linksList.value = mainLayoutMixin.setup().leftNavigationLinks(linksList, t);
           }
 
           store.dispatch("setConfig", res.data);
+          fullConfigOrg = orgIdentifier;
           await nextTick();
 
           filterMenus();
+          menuReady.value = true;
           // if rum enabled then setUser to capture session details.
           if (res.data.rum.enabled) {
             setRumUser();
           }
+          // The empty-data → /ingestion redirect depends on
+          // restricted_routes_on_empty_data, which only arrives with the full
+          // config — the first navigation ran before it landed, so re-check now.
+          if (
+            res.data.restricted_routes_on_empty_data === true &&
+            store.state.organizationData.isDataIngested === false
+          ) {
+            await verifyStreamExist(store.state.selectedOrganization);
+          }
         })
-        .catch((error) => console.log(error));
+        .catch((error) => {
+          if (error?.response?.status === 404) {
+            console.warn("Full configuration not found for this org (404):", error);
+          } else {
+            console.error("Failed to load the full configuration:", error);
+          }
+          // Fail open: reveal the base menu even if the config never resolves.
+          menuReady.value = true;
+          // Session replay must not be lost to a failed config fetch — the rum
+          // settings already arrived with the unauthenticated bootstrap.
+          if (store.state.zoConfig?.rum?.enabled) {
+            setRumUser();
+          }
+          // A transient failure (expired session being refreshed, rolling
+          // deploy) would otherwise strand the session on the bootstrap subset.
+          if (attempt < FULL_CONFIG_RETRY_DELAYS_MS.length) {
+            setTimeout(() => {
+              if (needsFullConfig()) {
+                getConfig(attempt + 1);
+              }
+            }, FULL_CONFIG_RETRY_DELAYS_MS[attempt]);
+          }
+        });
     };
 
     if (config.isCloud == "true") {
@@ -1049,9 +1343,7 @@ export default defineComponent({
 
     const prefetch = () => {
       const href = "/web/assets/editor.api.v1.js";
-      const existingLink = document.querySelector(
-        `link[rel="prefetch"][href="${href}"]`,
-      );
+      const existingLink = document.querySelector(`link[rel="prefetch"][href="${href}"]`);
 
       if (!existingLink) {
         // Create a new link element
@@ -1073,13 +1365,25 @@ export default defineComponent({
     };
 
     const toggleAIChat = () => {
+      // ai_enabled arrives with the async /config response, so it can't gate registration.
+      if (!store.state.zoConfig.ai_enabled) return;
       // On the home page, switch to the AI tab instead of opening the side panel
       if (router.currentRoute.value.name === "home") {
         window.dispatchEvent(new CustomEvent("o2:home-switch-tab", { detail: "ai" }));
         return;
       }
-      const isEnabled = !store.state.isAiChatEnabled;
-      store.dispatch("setIsAiChatEnabled", isEnabled);
+      if (!store.state.isAiChatEnabled) {
+        // Closed → Open inline sidebar
+        store.dispatch("setIsAiChatEnabled", true);
+        store.dispatch("setIsAiChatExpanded", false);
+      } else if (!store.state.isAiChatExpanded) {
+        // Inline sidebar → Close
+        store.dispatch("setIsAiChatEnabled", false);
+        store.dispatch("setIsAiChatExpanded", false);
+      } else {
+        // Expanded overlay → Back to inline sidebar
+        store.dispatch("setIsAiChatExpanded", false);
+      }
       window.dispatchEvent(new Event("resize"));
     };
 
@@ -1090,13 +1394,15 @@ export default defineComponent({
     };
 
     const getBtnLogo = computed(() => {
+      if (isDark.value) {
+        return getImageURL("images/common/ai_icon_dark.svg");
+      }
+
       if (isHovered.value) {
         return getImageURL("images/common/ai_icon_dark.svg");
       }
 
-      return store.state.theme === "dark"
-        ? getImageURL("images/common/ai_icon_dark.svg")
-        : getImageURL("images/common/ai_icon_gradient.svg");
+      return getImageURL("images/common/ai_icon_gradient.svg");
     });
     //this will be the function used to cancel the get started dialog and remove the isFirstTimeLogin from local storage
     //this will be called from the get started component whenever users clicks on the submit button
@@ -1128,7 +1434,9 @@ export default defineComponent({
       aiChatInputContext.value = "";
       nextTick(() => {
         aiChatInputContext.value = text;
-        nextTick(() => { aiChatInputContext.value = ""; });
+        nextTick(() => {
+          aiChatInputContext.value = "";
+        });
       });
     };
 
@@ -1144,30 +1452,56 @@ export default defineComponent({
       prefetchRoute(routePath);
     };
 
-    //this is the used to set the selected org to the user clicked org because all the operations are happening on the selected org
-    //to make sync with the user clicked org
-    //we dont need search query after selectedOrg has been changed so resetting it
+    // Sync the user-clicked org with the selected org
     watch(
       selectedOrg,
       (newVal) => {
         userClickedOrg.value = newVal;
-        searchQuery.value = "";
       },
       { immediate: true },
     );
 
+    // Home page has its own inline AI tab (see toggleAIChat's home special-case
+    // above), so the sidebar chat panel is redundant there — close it on
+    // arrival so we don't show both the sidebar and the home AI tab at once.
+    watch(
+      () => router.currentRoute.value.name,
+      (routeName) => {
+        if (routeName === "home" && store.state.isAiChatEnabled) {
+          closeChat();
+        }
+      },
+    );
+
+    const showShortcuts = ref(false);
+    const openShortcutsList = () => {
+      showShortcuts.value = true;
+    };
+
+    // ── Global shortcuts: AI Chat ─────────────────────────────────────────
+    // O2 AI is enterprise-only: on OSS the Ctrl+B binding must not exist at all.
+    if (config.isEnterprise == "true") {
+      useShortcuts([{ id: "aiChatToggle", handler: () => toggleAIChat() }]);
+    }
+
     return {
+      isDark,
       t,
+      raw,
       router,
       store,
       config,
+      announcementBarRef,
       langList,
       selectedLanguage,
       linksList,
+      navLinks,
       selectedOrg,
       orgOptions,
-      leftDrawerOpen: false,
+      isMobile,
+      isChatOverlay,
       miniMode,
+      mobileNavOpen,
       user,
       zoBackendUrl,
       isLoading,
@@ -1176,12 +1510,11 @@ export default defineComponent({
       setSelectedOrganization,
       getOrganizationSettings,
       resetStreams,
-      triggerRefreshToken,
       prefetch,
       expandMenu,
       slackIcon: markRaw(SlackIcon),
       openSlack,
-      outlinedSettings,
+      settings: "settings",
       closeSocket,
       splitterModel,
       toggleAIChat,
@@ -1193,16 +1526,15 @@ export default defineComponent({
       sendToAiChat,
       aiChatInputContext,
       aiChatAppendMode,
+      aiChatPayload,
       userClickedOrg,
-      searchQuery,
-      filteredOrganizations,
-      rowsPerPage,
       verifyStreamExist,
       filterMenus,
-      updateActionsMenu,
       getConfig,
       setRumUser,
       openPredefinedThemes,
+      showShortcuts,
+      openShortcutsList,
       isPredefinedThemesOpen,
       handleMenuHover,
     };
@@ -1232,9 +1564,15 @@ export default defineComponent({
       deep: true,
       immediate: true,
     },
-    async changeOrganizationIdentifier() {
+    async changeOrganizationIdentifier(_next: string, previous: string) {
       this.isLoading = false;
       this.resetStreams();
+      // Drops the previous org's persisted entries (plus any older session's
+      // other-org residue); in-memory ones stay, so switching back is free.
+      // Keys are org-rooted, so nothing can cross over.
+      if (previous) purgeOrgQueries(previous, _next);
+      // Clear notifications from the previous org — they no longer apply.
+      dismissAll();
       this.store.dispatch("setOrganizationPasscode", "");
       this.store.dispatch("resetOrganizationData", {});
 
@@ -1247,568 +1585,25 @@ export default defineComponent({
       this.isLoading = true;
       // Find the matching organization from orgOptions
       const matchingOrg = this.orgOptions.find(
-        (org) =>
-          org.identifier === this.store.state.selectedOrganization.identifier,
+        (org) => org.identifier === this.store.state.selectedOrganization.identifier,
       );
 
       if (matchingOrg) {
         this.selectedOrg = matchingOrg;
       }
     },
-    changeUserInfo(newVal) {
-      if (JSON.stringify(newVal) != "{}") {
-        this.triggerRefreshToken();
-      }
-    },
   },
 });
 </script>
 
-<style lang="scss">
-@import "../styles/app.scss";
-@import "../styles/menu-variables";
-@import "../styles/menu-animations";
-
-// Logo container
-.logo-container {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  min-height: 40px;
-  min-width: 150px;
-}
-
-// OpenObserve logo styling
-.openobserve-logo {
-  height: 32px;
-  width: auto;
-  max-width: 150px;
-  display: block;
-  transition: opacity 0.2s ease;
-
-  &:hover {
-    opacity: 0.8;
-  }
-}
-
-.printMode {
-  body {
-    overflow: auto !important;
-  }
-  .q-header {
-    display: none;
-  }
-
-  .q-drawer {
-    display: none;
-  }
-
-  .q-page-container {
-    padding-left: 0px !important;
-  }
-}
-
-@media print {
-  .tw:h-full,
-  .tw:h-\[calc\(100vh-105px\)\],
-  .tw:overflow-y-auto {
-    overflow: visible !important;
-  }
-}
-
-.q-drawer {
-  border-radius: 0.625rem;
-}
-
-.warning-msg {
-  background-color: var(--q-warning);
-  padding: 5px;
-  border-radius: 5px;
-}
-
-.alert-msg {
-  background-color: var(--q-alert);
-  padding: 5px;
-  border-radius: 5px;
-}
-
-.q-header .q-btn-dropdown__arrow {
-  margin-left: -4px;
-}
-
-.q-header {
-  color: unset;
-
-  .beta-text {
-    font-size: 11px;
-    right: 1px;
-    bottom: -9px;
-  }
-
-  .appLogo {
-    width: 120px;
-    max-width: 150px;
-    max-height: 31px;
-    cursor: pointer;
-
-    &__mini {
-      margin-right: 0.25rem;
-      // margin-left: 0.25rem;
-      height: 30px;
-      width: 30px;
-    }
-  }
-}
-
-.q-toolbar {
-  min-height: 40px;
-}
-
-.headerMenu {
-  margin-right: 1rem;
-
-  .block {
-    font-weight: 700;
-    color: #404040;
-  }
-}
-
-.q-item {
-  min-height: 30px;
-  padding: 3px 8px;
-}
-
-.o2-bg-color {
-  // background-color: rgba(89, 96, 178, 0.08);
-  background: transparent;
-}
-
-.q-list {
-  &.leftNavList {
-    padding: 4px 0px 0px 0px;
-
-    .q-item {
-      margin: 0px 5px;
-      display: list-item;
-      text-align: center;
-      list-style: none;
-      padding: 2px 2px;
-      border-radius: 5px;
-
-      .q-icon {
-        height: 1.3rem;
-        width: 1.3rem;
-      }
-
-      .q-item__label {
-        padding-bottom: 4px;
-      }
-
-      &.q-router-link--active {
-        .q-icon img {
-          filter: brightness(100);
-        }
-
-        .q-item__label {
-          color: var(--o2-menu-color);
-
-          // Light mode: make text blue for readability
-          body.body--light & {
-            color: #19191e !important;
-          }
-          // Dark mode: make text blue for readability
-          body.body--dark & {
-            color: #ffffff !important;
-          }
-        }
-        color: var(--o2-menu-color);
-
-        // Light mode: make item text blue
-        body.body--light & {
-          color: var(--o2-menu-color) !important;
-
-          .q-icon {
-            color: #19191e !important;
-          }
-        }
-
-        // Dark mode: make item text blue
-        body.body--dark & {
-          color: var(--o2-menu-color) !important;
-
-          .q-icon {
-            color: #ffffff !important;
-          }
-        }
-      }
-
-      &__label {
-        font-size: 12px;
-        font-weight: 600;
-        color: var(--o2-text-secondary);
-      }
-    }
-  }
-
-  .flagIcon img {
-    border-radius: 3px;
-    object-fit: cover;
-    display: block;
-    height: 16px;
-    width: 24px;
-  }
-
-  .q-item {
-    &__section {
-      &--avatar {
-        padding-right: 0px !important;
-        min-width: 1.5rem;
-        display: list-item;
-        text-align: center;
-        list-style: none;
-      }
-    }
-
-    &__label {
-      font-weight: 400;
-    }
-
-    &.activeLang {
-      &__label {
-        font-weight: 600;
-        color: $primary;
-      }
-    }
-  }
-}
-
-.userInfo {
-  align-items: flex-start;
-  flex-direction: column;
-  margin-left: 0.875rem;
-  margin-right: 1rem;
-  display: flex;
-
-  .userName {
-    line-height: 1.25rem;
-    font-weight: 700;
-  }
-
-  .userRole {
-    font-size: 0.75rem;
-    line-height: 1rem;
-    color: #565656;
-    font-weight: 600;
-  }
-}
-
-.headerMenu {
-  margin-right: 1rem;
-
-  .block {
-    font-weight: 700;
-    color: #404040;
-  }
-}
-.q-list {
-  // &.leftNavList {
-  //   .q-item {
-  //     .q-icon {
-  //       height: 1rem;
-  //       width: 1rem;
-  //     }
-
-  //     &.q-router-link--active {
-  //       .q-icon img {
-  //         filter: brightness(100);
-  //       }
-  //     }
-  //   }
-  // }
-
-  .flagIcon img {
-    border-radius: 3px;
-    object-fit: cover;
-    display: block;
-    height: 16px;
-    width: 24px;
-  }
-
-  .q-item {
-    &__section {
-      &--avatar {
-        padding-right: 0.875rem;
-        min-width: 1.5rem;
-      }
-    }
-
-    &__label {
-      font-weight: 400;
-    }
-
-    &.activeLang {
-      &__label {
-        font-weight: 600;
-        color: $primary;
-      }
-    }
-  }
-}
-
-.userInfo {
-  align-items: flex-start;
-  flex-direction: column;
-  margin-left: 0.875rem;
-  margin-right: 1rem;
-  display: flex;
-
-  .userName {
-    line-height: 1.25rem;
-    font-weight: 700;
-  }
-
-  .userRole {
-    font-size: 0.75rem;
-    line-height: 1rem;
-    color: #565656;
-    font-weight: 600;
-  }
-}
-
-.dark-mode {
-  background-color: $dark-page;
-}
-
-.languagelist {
-  .q-item {
-    padding: 4px 8px;
-  }
-}
-
-.text-powered-by {
-  float: left;
-  display: inline-block;
-  position: absolute;
-  margin-top: 16px;
-  margin-left: 0px;
-}
-
-.custom-text-logo {
-  display: inline-block;
-  float: left;
-  position: absolute;
-  margin-left: 72px !important;
-  margin-top: 16px !important;
-  width: 80px !important;
-}
-
-.header-menu {
-  .q-btn {
-    transition: transform 0.2s ease;
-
-    &:hover {
-      transform: translateY(-2px);
-    }
-
-    // Skip bounce effect for AI button and org selector
-    &.ai-hover-btn {
-      &:hover {
-        transform: none;
-      }
-    }
-  }
-
-  // Skip bounce for org selector (inside div)
-  [data-test="navbar-organizations-select"] .q-btn {
-    &:hover {
-      transform: none;
-    }
-  }
-}
-
-.header-icon {
-  opacity: 0.7;
-}
-
-body.ai-chat-open {
-  .q-layout {
-    width: 75%;
-    transition: width 0.3s ease;
-  }
-}
-
-.q-layout {
-  width: 100%;
-  transition: width 0.3s ease;
-}
-
-.o2-button {
-  border-radius: 4px;
-  padding: 0px 8px;
-  color: white;
-}
-.dark-mode-chat-container {
-}
-.light-mode-chat-container {
-}
-
-
-.ai-btn-active {
-  background: linear-gradient(
-    135deg,
-    rgba(139, 92, 246, 0.15) 0%,
-    rgba(236, 72, 153, 0.15) 100%
-  ) !important;
-
-  .header-icon {
-    opacity: 1 !important;
-  }
-}
-.ai-btn-active:hover {
-  background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%) !important;
-}
-.ai-hover-btn {
-  background: linear-gradient(
-    135deg,
-    rgba(139, 92, 246, 0.15) 0%,
-    rgba(236, 72, 153, 0.15) 100%
-  ) !important;
-  transition:
-    background 0.3s ease,
-    box-shadow 0.3s ease;
-}
-
-.ai-hover-btn:hover {
-  background: linear-gradient(135deg, #8b5cf6 0%, #ec4899 100%) !important;
-  box-shadow: 0 0.25rem 0.75rem 0 rgba(139, 92, 246, 0.35);
-}
-
-.ai-icon {
-  transition: transform 0.6s ease;
-}
-
-.ai-hover-btn:hover .ai-icon {
-  transform: rotate(180deg);
-}
-
-.theme-btn-active {
-  background: color-mix(
-    in srgb,
-    var(--o2-theme-color) 15%,
-    transparent 85%
-  ) !important;
-
-  .header-icon {
-    opacity: 1 !important;
-    color: var(--o2-theme-color) !important;
-  }
-}
-
-.organization-menu-o2 {
-  // Disable hover for organization menu dropdown
-  // Disable table row hover
-  .q-tr:hover,
-  tr:hover,
-  tbody tr:hover,
-  tbody .q-tr:hover {
-    background-color: transparent !important;
-    background: transparent !important;
-  }
-
-  td:hover,
-  .q-td:hover {
-    background-color: transparent !important;
-    background: transparent !important;
-  }
-
-  // Disable default q-item hover
-  .q-item:hover {
-    background-color: transparent !important;
-    background: transparent !important;
-    color: inherit !important;
-  }
-
-  .org-table {
-    // Disable global table row hover
-    tbody .q-tr:hover {
-      background: transparent !important;
-    }
-
-    td {
-      padding: 0 !important;
-      height: 32px !important;
-      min-height: 32px !important;
-    }
-
-    .q-table__top {
-      padding: 10px !important;
-
-      .q-field__control {
-        height: 40px;
-      }
-
-      input {
-        font-size: 14px;
-      }
-    }
-
-    .q-table__bottom {
-      padding: 8px 12px !important;
-      min-height: 40px;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: space-between !important;
-
-      .q-table__control {
-        display: flex !important;
-        align-items: center !important;
-      }
-
-      // Ensure pagination arrows are visible
-      .q-btn {
-        display: inline-flex !important;
-        opacity: 1 !important;
-        visibility: visible !important;
-      }
-    }
-
-    // Table cell with no padding
-    .org-list-item-cell {
-      padding: 0 !important;
-      cursor: pointer;
-    }
-
-    // Individual org menu item
-    .org-menu-item {
-      padding: 6px 12px;
-      width: 100%;
-      display: block;
-      transition: background-color 0.2s ease;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-size: 13px;
-
-      // Enable hover only for individual org menu items
-      &:hover {
-        background-color: var(--o2-hover-accent) !important;
-        border-radius: 4px;
-      }
-
-      // Active/selected state
-      &--active {
-        color: var(--q-primary) !important;
-        font-weight: 500;
-        background: rgba(89, 96, 178, 0.08);
-
-        &:hover {
-          background: rgba(89, 96, 178, 0.12) !important;
-        }
-      }
-    }
-  }
-}
-.q-drawer {
-  margin-bottom: 0.675rem;
+<style scoped>
+/* keep(print): This layout's root is the ONLY writer of `.printMode` (store.state.printMode,
+   above), so the rule can only ever fire on descendants of that root — but
+   `.hideOnPrintMode` is placed by other components (VariableAdHocValueSelector,
+   pipeline/PipelineEditor, Dashboards/ViewDashboard) that render through
+   <router-view> and so do not carry this scope id. :deep() pierces to them while
+   keeping the ancestor condition scoped to the owner. */
+.printMode :deep(.hideOnPrintMode) {
+  display: none;
 }
 </style>

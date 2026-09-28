@@ -15,23 +15,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div v-if="hasValidContent" class="llm-content-renderer tw:h-full">
+  <div v-if="hasValidContent" class="llm-content-renderer h-full w-full">
     <!-- Tool-specific rendering -->
-    <div v-if="isToolObservation && toolContent !== null" class="tool-content">
-      <div v-if="toolMetadata" class="tool-metadata q-mb-sm">
-        <q-badge
-          v-if="toolMetadata.name"
-          :label="`Tool: ${toolMetadata.name}`"
-          color="orange"
-          class="q-mr-sm"
-        />
-        <q-badge
-          v-if="toolMetadata.callId"
-          :label="`Call ID: ${toolMetadata.callId}`"
-          color="grey"
-        />
+    <div v-if="isToolObservation && toolContent !== null" class="tool-content flex h-full flex-col">
+      <div v-if="toolMetadata" class="mb-2 flex flex-wrap items-center gap-2">
+        <OTag v-if="toolMetadata.name" type="toolMeta" value="tool" class="me-2">{{
+          t("traces.lLMContentRenderer.tool", { name: toolMetadata.name })
+        }}</OTag>
+        <OTag v-if="toolMetadata.callId" type="toolMeta" value="callid">{{
+          t("traces.lLMContentRenderer.callId", { callId: toolMetadata.callId })
+        }}</OTag>
       </div>
-      <div class="tool-data">
+      <div class="tool-data flex-1">
         <CodeQueryEditor
           :editor-id="`${editorIdPrefix}tool-json-viewer-${span?.llm_tool_call_id || 'unknown'}`"
           :query="toolContentJson"
@@ -40,60 +35,51 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
           :show-auto-complete="false"
           :show-line-numbers="false"
           :sticky-scroll="false"
-          class="json-viewer-editor tw:max-h-full! tw:h-full!"
+          class="rounded-default h-full! max-h-full! min-h-25 w-full overflow-hidden"
         />
       </div>
     </div>
 
     <!-- Regular content rendering -->
-    <div
-      v-else
-      class="content-wrapper"
-      :class="
-        props.viewMode === 'formatted' &&
-        !shouldRenderAsMessages &&
-        !isPlainText &&
-        'tw:h-full'
-      "
-    >
+    <div v-else class="content-wrapper" :class="shouldFillFormattedContent && 'h-full'">
       <!-- Truncated view -->
       <div
         v-if="!isExpanded && contentStats.shouldTruncate"
-        :class="
-          props.viewMode === 'formatted' &&
-          !shouldRenderAsMessages &&
-          !isPlainText &&
-          'tw:h-full'
-        "
+        :class="shouldFillFormattedContent && 'h-full'"
       >
         <!-- Formatted mode -->
-        <div
-          v-if="props.viewMode === 'formatted'"
-          :class="!shouldRenderAsMessages && !isPlainText && 'tw:h-full'"
-        >
-          <div v-if="shouldRenderAsMessages" class="messages-view">
+        <div v-if="props.viewMode === 'formatted'" :class="shouldFillFormattedContent && 'h-full'">
+          <div
+            v-if="shouldRenderAsMessages"
+            class="messages-view"
+            :class="shouldFillSingleJsonMessage && 'h-full'"
+          >
+            <!-- eslint-disable local/no-hardcoded-px -- hairline: a 1-device-pixel rule must not scale with text or it smears at fractional zoom -->
             <div
               v-for="(msg, idx) in previewMessages"
               :key="idx"
-              class="message-item q-mb-sm tw:h-full"
+              class="message-item mb-2"
+              :class="shouldFillSingleJsonMessage && 'mb-0 flex h-full flex-col'"
               :style="{
-                border: '1px solid var(--o2-border)',
-                borderRadius: '8px',
+                border: '1px solid var(--color-border-default)',
+                borderRadius: '0.5rem',
               }"
             >
+              <!-- eslint-enable local/no-hardcoded-px -->
+              <!-- eslint-disable local/no-hardcoded-px -- hairline: a 1-device-pixel rule must not scale with text or it smears at fractional zoom -->
               <div
-                class="message-role text-caption text-bold q-pa-sm tw:capitalize"
+                class="message-role p-2 text-xs font-bold capitalize"
                 :style="{
                   backgroundColor: roleColor(msg.role),
-                  borderBottom: '1px solid var(--o2-border)',
+                  borderBottom: '1px solid var(--color-border-default)',
                 }"
               >
+                <!-- eslint-enable local/no-hardcoded-px -->
                 {{ roleLabel(msg.role) }}
               </div>
               <div
                 v-if="isMessageJson(msg.content)"
-                class="message-content-json q-pa-sm tw:h-full"
-                style="background-color: var(--o2-code-bg)"
+                class="message-content-json text-compact bg-code-bg min-h-0 flex-1 p-2"
               >
                 <CodeQueryEditor
                   :editor-id="`${editorIdPrefix}msg-json-editor-${idx}`"
@@ -103,19 +89,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   :show-auto-complete="false"
                   :show-line-numbers="false"
                   :sticky-scroll="false"
-                  class="json-viewer-editor tw:max-h-full! tw:h-full!"
+                  class="rounded-default h-full! max-h-full! min-h-25 w-full overflow-hidden"
                 />
               </div>
               <div
                 v-else
-                class="message-content markdown-body q-pa-sm tw:overflow-x-auto"
-                style="background-color: var(--o2-code-bg)"
+                class="message-content markdown-body bg-code-bg max-w-full min-w-0 overflow-x-auto p-2 wrap-anywhere"
                 v-html="renderMarkdown(msg.content)"
               />
             </div>
           </div>
           <div v-else-if="isPlainText" class="text-content">
-            <pre class="plain-text-content">{{ contentStats.previewText }}</pre>
+            <pre
+              class="plain-text-content text-compact bg-code-bg rounded-default m-0 overflow-x-auto p-2 font-mono leading-normal wrap-break-word whitespace-pre-wrap"
+              >{{ contentStats.previewText }}</pre>
           </div>
           <div v-else class="json-content">
             <CodeQueryEditor
@@ -126,13 +113,13 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               :show-auto-complete="false"
               :show-line-numbers="false"
               :sticky-scroll="false"
-              class="json-viewer-editor tw:max-h-full! tw:h-full!"
+              class="rounded-default h-full! max-h-full! min-h-25 w-full overflow-hidden"
             />
           </div>
         </div>
 
         <!-- JSON mode -->
-        <div v-else class="json-content tw:h-full!">
+        <div v-else class="json-content h-full!">
           <CodeQueryEditor
             :editor-id="`truncated-json-mode-viewer-${editorIdPrefix}`"
             :query="parsedContentJson"
@@ -141,61 +128,57 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :show-auto-complete="false"
             :show-line-numbers="false"
             :sticky-scroll="false"
-            class="json-viewer-editor tw:max-h-full! tw:h-full!"
+            class="rounded-default h-full! max-h-full! min-h-25 w-full overflow-hidden"
           />
         </div>
 
-        <div class="expand-indicator q-mt-sm">
-          <q-btn
-            flat
-            dense
-            color="primary"
+        <div class="mt-2 text-center">
+          <OButton
+            variant="ghost-primary"
             size="sm"
+            data-test="traces-llm-content-renderer-expand-btn"
             @click="isExpanded = true"
           >
-            ...expand ({{ contentStats.remainingChars }} more characters)
-          </q-btn>
+            {{ t("traces.lLMContentRenderer.expandMore", { count: contentStats.remainingChars }) }}
+          </OButton>
         </div>
       </div>
 
       <!-- Full content view -->
-      <div
-        v-else
-        :class="
-          props.viewMode === 'formatted' &&
-          !shouldRenderAsMessages &&
-          !isPlainText &&
-          'tw:h-full'
-        "
-      >
+      <div v-else :class="shouldFillFormattedContent && 'h-full'">
         <!-- Formatted mode -->
-        <div
-          v-if="props.viewMode === 'formatted'"
-          :class="!shouldRenderAsMessages && !isPlainText && 'tw:h-full'"
-        >
-          <div v-if="shouldRenderAsMessages" class="messages-view">
+        <div v-if="props.viewMode === 'formatted'" :class="shouldFillFormattedContent && 'h-full'">
+          <div
+            v-if="shouldRenderAsMessages"
+            class="messages-view"
+            :class="shouldFillSingleJsonMessage && 'h-full'"
+          >
+            <!-- eslint-disable local/no-hardcoded-px -- hairline: a 1-device-pixel rule must not scale with text or it smears at fractional zoom -->
             <div
               v-for="(msg, idx) in parsedMessages"
               :key="idx"
-              class="message-item q-mb-sm tw:h-full"
+              class="message-item mb-2"
+              :class="shouldFillSingleJsonMessage && 'mb-0 flex h-full flex-col'"
               :style="{
-                border: '1px solid var(--o2-border)',
-                borderRadius: '8px',
+                border: '1px solid var(--color-border-default)',
+                borderRadius: '0.5rem',
               }"
             >
+              <!-- eslint-enable local/no-hardcoded-px -->
+              <!-- eslint-disable local/no-hardcoded-px -- hairline: a 1-device-pixel rule must not scale with text or it smears at fractional zoom -->
               <div
-                class="message-role text-caption text-bold q-pa-sm tw:capitalize"
+                class="message-role p-2 text-xs font-bold capitalize"
                 :style="{
                   backgroundColor: roleColor(msg.role),
-                  borderBottom: '1px solid var(--o2-border)',
+                  borderBottom: '1px solid var(--color-border-default)',
                 }"
               >
+                <!-- eslint-enable local/no-hardcoded-px -->
                 {{ roleLabel(msg.role) }}
               </div>
               <div
                 v-if="isMessageJson(msg.content)"
-                class="message-content-json q-pa-sm tw:h-full"
-                style="background-color: var(--o2-code-bg)"
+                class="message-content-json text-compact bg-code-bg min-h-0 flex-1 p-2"
               >
                 <CodeQueryEditor
                   :editor-id="`${editorIdPrefix}msg-json-editor-full-${idx}`"
@@ -205,21 +188,22 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   :show-auto-complete="false"
                   :show-line-numbers="false"
                   :sticky-scroll="false"
-                  class="json-viewer-editor tw:max-h-full! tw:h-full!"
+                  class="rounded-default h-full! max-h-full! min-h-25 w-full overflow-hidden"
                 />
               </div>
               <div
                 v-else
-                class="message-content markdown-body q-pa-sm tw:overflow-x-auto"
-                style="background-color: var(--o2-code-bg)"
+                class="message-content markdown-body bg-code-bg max-w-full min-w-0 overflow-x-auto p-2 wrap-anywhere"
                 v-html="renderMarkdown(msg.content)"
               />
             </div>
           </div>
           <div v-else-if="isPlainText" class="text-content">
-            <pre class="plain-text-content">{{ fullText }}</pre>
+            <pre
+              class="plain-text-content text-compact bg-code-bg rounded-default m-0 overflow-x-auto p-2 font-mono leading-normal wrap-break-word whitespace-pre-wrap"
+              >{{ fullText }}</pre>
           </div>
-          <div v-else class="json-content tw:h-full">
+          <div v-else class="json-content h-full">
             <CodeQueryEditor
               :editor-id="`full-formatted-json-viewer-${editorIdPrefix}`"
               :query="parsedContentJson"
@@ -228,7 +212,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               :show-auto-complete="false"
               :show-line-numbers="false"
               :sticky-scroll="false"
-              class="json-viewer-editor tw:max-h-full! tw:h-full"
+              class="rounded-default h-full max-h-full! min-h-25 w-full overflow-hidden"
             />
           </div>
         </div>
@@ -243,20 +227,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :show-auto-complete="false"
             :show-line-numbers="false"
             :sticky-scroll="false"
-            class="json-viewer-editor"
+            class="rounded-default h-full max-h-full min-h-25 w-full overflow-hidden"
           />
         </div>
 
-        <div v-if="contentStats.shouldTruncate" class="collapse-btn q-mt-sm">
-          <q-btn
-            flat
-            dense
-            color="primary"
-            size="sm"
-            @click="isExpanded = false"
-          >
-            Collapse
-          </q-btn>
+        <div v-if="contentStats.shouldTruncate" class="mt-2 text-center">
+          <OButton variant="ghost-primary" size="sm" @click="isExpanded = false">
+            {{ t("traces.lLMContentRenderer.collapse") }}
+          </OButton>
         </div>
       </div>
     </div>
@@ -265,12 +243,16 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref } from "vue";
+import { raw, useI18nTyped } from "@/types/i18n";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { extractGenAiPartText } from "./genAiParts";
 
-const CodeQueryEditor = defineAsyncComponent(
-  () => import("@/components/CodeQueryEditor.vue"),
-);
+const { t } = useI18nTyped();
+
+const CodeQueryEditor = defineAsyncComponent(() => import("@/components/CodeQueryEditor.vue"));
+import OButton from "@/lib/core/Button/OButton.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
 
 const INITIAL_LINE_LIMIT = 15;
 
@@ -281,7 +263,7 @@ const props = defineProps({
   },
   observationType: {
     type: String,
-    default: "SPAN",
+    default: "span",
   },
   contentType: {
     type: String as () => "input" | "output",
@@ -301,22 +283,20 @@ const props = defineProps({
   },
 });
 
-const editorIdPrefix = computed(() =>
-  props.instanceId ? `${props.instanceId}-` : "",
-);
+const editorIdPrefix = computed(() => (props.instanceId ? `${props.instanceId}-` : ""));
 
 const isExpanded = ref(false);
 
 // Tool observation type handling
 const isToolObservation = computed(() => {
-  return props.observationType === "TOOL";
+  return props.observationType === "execute_tool";
 });
 
 const toolMetadata = computed(() => {
   if (!isToolObservation.value || !props.span) return null;
   return {
-    name: props.span.llm_tool_name,
-    callId: props.span.llm_tool_call_id,
+    name: props.span.gen_ai_tool_name,
+    callId: props.span.gen_ai_tool_call_id,
   };
 });
 
@@ -326,9 +306,9 @@ const toolContent = computed(() => {
   let content = null;
   if (props.span) {
     if (props.contentType === "input") {
-      content = props.span.llm_tool_call_arguments;
+      content = props.span.gen_ai_tool_call_arguments;
     } else {
-      content = props.span.llm_tool_call_result;
+      content = props.span.gen_ai_tool_call_result;
     }
   }
 
@@ -354,11 +334,7 @@ const toolContent = computed(() => {
   // Handle nested content structure: {content: [{type: "text", text: "..."}]}
   if (content && typeof content === "object") {
     // Check if it has the Anthropic content format
-    if (
-      content.content &&
-      Array.isArray(content.content) &&
-      content.content.length > 0
-    ) {
+    if (content.content && Array.isArray(content.content) && content.content.length > 0) {
       const firstContent = content.content[0];
       if (firstContent.type === "text" && firstContent.text) {
         // Try to parse the inner text as JSON
@@ -415,13 +391,15 @@ const parsedContent = computed(() => {
 
     // Handle nested content structure: {content: [{type: "text", text: "..."}]}
     if (props.content && typeof props.content === "object") {
+      // Arrays fall through this branch; the cast only widens for the key lookup.
+      const contentObj = props.content as Record<string, any>;
       // Check if it has the Anthropic content format
       if (
-        props.content.content &&
-        Array.isArray(props.content.content) &&
-        props.content.content.length > 0
+        contentObj.content &&
+        Array.isArray(contentObj.content) &&
+        contentObj.content.length > 0
       ) {
-        const firstContent = props.content.content[0];
+        const firstContent = contentObj.content[0];
         if (firstContent.type === "text" && firstContent.text) {
           // Try to parse the inner text as JSON
           try {
@@ -447,9 +425,7 @@ const isMessagesArray = computed(() => {
   return (
     Array.isArray(parsedContent.value) &&
     parsedContent.value.length > 0 &&
-    parsedContent.value.every(
-      (item: any) => item && typeof item === "object" && "role" in item,
-    )
+    parsedContent.value.every((item: any) => item && typeof item === "object" && "role" in item)
   );
 });
 
@@ -474,18 +450,14 @@ const isContentPartsArray = computed(() => {
         item &&
         typeof item === "object" &&
         "type" in item &&
-        (item.type === "text" ||
-          item.type === "image_url" ||
-          item.type === "image"),
+        (item.type === "text" || item.type === "image_url" || item.type === "image"),
     )
   );
 });
 
 // Check if content should be rendered as messages (any format)
 const shouldRenderAsMessages = computed(() => {
-  return (
-    isMessagesArray.value || isSingleMessage.value || isContentPartsArray.value
-  );
+  return isMessagesArray.value || isSingleMessage.value || isContentPartsArray.value;
 });
 
 const isPlainText = computed(() => {
@@ -504,18 +476,38 @@ const isPlainText = computed(() => {
 // Helper function to format content (handles string, array of parts, or object)
 const formatContent = (content: any): string => {
   // Handle array content (OpenAI multimodal format: [{type: 'text', text: '...'}, {type: 'image_url', image_url: {...}}])
+  //
+  // The "[Image: …]" markers below stay English: renderMarkdown() matches them
+  // with /\[Image: (https?:\/\/[^\]]+)\]/ to turn them into real markdown image
+  // syntax, so a translated marker would never be rendered as an image.
   if (Array.isArray(content)) {
     const parts: string[] = [];
     for (const part of content) {
+      const genAiText = extractGenAiPartText(part);
       if (part.type === "text" && part.text) {
         parts.push(part.text);
+      } else if (genAiText != null) {
+        // OTel GenAI v5 parts (reasoning, tool_call, tool_call_response, ...) —
+        // kept in sync with the Thread tab via genAiParts.ts.
+        parts.push(genAiText);
       } else if (part.type === "image_url" && part.image_url?.url) {
-        parts.push(`[Image: ${part.image_url.url}]`);
+        parts.push(raw(`[Image: ${part.image_url.url}]`));
       } else if (part.type === "image" && part.source) {
         // Handle Anthropic-style image content
-        parts.push(`[Image: ${part.source.type || "base64"}]`);
+        parts.push(raw(`[Image: ${part.source.type || "base64"}]`));
+      } else if (part.type === "blob") {
+        // OTel GenAI v5 BlobPart — never show the raw base64 payload.
+        parts.push(raw(`[${part.modality ?? "Blob"}: ${part.mime_type ?? "binary"}]`));
+      } else if (part.type === "file") {
+        parts.push(raw(`[File: ${part.file_id ?? part.mime_type ?? "unknown"}]`));
+      } else if (part.type === "uri") {
+        parts.push(raw(`[${part.modality ?? "Uri"}: ${part.uri ?? ""}]`));
+      } else if (typeof part?.type === "string") {
+        // Unrecognised part type — same "[type]" marker as the Thread tab
+        // (threadView.utils.ts), not a raw JSON dump.
+        parts.push(raw(`[${part.type}]`));
       } else {
-        // Fallback for unknown part types
+        // No `type` at all to build a marker from — last-resort raw dump.
         parts.push(JSON.stringify(part));
       }
     }
@@ -535,10 +527,14 @@ const toolContentJson = computed(() => {
 });
 
 const parsedContentJson = computed(() => {
-  if (parsedContent.value === null || parsedContent.value === undefined)
-    return "";
+  if (parsedContent.value === null || parsedContent.value === undefined) return "";
   return JSON.stringify(parsedContent.value, null, 2);
 });
+
+// A message body is either the legacy `content` field or, for OTel GenAI
+// semconv v5 messages, the `parts` array — `formatContent` already knows how
+// to render both shapes.
+const messageBody = (msg: any) => formatContent(msg.content ?? msg.parts);
 
 // Extract messages
 const parsedMessages = computed(() => {
@@ -546,7 +542,7 @@ const parsedMessages = computed(() => {
   if (isMessagesArray.value) {
     return (parsedContent.value as any[]).map((msg: any) => ({
       role: msg.role || "unknown",
-      content: formatContent(msg.content),
+      content: messageBody(msg),
     }));
   }
 
@@ -556,7 +552,7 @@ const parsedMessages = computed(() => {
     return [
       {
         role: msg.role || "assistant",
-        content: formatContent(msg.content),
+        content: messageBody(msg),
       },
     ];
   }
@@ -591,9 +587,7 @@ const contentStats = computed(() => {
 
   if (shouldRenderAsMessages.value) {
     // For messages, concatenate all message contents
-    text = parsedMessages.value
-      .map((m: any) => `${m.role}: ${m.content}`)
-      .join("\n");
+    text = parsedMessages.value.map((m: any) => `${m.role}: ${m.content}`).join("\n");
   } else {
     text = fullText.value;
   }
@@ -627,10 +621,7 @@ const previewMessages = computed(() => {
       // Include partial message if possible
       const remainingLines = INITIAL_LINE_LIMIT - lineCount;
       if (remainingLines > 0) {
-        const truncatedContent = msg.content
-          .split("\n")
-          .slice(0, remainingLines)
-          .join("\n");
+        const truncatedContent = msg.content.split("\n").slice(0, remainingLines).join("\n");
         preview.push({
           ...msg,
           content: truncatedContent + "...",
@@ -645,7 +636,7 @@ const previewMessages = computed(() => {
   return preview;
 });
 
-// Message item helpers (was previously in MessageItem render function)
+// Message item helpers
 const roleColor = (role: string) => {
   const colors: Record<string, string> = {
     user: "rgba(25, 118, 210, 0.1)",
@@ -658,10 +649,10 @@ const roleColor = (role: string) => {
 
 const roleLabel = (role: string) => {
   const labels: Record<string, string> = {
-    user: "User",
-    assistant: "Assistant",
-    system: "System",
-    tool: "Tool",
+    user: t("traces.lLMContentRenderer.roleUser"),
+    assistant: t("traces.lLMContentRenderer.roleAssistant"),
+    system: t("traces.lLMContentRenderer.roleSystem"),
+    tool: t("traces.lLMContentRenderer.roleTool"),
   };
   return labels[role] || role;
 };
@@ -683,176 +674,136 @@ const stringifyMessageContent = (content: string): string => {
   return JSON.stringify(JSON.parse(content), null, 2);
 };
 
+const shouldFillSingleJsonMessage = computed(() => {
+  return parsedMessages.value.length === 1 && isMessageJson(parsedMessages.value[0].content);
+});
+
+const shouldFillFormattedContent = computed(() => {
+  return (
+    props.viewMode === "formatted" &&
+    ((!shouldRenderAsMessages.value && !isPlainText.value) || shouldFillSingleJsonMessage.value)
+  );
+});
+
 const renderMarkdown = (content: string): string => {
   const markdownContent = toMarkdown(content);
   return DOMPurify.sanitize(marked.parse(markdownContent) as string);
 };
 </script>
 
-<style scoped lang="scss">
-.llm-content-renderer {
+<style scoped>
+/* keep(generated-content): styles the markdown DOM injected via v-html into
+   .message-content, which never receives the scope attribute — reached with
+   :deep(). Tailwind cannot target these runtime-generated nodes. */
+.messages-view .message-item .message-content {
+  font-size: var(--text-compact);
+  line-height: 1.6;
+}
+
+.messages-view .message-item .message-content :deep(p) {
+  margin: 0 0 0.5rem 0;
+}
+
+.messages-view .message-item .message-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.messages-view .message-item .message-content :deep(img) {
+  max-width: 50%;
+  max-height: 25rem;
+  object-fit: contain;
+  display: block;
+  margin: 0.5rem 0;
+  border-radius: 0.25rem;
+}
+
+.messages-view .message-item .message-content :deep(pre) {
+  background-color: color-mix(in srgb, var(--color-black) 5%, transparent);
+  padding: 0.5rem;
+  border-radius: 0.25rem;
+  overflow-x: auto;
+  margin: 0.5rem 0;
+}
+
+.messages-view .message-item .message-content :deep(code) {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  background-color: color-mix(in srgb, var(--color-black) 5%, transparent);
+  padding: 0.125rem 0.25rem;
+  border-radius: 0.1875rem;
+}
+
+.messages-view .message-item .message-content :deep(pre code) {
+  background-color: transparent;
+  padding: 0;
+}
+
+.messages-view .message-item .message-content :deep(ul),
+.messages-view .message-item .message-content :deep(ol) {
+  margin: 0.5rem 0;
+  padding-left: 1.5rem;
+}
+
+.messages-view .message-item .message-content :deep(li) {
+  margin: 0.25rem 0;
+}
+
+.messages-view .message-item .message-content :deep(a) {
+  color: var(--color-theme-accent);
+  text-decoration: none;
+}
+
+.messages-view .message-item .message-content :deep(a:hover) {
+  text-decoration: underline;
+}
+
+.messages-view .message-item .message-content :deep(blockquote) {
+  border-left: 0.1875rem solid var(--color-border-default);
+  margin: 0.5rem 0;
+  padding-left: 0.75rem;
+  color: var(--color-text-secondary);
+}
+
+.messages-view .message-item .message-content :deep(table) {
+  border-collapse: collapse;
   width: 100%;
+  margin: 0.5rem 0;
 }
 
-.tool-content {
-  .tool-metadata {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-  }
+.messages-view .message-item .message-content :deep(table th),
+.messages-view .message-item .message-content :deep(table td) {
+  /* eslint-disable-next-line local/no-hardcoded-px -- hairline: a 1-device-pixel table rule must not scale with text or it smears at fractional zoom */
+  border: 1px solid var(--color-border-default);
+  padding: 0.375rem 0.5rem;
+  text-align: left;
 }
 
-.messages-view {
-  .message-item {
-    .message-content {
-      font-size: 13px;
-      line-height: 1.6;
-
-      :deep(p) {
-        margin: 0 0 8px 0;
-
-        &:last-child {
-          margin-bottom: 0;
-        }
-      }
-
-      :deep(img) {
-        max-width: 50%;
-        max-height: 400px;
-        object-fit: contain;
-        display: block;
-        margin: 8px 0;
-        border-radius: 4px;
-      }
-
-      :deep(pre) {
-        background-color: rgba(0, 0, 0, 0.05);
-        padding: 8px;
-        border-radius: 4px;
-        overflow-x: auto;
-        margin: 8px 0;
-      }
-
-      :deep(code) {
-        font-family: monospace;
-        font-size: 12px;
-        background-color: rgba(0, 0, 0, 0.05);
-        padding: 2px 4px;
-        border-radius: 3px;
-      }
-
-      :deep(pre code) {
-        background-color: transparent;
-        padding: 0;
-      }
-
-      :deep(ul),
-      :deep(ol) {
-        margin: 8px 0;
-        padding-left: 24px;
-      }
-
-      :deep(li) {
-        margin: 4px 0;
-      }
-
-      :deep(a) {
-        color: var(--q-primary);
-        text-decoration: none;
-
-        &:hover {
-          text-decoration: underline;
-        }
-      }
-
-      :deep(blockquote) {
-        border-left: 3px solid var(--o2-border-color);
-        margin: 8px 0;
-        padding-left: 12px;
-        color: var(--o2-text-secondary);
-      }
-
-      :deep(table) {
-        border-collapse: collapse;
-        width: 100%;
-        margin: 8px 0;
-
-        th,
-        td {
-          border: 1px solid var(--o2-border-color);
-          padding: 6px 8px;
-          text-align: left;
-        }
-
-        th {
-          background-color: rgba(0, 0, 0, 0.05);
-        }
-      }
-    }
-
-    .message-content-json {
-      font-size: 13px;
-    }
-  }
+.messages-view .message-item .message-content :deep(table th) {
+  background-color: color-mix(in srgb, var(--color-black) 5%, transparent);
 }
 
-.text-content {
-  .plain-text-content {
-    margin: 0;
-    padding: 0.5rem;
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-family: monospace;
-    font-size: 13px;
-    line-height: 1.5;
-    background-color: var(--o2-code-bg);
-    border-radius: 4px;
-    overflow-x: auto;
-  }
+.messages-view .message-item .message-content :deep(h1),
+.messages-view .message-item .message-content :deep(h2),
+.messages-view .message-item .message-content :deep(h3),
+.messages-view .message-item .message-content :deep(h4) {
+  font-weight: 600;
+  margin: 0.625rem 0 0.375rem 0;
+  line-height: 1.4;
 }
 
-.expand-indicator,
-.collapse-btn {
-  text-align: center;
+.messages-view .message-item .message-content :deep(h1) {
+  font-size: var(--text-lg);
 }
 
-.json-viewer-editor {
-  height: 300px;
-  max-height: 500px;
-  min-height: 100px;
-  width: 100%;
-  border-radius: 4px;
-  overflow: hidden;
+.messages-view .message-item .message-content :deep(h2) {
+  font-size: var(--text-base);
 }
-</style>
 
-<style lang="scss">
-/* Unscoped — needed because innerHTML-injected nodes don't get the scoped attribute */
-.llm-content-renderer .messages-view .message-item .message-content {
-  h1,
-  h2,
-  h3,
-  h4 {
-    font-weight: 600;
-    margin: 10px 0 6px 0;
-    line-height: 1.4;
-  }
+.messages-view .message-item .message-content :deep(h3) {
+  font-size: var(--text-base);
+}
 
-  h1 {
-    font-size: 1.15rem;
-  }
-
-  h2 {
-    font-size: 1.05rem;
-  }
-
-  h3 {
-    font-size: 0.95rem;
-  }
-
-  h4 {
-    font-size: 0.875rem;
-  }
+.messages-view .message-item .message-content :deep(h4) {
+  font-size: var(--text-sm);
 }
 </style>

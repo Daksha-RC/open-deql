@@ -13,30 +13,29 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { queryClient } from "@/composables/query/queryClient";
+import { functionKeys } from "@/services/jstransform.querykeys";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
+import { nextTick } from "vue";
 import FunctionList from "./FunctionList.vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Notify } from "quasar";
 import i18n from "@/locales";
 import { createRouter, createWebHistory } from "vue-router";
 import { createStore } from "vuex";
 
-installQuasar({ plugins: [Notify] });
+const { mockJsTransformList, mockJsTransformDelete, mockBulkDelete, mockGetAssociatedPipelines } =
+  vi.hoisted(() => ({
+    mockJsTransformList: vi.fn(),
+    mockJsTransformDelete: vi.fn(),
+    mockBulkDelete: vi.fn(),
+    mockGetAssociatedPipelines: vi.fn(),
+  }));
 
-const {
-  mockJsTransformList,
-  mockJsTransformDelete,
-  mockBulkDelete,
-  mockGetAssociatedPipelines,
-} = vi.hoisted(() => ({
-  mockJsTransformList: vi.fn(),
-  mockJsTransformDelete: vi.fn(),
-  mockBulkDelete: vi.fn(),
-  mockGetAssociatedPipelines: vi.fn(),
-}));
-
-vi.mock("../../services/jstransform", () => ({
+// A plain module mock. The query declarations live in `jstransform.queries.ts`
+// and reach the transport through a normal import, so this replacement is what
+// their queryFn calls — no overlay helper, and nothing left pointing at the real
+// endpoint.
+vi.mock("@/services/jstransform", () => ({
   default: {
     list: mockJsTransformList,
     delete: mockJsTransformDelete,
@@ -86,18 +85,34 @@ describe("FunctionList", () => {
     },
   };
 
+  const ODialogStub = {
+    name: "ODialog",
+    props: ["open", "persistent", "size", "title"],
+    emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+    template:
+      '<div data-test-stub="o-dialog" :data-open="open" :data-title="title" :data-size="size" :data-persistent="persistent">' +
+      '<span data-test-stub="o-dialog-title">{{ title }}</span>' +
+      '<slot name="header"></slot>' +
+      "<slot></slot>" +
+      '<slot name="footer"></slot>' +
+      '<button data-test-stub="o-dialog-update-open" @click="$emit(\'update:open\', false)">close</button>' +
+      "</div>",
+  };
+
   const globalStubs = {
-    QTablePagination: true,
     AddFunction: true,
     NoData: true,
     ConfirmDialog: true,
+    ODialog: ODialogStub,
   };
 
   beforeEach(() => {
     vi.clearAllMocks();
 
     mockJsTransformList.mockResolvedValue(mockFunctionData);
-    mockJsTransformDelete.mockResolvedValue({ data: { code: 200, message: "Deleted successfully" } });
+    mockJsTransformDelete.mockResolvedValue({
+      data: { code: 200, message: "Deleted successfully" },
+    });
     mockBulkDelete.mockResolvedValue({ data: { successful: ["func1"], unsuccessful: [] } });
     mockGetAssociatedPipelines.mockResolvedValue({ data: { list: [] } });
 
@@ -126,6 +141,37 @@ describe("FunctionList", () => {
     });
 
     router.push("/functions");
+  });
+
+  // The list otherwise gives no clue whether a function is JS or VRL, so the
+  // language gets its own Type column rendered as a badge.
+  describe("Type column (JS vs VRL badge)", () => {
+    const mountList = () =>
+      mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+    it("badges each function with its language and keeps the name intact", async () => {
+      const wrapper = mountList();
+      await flushPromises();
+      // OTable holds its skeleton for MIN_SKELETON_MS (50ms) after loading
+      // clears, so the row cells — and the badges in them — do not exist until
+      // that hold releases. A real wait is the only way past a real timer.
+      await new Promise((r) => setTimeout(r, 80));
+      await nextTick();
+
+      // fixture: func1 + func2 are VRL (transType 0), js_func is JS (transType 1)
+      const js = wrapper.findAll('[data-test="function-list-type-badge-js"]');
+      const vrl = wrapper.findAll('[data-test="function-list-type-badge-vrl"]');
+      expect(js).toHaveLength(1);
+      expect(vrl.length).toBeGreaterThanOrEqual(2);
+
+      expect(js[0].text()).toBe("JavaScript");
+      expect(vrl[0].text()).toBe("VRL");
+
+      // the badge is its own column — the name cell is untouched
+      expect(wrapper.find('[data-test="function-list-name-cell-js_func"]').text()).toBe("js_func");
+    });
   });
 
   describe("Component Rendering", () => {
@@ -174,14 +220,7 @@ describe("FunctionList", () => {
       });
 
       await flushPromises();
-      expect(mockJsTransformList).toHaveBeenCalledWith(
-        1,
-        100000,
-        "name",
-        false,
-        "",
-        "test-org"
-      );
+      expect(mockJsTransformList).toHaveBeenCalledWith(1, 100000, "name", false, "", "test-org");
     });
 
     it("should populate jsTransforms after load", async () => {
@@ -384,7 +423,12 @@ describe("FunctionList", () => {
   describe("Associated Pipelines (getAssociatedPipelines)", () => {
     it("should fetch and show associated pipelines dialog", async () => {
       const pipelines = {
-        data: { list: [{ id: "p1", name: "Pipeline 1" }, { id: "p2", name: "Pipeline 2" }] },
+        data: {
+          list: [
+            { id: "p1", name: "Pipeline 1" },
+            { id: "p2", name: "Pipeline 2" },
+          ],
+        },
       };
       mockGetAssociatedPipelines.mockResolvedValue(pipelines);
 
@@ -449,7 +493,6 @@ describe("FunctionList", () => {
 
       expect(vm.confirmForceDelete).toBe(false);
     });
-
   });
 
   describe("Bulk Delete (bulkDeleteFunctions)", () => {
@@ -646,14 +689,12 @@ describe("FunctionList", () => {
       expect(vm.showAddJSTransformDialog).toBe(false);
     });
 
-    it("should refresh list and hide form when refreshList is called", async () => {
+    it("should hide form when refreshList is called", async () => {
       const wrapper = mount(FunctionList, {
         global: { plugins: [i18n, store, router], stubs: globalStubs },
       });
 
       await flushPromises();
-      vi.clearAllMocks();
-      mockJsTransformList.mockResolvedValue(mockFunctionData);
 
       const vm = wrapper.vm as any;
       vm.showAddJSTransformDialog = true;
@@ -661,6 +702,24 @@ describe("FunctionList", () => {
 
       await flushPromises();
       expect(vm.showAddJSTransformDialog).toBe(false);
+    });
+
+    // `refreshList` used to re-call the list endpoint itself. It no longer does:
+    // the write invalidates the scope and the mounted query reloads. This is the
+    // assertion that replaces it — and unlike the old one it fails if a key stops
+    // matching the scope the writes declare.
+    it("should reload the list when the functions scope is invalidated", async () => {
+      mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      vi.clearAllMocks();
+      mockJsTransformList.mockResolvedValue(mockFunctionData);
+
+      await queryClient.invalidateQueries({ queryKey: functionKeys.all("test-org") });
+      await flushPromises();
+
       expect(mockJsTransformList).toHaveBeenCalled();
     });
   });
@@ -692,7 +751,9 @@ describe("FunctionList", () => {
       await flushPromises();
 
       const vm = wrapper.vm as any;
-      expect(vm.filterData([{ name: "func1", function: "identity()" }], "xyz_no_match")).toHaveLength(0);
+      expect(
+        vm.filterData([{ name: "func1", function: "identity()" }], "xyz_no_match"),
+      ).toHaveLength(0);
     });
 
     it("should compute visibleRows returning all rows when no filter", async () => {
@@ -760,24 +821,6 @@ describe("FunctionList", () => {
     });
   });
 
-  describe("Pagination", () => {
-    it("should change pagination correctly", async () => {
-      const wrapper = mount(FunctionList, {
-        global: { plugins: [i18n, store, router], stubs: globalStubs },
-      });
-
-      await flushPromises();
-
-      const vm = wrapper.vm as any;
-      vm.qTable = { setPagination: vi.fn() };
-
-      vm.changePagination({ label: "50", value: 50 });
-      expect(vm.selectedPerPage).toBe(50);
-      expect(vm.pagination.rowsPerPage).toBe(50);
-      expect(vm.qTable.setPagination).toHaveBeenCalledWith({ rowsPerPage: 50 });
-    });
-  });
-
   describe("AI Chat Integration", () => {
     it("should emit sendToAiChat event", async () => {
       const wrapper = mount(FunctionList, {
@@ -791,6 +834,219 @@ describe("FunctionList", () => {
 
       expect(wrapper.emitted("sendToAiChat")).toBeTruthy();
       expect(wrapper.emitted("sendToAiChat")?.[0]).toEqual(["test AI value"]);
+    });
+  });
+
+  describe("Associated Pipelines ODialog (migrated)", () => {
+    it("should render ODialog stub for associated pipelines", async () => {
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      expect(wrapper.find('[data-test-stub="o-dialog"]').exists()).toBe(true);
+    });
+
+    it("should bind selectedDelete.name into ODialog title prop", async () => {
+      mockGetAssociatedPipelines.mockResolvedValue({
+        data: { list: [{ id: "p1", name: "Pipeline 1" }] },
+      });
+
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.getAssociatedPipelines({ row: { name: "func1" } });
+      await flushPromises();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.attributes("data-title")).toBe("Pipelines Associated with func1");
+    });
+
+    it("should set ODialog size=md and persistent attributes", async () => {
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.attributes("data-size")).toBe("md");
+      // boolean attribute with `true` renders as the empty string in DOM
+      expect(dialog.attributes("data-persistent")).toBe("");
+    });
+
+    it("should reflect confirmForceDelete=true on ODialog data-open", async () => {
+      mockGetAssociatedPipelines.mockResolvedValue({
+        data: { list: [{ id: "p1", name: "Pipeline 1" }] },
+      });
+
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.getAssociatedPipelines({ row: { name: "func1" } });
+      await flushPromises();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.attributes("data-open")).toBe("true");
+    });
+
+    it("should close ODialog when it emits update:open=false", async () => {
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.confirmForceDelete = true;
+      await flushPromises();
+
+      await wrapper.find('[data-test-stub="o-dialog-update-open"]').trigger("click");
+
+      expect(vm.confirmForceDelete).toBe(false);
+    });
+
+    it("should render 'No pipelines' fallback when transformedPipelineList is empty", async () => {
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.pipelineList = [];
+      vm.confirmForceDelete = true;
+      await flushPromises();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.text()).toContain("No pipelines associated with this function");
+    });
+
+    it("should render pipeline items inside ODialog when list is non-empty", async () => {
+      const wrapper = mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.pipelineList = [
+        { id: "p1", name: "Pipeline 1" },
+        { id: "p2", name: "Pipeline 2" },
+      ];
+      vm.confirmForceDelete = true;
+      await flushPromises();
+
+      const dialog = wrapper.find('[data-test-stub="o-dialog"]');
+      expect(dialog.text()).toContain("1. Pipeline 1");
+      expect(dialog.text()).toContain("2. Pipeline 2");
+    });
+  });
+
+  describe("Page persistence across editor round trip (OTable pagination-reset fix)", () => {
+    // 45 rows / pageSize 20 gives 3 pages, so page 3 is a real target to restore.
+    const manyFunctionsData = {
+      data: {
+        list: Array.from({ length: 45 }, (_, i) => ({
+          name: `func${i + 1}`,
+          function: "identity()",
+          params: "",
+          transType: 0,
+        })),
+      },
+    };
+
+    const mountList = () =>
+      mount(FunctionList, {
+        global: { plugins: [i18n, store, router], stubs: globalStubs },
+      });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("starts loading=true before the initial fetch resolves", () => {
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      const wrapper = mountList();
+      expect((wrapper.vm as any).loading).toBe(true);
+    });
+
+    it("defaults currentPage to 1", async () => {
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      const wrapper = mountList();
+      await flushPromises();
+      expect((wrapper.vm as any).currentPage).toBe(1);
+    });
+
+    it("onPageChange updates currentPage", async () => {
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      const wrapper = mountList();
+      await flushPromises();
+      const vm = wrapper.vm as any;
+      vm.onPageChange(3);
+      expect(vm.currentPage).toBe(3);
+    });
+
+    it("restorePageIndex reasserts the page via a macrotask (setTimeout(0))", async () => {
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      const wrapper = mountList();
+      await flushPromises();
+      vi.useFakeTimers();
+      const vm = wrapper.vm as any;
+      vm.currentPage = 3;
+      const restorePage = vi.fn();
+      vm.oTableRef = { restorePage };
+
+      vm.restorePageIndex();
+      expect(restorePage).not.toHaveBeenCalled();
+
+      // Pending only: the refresh button's age interval would make runAllTimers loop forever.
+      vi.runOnlyPendingTimers();
+      expect(restorePage).toHaveBeenCalledWith(3);
+    });
+
+    it("keeps the page after Cancel unmounts and remounts OTable via the AddFunction v-if swap", async () => {
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      const wrapper = mountList();
+      await flushPromises();
+      const vm = wrapper.vm as any;
+
+      vm.onPageChange(3);
+      await flushPromises();
+      expect(vm.oTableRef.table.getState().pagination.pageIndex).toBe(2);
+
+      vm.showAddJSTransformDialog = true;
+      await flushPromises();
+      expect(vm.oTableRef).toBeNull();
+
+      vm.hideForm();
+      await flushPromises();
+
+      expect(vm.oTableRef.table.getState().pagination.pageIndex).toBe(2);
+    });
+
+    it("keeps the page after Save triggers an async refetch that races TanStack's own reset", async () => {
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      const wrapper = mountList();
+      await flushPromises();
+      const vm = wrapper.vm as any;
+
+      vm.onPageChange(3);
+      await flushPromises();
+      expect(vm.oTableRef.table.getState().pagination.pageIndex).toBe(2);
+
+      vm.showAddJSTransformDialog = true;
+      await flushPromises();
+
+      mockJsTransformList.mockResolvedValue(manyFunctionsData);
+      vm.refreshList();
+      await flushPromises();
+      // flush the setTimeout(0) macrotask that restorePageIndex scheduled
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(vm.oTableRef.table.getState().pagination.pageIndex).toBe(2);
     });
   });
 

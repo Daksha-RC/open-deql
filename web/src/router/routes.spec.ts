@@ -27,7 +27,7 @@ vi.mock("@/composables/shared/router", () => ({
         path: "/login",
         name: "login",
         component: { template: "<div>Login</div>" },
-        meta: { title: "Login" },
+        meta: { titleKey: "login.login" },
       },
       {
         path: "/logout",
@@ -38,7 +38,7 @@ vi.mock("@/composables/shared/router", () => ({
         path: "/cb",
         name: "callback",
         component: { template: "<div>Callback</div>" },
-        meta: { title: "Login Callback" },
+        meta: { titleKey: "routeTitles.loginCallback" },
       },
     ],
     homeChildRoutes: [
@@ -46,49 +46,49 @@ vi.mock("@/composables/shared/router", () => ({
         path: "",
         name: "home",
         component: { template: "<div>Home</div>" },
-        meta: { title: "Home" },
+        meta: { titleKey: "menu.home" },
       },
       {
         path: "logs",
         name: "logs",
         component: { template: "<div>Logs</div>" },
-        meta: { title: "Logs" },
+        meta: { titleKey: "menu.search" },
       },
       {
         path: "metrics",
         name: "metrics",
         component: { template: "<div>Metrics</div>" },
-        meta: { title: "Metrics" },
+        meta: { titleKey: "menu.metrics" },
       },
       {
         path: "traces",
         name: "traces",
         component: { template: "<div>Traces</div>" },
-        meta: { title: "Traces" },
+        meta: { titleKey: "menu.traces" },
       },
       {
         path: "dashboards",
         name: "dashboards",
         component: { template: "<div>Dashboards</div>" },
-        meta: { title: "Dashboards" },
+        meta: { titleKey: "menu.dashboard" },
       },
       {
         path: "alerts",
         name: "alertList",
         component: { template: "<div>Alerts</div>" },
-        meta: { title: "Alerts" },
+        meta: { titleKey: "menu.alerts" },
       },
       {
         path: "streams",
         name: "logstreams",
         component: { template: "<div>Streams</div>" },
-        meta: { title: "Streams" },
+        meta: { titleKey: "menu.index" },
       },
       {
         path: "pipeline",
         name: "pipeline",
         component: { template: "<div>Pipeline</div>" },
-        meta: { title: "Pipeline" },
+        meta: { titleKey: "pipeline.pipelineLabel" },
         children: [
           {
             path: "functions",
@@ -123,7 +123,7 @@ vi.mock("@/composables/shared/router", () => ({
         path: "rum",
         name: "RUM",
         component: { template: "<div>RUM</div>" },
-        meta: { title: "Real User Monitoring" },
+        meta: { titleKey: "rum.title" },
         children: [
           {
             path: "sessions",
@@ -153,7 +153,7 @@ vi.mock("@/composables/shared/router", () => ({
         path: "about",
         name: "about",
         component: { template: "<div>About</div>" },
-        meta: { title: "About" },
+        meta: { titleKey: "menu.about" },
       },
     ],
   }),
@@ -227,19 +227,6 @@ vi.mock("@/composables/shared/useManagementRoutes", () => ({
 // ---------------------------------------------------------------------------
 import routerInstance from "@/router/routes";
 
-// ---------------------------------------------------------------------------
-// Helper: flatten the nested route tree into a single list of route records
-// ---------------------------------------------------------------------------
-function flattenRoutes(routes: any[]): any[] {
-  return routes.reduce((acc: any[], route: any) => {
-    acc.push(route);
-    if (route.children && route.children.length) {
-      acc.push(...flattenRoutes(route.children));
-    }
-    return acc;
-  }, []);
-}
-
 describe("router/routes (singleton)", () => {
   // getRoutes() already returns a flat list of all route records including nested ones;
   // calling flattenRoutes on top of it would double-count children.
@@ -267,9 +254,9 @@ describe("router/routes (singleton)", () => {
       expect(route).toBeDefined();
     });
 
-    it("/login route should have meta.title of 'Login'", () => {
+    it("/login route should have meta.titleKey of 'login.login'", () => {
       const route = allRoutes.find((r) => r.path === "/login");
-      expect(route?.meta?.title).toBe("Login");
+      expect(route?.meta?.titleKey).toBe("login.login");
     });
 
     it("should include a /logout route", () => {
@@ -278,9 +265,7 @@ describe("router/routes (singleton)", () => {
     });
 
     it("should include a /cb callback route", () => {
-      const route = allRoutes.find(
-        (r) => r.name === "callback" || r.path === "/cb",
-      );
+      const route = allRoutes.find((r) => r.name === "callback" || r.path === "/cb");
       expect(route).toBeDefined();
     });
 
@@ -304,9 +289,9 @@ describe("router/routes (singleton)", () => {
       expect(route).toBeDefined();
     });
 
-    it("'logs' route should have meta.title of 'Logs'", () => {
+    it("'logs' route should have meta.titleKey of 'menu.search'", () => {
       const route = allRoutes.find((r) => r.name === "logs");
-      expect(route?.meta?.title).toBe("Logs");
+      expect(route?.meta?.titleKey).toBe("menu.search");
     });
 
     it("should include a 'metrics' route", () => {
@@ -314,9 +299,9 @@ describe("router/routes (singleton)", () => {
       expect(route).toBeDefined();
     });
 
-    it("'metrics' route should have meta.title of 'Metrics'", () => {
+    it("'metrics' route should have meta.titleKey of 'menu.metrics'", () => {
       const route = allRoutes.find((r) => r.name === "metrics");
-      expect(route?.meta?.title).toBe("Metrics");
+      expect(route?.meta?.titleKey).toBe("menu.metrics");
     });
 
     it("should include a 'traces' route", () => {
@@ -324,9 +309,9 @@ describe("router/routes (singleton)", () => {
       expect(route).toBeDefined();
     });
 
-    it("'traces' route should have meta.title of 'Traces'", () => {
+    it("'traces' route should have meta.titleKey of 'menu.traces'", () => {
       const route = allRoutes.find((r) => r.name === "traces");
-      expect(route?.meta?.title).toBe("Traces");
+      expect(route?.meta?.titleKey).toBe("menu.traces");
     });
 
     it("should include a 'dashboards' route", () => {
@@ -339,9 +324,9 @@ describe("router/routes (singleton)", () => {
       expect(route).toBeDefined();
     });
 
-    it("'alertList' route should have meta.title of 'Alerts'", () => {
+    it("'alertList' route should have meta.titleKey of 'menu.alerts'", () => {
       const route = allRoutes.find((r) => r.name === "alertList");
-      expect(route?.meta?.title).toBe("Alerts");
+      expect(route?.meta?.titleKey).toBe("menu.alerts");
     });
 
     it("should include a 'logstreams' route", () => {
@@ -399,9 +384,9 @@ describe("router/routes (singleton)", () => {
       expect(route).toBeDefined();
     });
 
-    it("'RUM' route should have meta.title of 'Real User Monitoring'", () => {
+    it("'RUM' route should have meta.titleKey of 'rum.title'", () => {
       const route = allRoutes.find((r) => r.name === "RUM");
-      expect(route?.meta?.title).toBe("Real User Monitoring");
+      expect(route?.meta?.titleKey).toBe("rum.title");
     });
 
     it("should include a 'Sessions' child route under RUM", () => {
@@ -440,32 +425,30 @@ describe("router/routes (singleton)", () => {
   // -------------------------------------------------------------------------
   describe("route name uniqueness", () => {
     it("should not contain duplicate route names", () => {
-      const names = allRoutes
-        .filter((r) => r.name)
-        .map((r) => r.name as string);
+      const names = allRoutes.filter((r) => r.name).map((r) => r.name as string);
       const uniqueNames = new Set(names);
       expect(names.length).toBe(uniqueNames.size);
     });
   });
 
   // -------------------------------------------------------------------------
-  // Meta title presence
+  // Meta title key presence
   // -------------------------------------------------------------------------
-  describe("meta.title presence for key routes", () => {
+  describe("meta.titleKey presence for key routes", () => {
     const routesRequiringTitles = [
-      { name: "logs", expectedTitle: "Logs" },
-      { name: "metrics", expectedTitle: "Metrics" },
-      { name: "traces", expectedTitle: "Traces" },
-      { name: "dashboards", expectedTitle: "Dashboards" },
-      { name: "alertList", expectedTitle: "Alerts" },
-      { name: "about", expectedTitle: "About" },
-      { name: "RUM", expectedTitle: "Real User Monitoring" },
+      { name: "logs", expectedTitleKey: "menu.search" },
+      { name: "metrics", expectedTitleKey: "menu.metrics" },
+      { name: "traces", expectedTitleKey: "menu.traces" },
+      { name: "dashboards", expectedTitleKey: "menu.dashboard" },
+      { name: "alertList", expectedTitleKey: "menu.alerts" },
+      { name: "about", expectedTitleKey: "menu.about" },
+      { name: "RUM", expectedTitleKey: "rum.title" },
     ];
 
-    routesRequiringTitles.forEach(({ name, expectedTitle }) => {
-      it(`'${name}' route should have meta.title set to '${expectedTitle}'`, () => {
+    routesRequiringTitles.forEach(({ name, expectedTitleKey }) => {
+      it(`'${name}' route should have meta.titleKey set to '${expectedTitleKey}'`, () => {
         const route = allRoutes.find((r) => r.name === name);
-        expect(route?.meta?.title).toBe(expectedTitle);
+        expect(route?.meta?.titleKey).toBe(expectedTitleKey);
       });
     });
   });

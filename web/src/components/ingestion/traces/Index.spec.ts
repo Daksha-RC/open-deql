@@ -15,7 +15,6 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mount, VueWrapper, flushPromises } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import { createStore } from "vuex";
 import i18n from "@/locales";
 
@@ -43,23 +42,16 @@ vi.mock("vue-router", () => ({
     push: mockPush,
     currentRoute: mockCurrentRoute,
   }),
+  useRoute: () => mockCurrentRoute.value,
   RouterView: { template: "<div data-test='router-view'></div>" },
 }));
 
-vi.mock("quasar", async (importOriginal) => {
-  const actual = (await importOriginal()) as any;
-  return {
-    ...actual,
-    useQuasar: () => ({
-      notify: vi.fn(),
-    }),
-    copyToClipboard: vi.fn().mockResolvedValue(undefined),
-  };
-});
+// copyToClipboard now lives in @/utils/clipboard
+vi.mock("@/utils/clipboard", () => ({
+  copyToClipboard: vi.fn().mockResolvedValue(true),
+}));
 
 import IngestTraces from "./Index.vue";
-
-installQuasar();
 
 const mockStore = createStore({
   state: {
@@ -81,9 +73,8 @@ describe("IngestTraces (Index.vue)", () => {
         plugins: [mockStore, i18n],
         stubs: {
           RouterView: { template: "<div data-test='router-view'></div>" },
-          QSplitter: {
-            template:
-              "<div><slot name='before'/><slot name='after'/></div>",
+          OSplitter: {
+            template: "<div><slot name='before'/><slot name='after'/></div>",
           },
         },
       },
@@ -103,7 +94,7 @@ describe("IngestTraces (Index.vue)", () => {
     });
 
     it("should render the tabs for navigation", () => {
-      const tabs = wrapper.findComponent({ name: "QTabs" });
+      const tabs = wrapper.findComponent({ name: "OTabs" });
       expect(tabs.exists()).toBe(true);
     });
 
@@ -118,9 +109,7 @@ describe("IngestTraces (Index.vue)", () => {
 
   describe("navigation on mount", () => {
     it("should redirect from ingestTraces to tracesOTLP on mount", async () => {
-      expect(mockPush).toHaveBeenCalledWith(
-        expect.objectContaining({ name: "tracesOTLP" }),
-      );
+      expect(mockPush).toHaveBeenCalledWith(expect.objectContaining({ name: "tracesOTLP" }));
     });
 
     it("should not redirect when already on a valid ingest route", async () => {
@@ -133,7 +122,7 @@ describe("IngestTraces (Index.vue)", () => {
           plugins: [mockStore, i18n],
           stubs: {
             RouterView: { template: "<div></div>" },
-            QSplitter: {
+            OSplitter: {
               template: "<div><slot name='before'/><slot name='after'/></div>",
             },
           },
@@ -142,20 +131,23 @@ describe("IngestTraces (Index.vue)", () => {
       await flushPromises();
 
       // When on tracesOTLP route, push should still be called with same route
-      expect(mockPush).toHaveBeenCalledWith(
-        expect.objectContaining({ name: "tracesOTLP" }),
-      );
+      expect(mockPush).toHaveBeenCalledWith(expect.objectContaining({ name: "tracesOTLP" }));
       wrapperOnOTLP.unmount();
     });
   });
 
   describe("copyToClipboardFn", () => {
     it("should call copyToClipboard when invoked", async () => {
-      const { copyToClipboard } = await import("quasar");
+      const { copyToClipboard } = await import("@/utils/clipboard");
       const mockElement = { innerText: "some text to copy" };
       wrapper.vm.copyToClipboardFn(mockElement);
       await flushPromises();
-      expect(copyToClipboard).toHaveBeenCalledWith("some text to copy");
+
+      expect(copyToClipboard).toHaveBeenCalledWith("some text to copy", expect.any(Function), {
+        successMessage: "Content Copied Successfully!",
+        errorMessage: "Error while copy content.",
+        timeout: 5000,
+      });
     });
   });
 
@@ -170,7 +162,7 @@ describe("IngestTraces (Index.vue)", () => {
           plugins: [mockStore, i18n],
           stubs: {
             RouterView: { template: "<div></div>" },
-            QSplitter: {
+            OSplitter: {
               template: "<div><slot name='before'/><slot name='after'/></div>",
             },
           },

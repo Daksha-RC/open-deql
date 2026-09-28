@@ -39,6 +39,7 @@ use crate::{
 pub struct PuffinDirReader {
     source: Arc<PuffinBytesReader>,
     blobs_metadata: Arc<HashMap<PathBuf, Arc<BlobMetadata>>>,
+    properties: Arc<HashMap<String, String>>,
 }
 
 impl PuffinDirReader {
@@ -60,10 +61,17 @@ impl PuffinDirReader {
             }
         }
 
+        let properties = metadata.properties.into_iter().collect::<HashMap<_, _>>();
+
         Ok(Self {
             source: Arc::new(source),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(properties),
         })
+    }
+
+    pub fn get_property(&self, key: &str) -> Option<&str> {
+        self.properties.get(key).map(|s| s.as_str())
     }
 }
 
@@ -72,6 +80,7 @@ impl Clone for PuffinDirReader {
         PuffinDirReader {
             source: self.source.clone(),
             blobs_metadata: self.blobs_metadata.clone(),
+            properties: self.properties.clone(),
         }
     }
 }
@@ -149,7 +158,7 @@ impl Directory for PuffinDirReader {
                 Some(ext) => ext,
                 None => return Ok(false),
             };
-            let dir_path = format!("{}.{}", &EMPTY_PUFFIN_SEG_ID.as_str(), ext);
+            let dir_path = format!("{}.{}", EMPTY_PUFFIN_SEG_ID.as_str(), ext);
             EMPTY_PUFFIN_DIRECTORY.exists(&PathBuf::from(dir_path))
         } else {
             Ok(true)
@@ -196,69 +205,64 @@ impl Directory for PuffinDirReader {
 
 /// preload the terms in the index
 pub async fn warm_up_terms(
-    searcher: &tantivy::Searcher,
+    segment_reader: &tantivy::SegmentReader,
     terms_grouped_by_field: &HashMap<tantivy::schema::Field, HashMap<tantivy::Term, bool>>,
     need_all_term_fields: HashSet<tantivy::schema::Field>,
-    need_fast_field: Option<String>,
+    need_fast_field: HashSet<String>,
 ) -> anyhow::Result<()> {
     let mut warm_up_fields_futures = Vec::new();
     let mut warm_up_fields_term_futures = Vec::new();
     let mut warm_up_terms_futures = Vec::new();
     let mut warm_up_fast_fields_futures = Vec::new();
-    let mut warmed_segments = HashSet::new();
     for (field, terms) in terms_grouped_by_field {
-        for segment_reader in searcher.segment_readers() {
-            let inv_idx = segment_reader.inverted_index(*field)?;
-            if terms.is_empty() {
-                continue;
-            }
-            for (term, position_needed) in terms.iter() {
-                let inv_idx_clone = inv_idx.clone();
-                warm_up_terms_futures
-                    .push(async move { inv_idx_clone.warm_postings(term, *position_needed).await });
-            }
+        let inv_idx = segment_reader.inverted_index(*field)?;
+        if terms.is_empty() {
+            continue;
+        }
+        for (term, position_needed) in terms.iter() {
+            let inv_idx_clone = inv_idx.clone();
+            warm_up_terms_futures
+                .push(async move { inv_idx_clone.warm_postings(term, *position_needed).await });
         }
     }
 
     // warn up the all term fields
     for field in need_all_term_fields {
-        for segment_reader in searcher.segment_readers() {
-            let inv_idx = segment_reader.inverted_index(field)?;
-            let inv_idx_clone = inv_idx.clone();
-            warm_up_fields_futures
-                .push(async move { inv_idx_clone.warm_postings_full(false).await });
-            warm_up_fields_term_futures
-                .push(async move { inv_idx.terms().warm_up_dictionary().await });
-        }
+        let inv_idx = segment_reader.inverted_index(field)?;
+        let inv_idx_clone = inv_idx.clone();
+        warm_up_fields_futures.push(async move { inv_idx_clone.warm_postings_full(false).await });
+        warm_up_fields_term_futures.push(async move { inv_idx.terms().warm_up_dictionary().await });
     }
 
     // warm up fast fields if needed
-    if let Some(field_name) = need_fast_field {
-        for segment_reader in searcher.segment_readers() {
-            // only warm up fast fields once per segment
-            let field_name = field_name.clone();
-            let segment_id = segment_reader.segment_id();
-            if !warmed_segments.contains(&segment_id) {
-                let fast_field_reader = segment_reader.fast_fields();
-                warm_up_fast_fields_futures
-                    .push(async move { warm_up_fastfield(fast_field_reader, field_name).await });
-                warmed_segments.insert(segment_id);
-            }
+    if !need_fast_field.is_empty() {
+        for field_name in &need_fast_field {
+            let fast_field_reader = segment_reader.fast_fields();
+            warm_up_fast_fields_futures.push(async move {
+                warm_up_fastfield(fast_field_reader, field_name.clone()).await
+            });
         }
     }
 
-    if !warm_up_fields_futures.is_empty() {
-        try_join_all(warm_up_fields_futures).await?;
-    }
-    if !warm_up_fields_term_futures.is_empty() {
-        try_join_all(warm_up_fields_term_futures).await?;
-    }
-    if !warm_up_terms_futures.is_empty() {
-        try_join_all(warm_up_terms_futures).await?;
-    }
-    if !warm_up_fast_fields_futures.is_empty() {
-        try_join_all(warm_up_fast_fields_futures).await?;
-    }
+    // Run all warm-up categories in parallel
+    tokio::try_join!(
+        async {
+            try_join_all(warm_up_terms_futures)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        async {
+            try_join_all(warm_up_fields_futures)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        async {
+            try_join_all(warm_up_fields_term_futures)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+        async { try_join_all(warm_up_fast_fields_futures).await },
+    )?;
     Ok(())
 }
 
@@ -445,6 +449,7 @@ mod tests {
         let reader = PuffinDirReader {
             source: Arc::new(mock_reader),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(HashbrownHashMap::new()),
         };
 
         let result = reader.get_file_handle(&path);
@@ -462,6 +467,7 @@ mod tests {
         let reader = PuffinDirReader {
             source: Arc::new(mock_reader),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(HashbrownHashMap::new()),
         };
 
         let path = PathBuf::from("nonexistent_file.terms");
@@ -491,6 +497,7 @@ mod tests {
         let reader = PuffinDirReader {
             source: Arc::new(mock_reader),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(HashbrownHashMap::new()),
         };
 
         let path = PathBuf::from("file_without_extension");
@@ -516,6 +523,7 @@ mod tests {
         let reader = PuffinDirReader {
             source: Arc::new(mock_reader),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(HashbrownHashMap::new()),
         };
 
         let result = reader.exists(&path);
@@ -533,6 +541,7 @@ mod tests {
         let reader = PuffinDirReader {
             source: Arc::new(mock_reader),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(HashbrownHashMap::new()),
         };
 
         let path = PathBuf::from("nonexistent_file.unknown");
@@ -553,6 +562,7 @@ mod tests {
         let reader = PuffinDirReader {
             source: Arc::new(mock_reader),
             blobs_metadata: Arc::new(blobs_metadata),
+            properties: Arc::new(HashbrownHashMap::new()),
         };
 
         let path = PathBuf::from("test_file.txt");
@@ -603,7 +613,13 @@ mod tests {
 
         // Test with empty terms
         let terms_grouped_by_field = HashbrownHashMap::new();
-        let result = warm_up_terms(&searcher, &terms_grouped_by_field, HashSet::new(), None).await;
+        let result = warm_up_terms(
+            searcher.segment_readers().first().unwrap(),
+            &terms_grouped_by_field,
+            HashSet::new(),
+            HashSet::new(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -640,7 +656,13 @@ mod tests {
         field_terms.insert(term, false);
         terms_grouped_by_field.insert(text_field, field_terms);
 
-        let result = warm_up_terms(&searcher, &terms_grouped_by_field, HashSet::new(), None).await;
+        let result = warm_up_terms(
+            searcher.segment_readers().first().unwrap(),
+            &terms_grouped_by_field,
+            HashSet::new(),
+            HashSet::new(),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -673,10 +695,10 @@ mod tests {
         // Test with prefix field
         let terms_grouped_by_field = HashbrownHashMap::new();
         let result = warm_up_terms(
-            &searcher,
+            searcher.segment_readers().first().unwrap(),
             &terms_grouped_by_field,
             HashSet::from([text_field]),
-            None,
+            HashSet::new(),
         )
         .await;
         assert!(result.is_ok());
@@ -711,10 +733,10 @@ mod tests {
         // Test with fast fields enabled
         let terms_grouped_by_field = HashbrownHashMap::new();
         let result = warm_up_terms(
-            &searcher,
+            searcher.segment_readers().first().unwrap(),
             &terms_grouped_by_field,
             HashSet::new(),
-            Some(TIMESTAMP_COL_NAME.to_string()),
+            HashSet::from([TIMESTAMP_COL_NAME.to_string()]),
         )
         .await;
         // This might fail if _timestamp field is not present, which is expected in this simple test
@@ -760,7 +782,13 @@ mod tests {
         terms_grouped_by_field.insert(text_field, field_terms);
 
         let start = Instant::now();
-        let result = warm_up_terms(&searcher, &terms_grouped_by_field, HashSet::new(), None).await;
+        let result = warm_up_terms(
+            searcher.segment_readers().first().unwrap(),
+            &terms_grouped_by_field,
+            HashSet::new(),
+            HashSet::new(),
+        )
+        .await;
         let duration = start.elapsed();
 
         assert!(result.is_ok());

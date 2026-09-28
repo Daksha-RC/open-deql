@@ -32,7 +32,7 @@ Usage:
 - <ChunkedContent :data="value" :field-key="'field_name'" :query-string="highlightQuery" />
 -->
 <template>
-  <div class="chunked-content">
+  <div data-test="logs-chunked-content-container" class="inline-block w-full">
     <!-- Display the visible content with highlighting -->
     <LogsHighLighting
       :data="visibleContent"
@@ -44,21 +44,29 @@ Usage:
     <!-- Load more button and info -->
     <div
       v-if="shouldShowLoadMore"
-      class="load-more-container tw-mt-2 tw-flex tw-items-center tw-gap-3"
+      class="border-card-glass-border mt-2 flex items-center gap-3 border-t pt-2"
     >
-      <q-btn
+      <OButton
         :data-test="`load-more-btn-${fieldKey}`"
-        size="sm"
-        no-caps
-        outline
-        color="primary"
-        icon="expand_more"
-        :label="`Load more (${chunkInfo.loadedSizeKB}KB / ${chunkInfo.totalSizeKB}KB)`"
+        variant="outline"
+        size="sm-action"
         @click="handleLoadMore"
-        class="load-more-btn"
-      />
-      <span class="tw-text-sm tw-font-medium" style="color: var(--q-primary)">
-        Showing chunk {{ chunkInfo.currentChunk }} of {{ chunkInfo.totalChunks }}
+      >
+        <OIcon name="expand-more" size="xs" class="me-1" />
+        {{
+          t("logs.chunkedContent.loadMore", {
+            loaded: chunkInfo.loadedSizeKB,
+            total: chunkInfo.totalSizeKB,
+          })
+        }}
+      </OButton>
+      <span class="text-theme-accent text-sm font-medium">
+        {{
+          t("logs.chunkedContent.showingChunk", {
+            current: chunkInfo.currentChunk,
+            total: chunkInfo.totalChunks,
+          })
+        }}
       </span>
     </div>
   </div>
@@ -66,8 +74,11 @@ Usage:
 
 <script setup lang="ts">
 import { computed, onMounted, watch } from "vue";
+import { useI18nTyped } from "@/types/i18n";
 import { useChunkedContent } from "@/composables/useChunkedContent";
 import LogsHighLighting from "@/components/logs/LogsHighLighting.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
 
 export interface ChunkedContentProps {
   data: any;
@@ -76,6 +87,8 @@ export interface ChunkedContentProps {
   simpleMode?: boolean;
   chunkSizeKB?: number; // Optional: override default chunk size
 }
+
+const { t } = useI18nTyped();
 
 const props = withDefaults(defineProps<ChunkedContentProps>(), {
   queryString: "",
@@ -130,7 +143,7 @@ watch(
   () => {
     initializeIfNeeded();
   },
-  { deep: true }
+  { deep: true },
 );
 
 // Get visible content for current chunk state
@@ -173,20 +186,3 @@ const handleLoadMore = () => {
   loadNextChunk(props.fieldKey);
 };
 </script>
-
-<style scoped>
-.chunked-content {
-  display: inline-block;
-  width: 100%;
-}
-
-.load-more-container {
-  padding-top: 8px;
-  border-top: 1px solid var(--o2-border-color);
-}
-
-.load-more-btn {
-  font-size: 13px;
-  padding: 4px 8px;
-}
-</style>

@@ -17,12 +17,10 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <template>
   <div v-bind="$attrs" :style="isSidebarOpen && { width: leftWidth + 'px' }">
     <!-- Virtualizer outer: sets the full scrollable height -->
-    <div
-      :style="{ position: 'relative', height: totalSize + 'px', width: '100%' }"
-    >
+    <div :style="{ position: 'relative', height: totalSize + 'px', width: '100%' }">
       <div
         v-for="virtualRow in virtualRows"
-        :key="virtualRow.key"
+        :key="getVirtualRowKey(virtualRow)"
         :style="{
           position: 'absolute',
           top: 0,
@@ -47,42 +45,31 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 )
               "
               data-test="vertical-segment"
-              :data-left="
-                parseInt((spans as any[])[virtualRow.index].style.left)
-              "
+              :data-left="parseInt((spans as any[])[virtualRow.index].style.left)"
               :data-depth="depth"
+              class="border-card-glass-border pointer-events-none absolute top-0 z-1 border-s"
               :style="{
-                position: 'absolute',
                 left:
                   parseInt((spans as any[])[virtualRow.index].style.left) -
                   (spanDimensions?.gap ?? 15) * (depth - 1) +
                   'px',
-                top: '0',
                 height: nextSiblingMap[virtualRow.index as number]
                   ? spanDimensions.height + 'px'
                   : depth === 1
                     ? spanDimensions.height / 2 + 'px'
                     : spanDimensions.height + 'px',
-                borderLeft: '1.5px solid var(--o2-border-color)',
-                pointerEvents: 'none',
-                zIndex: 1,
               }"
             />
           </template>
           <!-- Horizontal stub from parent column to this badge -->
           <div
             data-test="horizontal-segment"
+            class="border-card-glass-border pointer-events-none absolute top-1/2 z-1 border-t"
             :style="{
-              position: 'absolute',
-              left:
-                parseInt((spans as any[])[virtualRow.index].style.left) + 'px',
-              top: '50%',
+              left: parseInt((spans as any[])[virtualRow.index].style.left) + 'px',
               width: (spans as any[])[virtualRow.index].hasChildSpans
                 ? (spanDimensions?.gap ?? 15) / 2 + 'px'
                 : (spanDimensions?.gap ?? 15) + 5 + 'px',
-              borderTop: '1.5px solid var(--o2-border-color)',
-              pointerEvents: 'none',
-              zIndex: 1,
             }"
           />
         </template>
@@ -95,14 +82,14 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             flexWrap: 'nowrap',
             height: '100%',
           }"
-          class="flex span-row"
+          class="span-row relative flex min-h-7.5"
           :class="{
-            'span-row-selected':
-              (spans as any[])[virtualRow.index].spanId === selectedSpanId,
+            'span-row-selected': (spans as any[])[virtualRow.index].spanId === highlightedSpanId,
           }"
+          @mouseleave="onUnhoverSpan"
           :data-test="`trace-tree-span-container-${(spans as any[])[virtualRow.index].spanId}`"
         >
-          <div :style="{ width: leftWidth + 'px' }" class="tw:pl-[0.375rem]">
+          <div :style="{ width: leftWidth + 'px' }" class="ps-1.5">
             <div
               :style="{
                 height: '100%',
@@ -114,266 +101,233 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                       'px'
                 }`,
               }"
-              class="flex flex-col items-start justify-start ellipsis"
-              :title="(spans as any[])[virtualRow.index].operationName"
+              class="flex flex-col items-start justify-start truncate"
             >
               <div
-                class="flex no-wrap full-width relative-position operation-name-container tw:cursor-pointer tw:items-center"
-                :class="[
-                  store.state.theme === 'dark' ? 'bg-dark' : 'bg-white',
-                  isLLMTrace((spans as any[])[virtualRow.index])
-                    ? ''
-                    : 'q-pt-sm',
-                ]"
+                class="relative-position operation-name-container bg-surface-base flex h-7.5 w-full cursor-pointer flex-nowrap items-center overflow-visible"
                 :data-test="`trace-tree-span-operation-name-container-${(spans as any[])[virtualRow.index].spanId}`"
                 @click="selectSpan((spans as any[])[virtualRow.index].spanId)"
+                @mouseenter="onHoverSpan((spans as any[])[virtualRow.index].spanId)"
               >
                 <div
-                  class="absolute view-logs-container"
-                  :data-test="`trace-tree-span-view-logs-container-${(spans as any[])[virtualRow.index].spanId}`"
-                >
-                  <q-btn
-                    class="q-mx-xs view-span-logs"
-                    :class="
-                      store.state.theme === 'dark' ? 'bg-dark' : 'bg-white'
-                    "
-                    size="0.625rem"
-                    icon="search"
-                    dense
-                    no-caps
-                    :title="t('traces.viewLogs')"
-                    @click.stop="
-                      viewSpanLogs((spans as any[])[virtualRow.index])
-                    "
-                    :data-test="`trace-tree-span-view-logs-btn-${(spans as any[])[virtualRow.index].spanId}`"
-                  >
-                  </q-btn>
-                </div>
-                <div
                   v-if="(spans as any[])[virtualRow.index].hasChildSpans"
-                  class="span-count-box cursor-pointer tw:border-[var(--o2-border-color)]! tw:relative"
+                  class="span-count-box text-2xs border-card-glass-border! hover:bg-interactive-hover-bg relative me-1 flex h-5 min-w-5 cursor-pointer items-center justify-center rounded-full border px-1 py-0 font-semibold transition-colors duration-200"
                   :style="{
                     color: (spans as any[])[virtualRow.index].style.color,
                   }"
-                  @click.stop="
-                    toggleSpanCollapse(
-                      (spans as any[])[virtualRow.index].spanId,
-                    )
-                  "
+                  @click.stop="toggleSpanCollapse((spans as any[])[virtualRow.index].spanId)"
                   :data-test="`trace-tree-span-badge-collapse-btn-${(spans as any[])[virtualRow.index].spanId}`"
-                  :title="`Click to ${collapseMapping[(spans as any[])[virtualRow.index].spanId] ? 'expand' : 'collapse'}`"
+                  :title="
+                    collapseMapping[(spans as any[])[virtualRow.index].spanId]
+                      ? t('traces.traceTree.clickToExpand')
+                      : t('traces.traceTree.clickToCollapse')
+                  "
                 >
                   {{ getChildCount((spans as any[])[virtualRow.index]) }}
                   <div
-                    v-if="
-                      collapseMapping[(spans as any[])[virtualRow.index].spanId]
-                    "
+                    v-if="collapseMapping[(spans as any[])[virtualRow.index].spanId]"
                     data-test="vertical-segment"
-                    :style="{
-                      position: 'absolute',
-                      left: '0.5rem',
-                      bottom: '-6px',
-                      height: '5px',
-                      borderLeft: '1.5px solid var(--o2-border-color)',
-                      pointerEvents: 'none',
-                      zIndex: 1,
-                    }"
+                    class="border-card-glass-border pointer-events-none absolute -bottom-1.5 left-2 z-1 h-1.25 border-s"
                   />
                 </div>
 
                 <div
                   v-else
-                  class="span-leaf-dot"
+                  class="me-1 h-1.5 w-1.5 shrink-0 self-center rounded-full"
                   :style="{
-                    backgroundColor: (spans as any[])[virtualRow.index].style
-                      .color,
+                    backgroundColor: (spans as any[])[virtualRow.index].style.color,
                   }"
                 ></div>
 
                 <div
-                  class="tw:flex tw:justify-between"
+                  class="flex justify-between"
                   :class="
                     (spans as any[])[virtualRow.index].hasChildSpans
-                      ? 'tw:w-full'
-                      : 'tw:w-[calc(100%-0.6rem)]!'
+                      ? 'w-full'
+                      : 'w-[calc(100%-0.6rem)]!'
                   "
                 >
                   <div
-                    class="ellipsis q-pl-xs cursor-pointer span-name-section tw:w-[calc(100%-2rem)]!"
+                    class="w-[calc(100%-2rem)]! cursor-pointer truncate ps-1"
                     :class="
                       isLLMTrace((spans as any[])[virtualRow.index])
-                        ? 'tw:flex-col tw:items-start'
-                        : ' tw:flex tw:items-center'
+                        ? 'flex-col items-start'
+                        : 'flex items-center'
                     "
                     :data-test="`trace-tree-span-select-btn-${(spans as any[])[virtualRow.index].spanId}`"
                   >
+                    <!-- w-full: content-sized, this box shrinks with its own text, so the service name's cap would resolve against the text it is meant to bound. -->
                     <div
-                      class="ellipsis flex items-center span-name-section-content"
+                      class="span-name-section-content flex w-full min-w-0 items-center truncate"
                     >
-                      <q-icon
-                        v-if="
-                          (spans as any[])[virtualRow.index].spanStatus ===
-                          'ERROR'
-                        "
+                      <OIcon
+                        v-if="(spans as any[])[virtualRow.index].spanStatus === 'ERROR'"
                         name="error"
-                        class="text-red-6 q-mr-xs"
-                        title="Error Span"
+                        size="sm"
+                        class="text-status-error-text! me-1"
+                        :title="t('traces.traceTree.errorSpan')"
                         :data-test="`trace-tree-span-error-icon-${(spans as any[])[virtualRow.index].spanId}`"
                       />
+                      <!-- shrink-0 + a cap, not plain shrink: flex shrinks in proportion to width, so a long operation name would eat a short service name first. -->
                       <span
-                        class="text-subtitle2 text-bold q-mr-sm"
+                        class="me-2 max-w-[50%] shrink-0 truncate text-sm font-bold font-medium"
                         :class="{
-                          highlighted: isHighlighted(
-                            (spans as any[])[virtualRow.index].spanId,
-                          ),
-                          'tw:text-gray-900':
-                            store.state.theme === 'dark' &&
-                            isHighlighted(
-                              (spans as any[])[virtualRow.index].spanId,
-                            ),
-                          'current-match':
-                            currentSelectedValue ===
-                            (spans as any[])[virtualRow.index].spanId,
+                          'bg-table-highlight-bg text-table-highlight-text font-bold':
+                            isHighlighted((spans as any[])[virtualRow.index].spanId),
+                          'bg-table-highlight-bg text-status-error-text font-bold':
+                            currentSelectedValue === (spans as any[])[virtualRow.index].spanId,
                         }"
                         :data-test="`trace-tree-span-service-name-${(spans as any[])[virtualRow.index].spanId}`"
+                        :title="(spans as any[])[virtualRow.index].resolvedIdentity"
                       >
-                        {{ (spans as any[])[virtualRow.index].serviceName }}
+                        {{ (spans as any[])[virtualRow.index].resolvedIdentity }}
                       </span>
                       <SpanKindBadge
                         v-if="(spans as any[])[virtualRow.index]?.spanKind"
                         :kind="(spans as any[])[virtualRow.index]?.spanKind"
+                        class="me-1"
                       />
 
                       <img
-                        v-if="
-                          spanTechIconUrlMap.get(
-                            getSpanTech((spans as any[])[virtualRow.index]),
-                          )
-                        "
-                        :src="
-                          spanTechIconUrlMap.get(
-                            getSpanTech((spans as any[])[virtualRow.index]),
-                          )
-                        "
+                        v-if="getSpanTechIcon((spans as any[])[virtualRow.index])"
+                        :src="getSpanTechIcon((spans as any[])[virtualRow.index])"
                         :title="getSpanTech((spans as any[])[virtualRow.index])"
-                        class="q-mr-xs tw:shrink-0 tw:w-[0.875rem] tw:h-[0.875rem] tw:inline-block tw:opacity-60"
+                        class="me-1 inline-block h-3.5 w-3.5 shrink-0 opacity-60"
                         aria-hidden="true"
                         alt=""
                         :data-test="`trace-tree-span-tech-icon-${(spans as any[])[virtualRow.index].spanId}`"
                       />
+                      <!-- min-w-0: a flex item defaults to min-width:auto and would refuse to shrink, so the row's ellipsis never fires. -->
                       <span
-                        class="text-body2"
-                        :class="
-                          store.state.theme === 'dark'
-                            ? 'text-grey-5'
-                            : 'text-blue-grey-9'
-                        "
+                        class="text-text-secondary min-w-0 truncate text-sm"
                         :data-test="`trace-tree-span-operation-name-${(spans as any[])[virtualRow.index].spanId}`"
-                        >{{
-                          (spans as any[])[virtualRow.index].operationName
-                        }}</span
+                        :title="(spans as any[])[virtualRow.index].operationName"
+                        >{{ (spans as any[])[virtualRow.index].operationName }}</span
                       >
                     </div>
                     <!-- LLM Metrics -->
                     <div
                       v-if="isLLMTrace((spans as any[])[virtualRow.index])"
-                      class="flex items-center text-caption text-red-6"
-                      style="
-                        margin-top: -4px;
-                        margin-bottom: 2px;
-                        line-height: 1;
-                      "
+                      class="text-status-error-text! mt-[-0.125rem] mb-0.5 flex items-center text-xs leading-none"
                     >
                       <span
-                        v-if="
-                          (spans as any[])[virtualRow.index].llm_usage?.total >
-                          0
-                        "
-                        class="q-mr-sm"
+                        v-if="(spans as any[])[virtualRow.index].genAiUsage?.total > 0"
+                        class="me-2"
                       >
-                        <q-icon name="functions" size="10px" />
-                        {{
-                          formatTokens(
-                            (spans as any[])[virtualRow.index].llm_usage.total,
-                          )
-                        }}
+                        <OIcon name="functions" size="xs" />
+                        {{ formatTokens((spans as any[])[virtualRow.index].genAiUsage.total) }}
                       </span>
-                      <span
-                        v-if="
-                          (spans as any[])[virtualRow.index].llm_cost?.total > 0
-                        "
-                      >
-                        <q-icon name="attach_money" size="10px" />
-                        {{
-                          formatCost(
-                            (spans as any[])[virtualRow.index].llm_cost.total,
-                          )
-                        }}
+                      <span v-if="(spans as any[])[virtualRow.index].genAiCost?.total > 0">
+                        <OIcon name="attach-money" size="xs" />
+                        {{ formatCost((spans as any[])[virtualRow.index].genAiCost.total) }}
                       </span>
                     </div>
                   </div>
 
-                  <div class="tw:flex tw:items-center tw:sticky tw:right-0">
+                  <div class="sticky right-0 flex items-center gap-1">
+                    <!-- Hidden at rest, not merely invisible: `invisible` would keep
+                         the box in layout and reserve a permanent gutter to the left
+                         of the badges, which is the thing this arrangement exists to
+                         avoid. `hidden` gives the operation name the full width until
+                         the row is hovered, and the button then takes its 1.5rem from
+                         the already-truncating name — never from the badges, which
+                         stay pinned to the right edge. The cost is that the text's
+                         truncation point shifts on hover; the reflow is one row wide.
+
+                         It sits before the status badge because it used to sit *on
+                         top of* it: the old `.view-logs-container` was an absolute
+                         overlay pinned to `right-0`, so hovering a row covered both
+                         the HTTP status and the event count — and the event count is
+                         the honest fallback for spans whose markers cannot be drawn,
+                         so hover hid the one channel that is always true. -->
+                    <div
+                      class="view-span-logs hidden"
+                      :data-test="`trace-tree-span-view-logs-container-${(spans as any[])[virtualRow.index].spanId}`"
+                    >
+                      <OButton
+                        variant="outline"
+                        size="icon"
+                        :title="t('traces.viewLogs')"
+                        @click.stop="viewSpanLogs((spans as any[])[virtualRow.index])"
+                        :data-test="`trace-tree-span-view-logs-btn-${(spans as any[])[virtualRow.index].spanId}`"
+                      >
+                        <OIcon name="search" size="xs" />
+                      </OButton>
+                    </div>
                     <span
-                      v-if="
-                        getHttpStatusVars((spans as any[])[virtualRow.index])
-                      "
-                      class="tw:text-[0.625rem] tw:font-bold tw:leading-none tw:py-[0.4rem] tw:px-1 tw:mr-[0.25rem] tw:rounded tw:whitespace-nowrap"
+                      v-if="getHttpStatusVars((spans as any[])[virtualRow.index])"
+                      class="rounded-default me-1 px-1 py-[0.4rem] text-xs leading-none font-semibold whitespace-nowrap"
                       :style="{
-                        backgroundColor: getHttpStatusVars(
-                          (spans as any[])[virtualRow.index],
-                        ).bg,
-                        color: getHttpStatusVars(
-                          (spans as any[])[virtualRow.index],
-                        ).text,
+                        backgroundColor: getHttpStatusVars((spans as any[])[virtualRow.index])?.bg,
+                        color: getHttpStatusVars((spans as any[])[virtualRow.index])?.text,
                       }"
-                      :title="`HTTP ${getHttpStatus((spans as any[])[virtualRow.index])}`"
+                      :title="
+                        t('traces.traceTree.httpStatus', {
+                          status: getHttpStatus((spans as any[])[virtualRow.index]),
+                        })
+                      "
                       :data-test="`trace-tree-span-http-status-${(spans as any[])[virtualRow.index].spanId}`"
                     >
                       {{ getHttpStatus((spans as any[])[virtualRow.index]) }}
                     </span>
-                    <span
-                      v-if="
-                        getEventCount((spans as any[])[virtualRow.index]) > 0 &&
-                        false
+                    <!-- Honest fallback for the event markers: a marker can only
+                         be drawn for an event that positions inside the trace
+                         window, and a sub-pixel span has nowhere to draw one at
+                         all. This count is always true.
+
+                         Two tallies, each with its own glyph: the badge's icon
+                         counts every event, the trailing segment counts the
+                         subset that failed. Severity therefore still travels on
+                         a non-colour channel — the glyph, and the icon's own
+                         `label`, which is what a screen reader reads — rather
+                         than on the error variant's red alone. -->
+                    <OBadge
+                      v-if="getEventSummary((spans as any[])[virtualRow.index]).total > 0"
+                      size="xs"
+                      shape="square"
+                      :variant="
+                        getEventSummary((spans as any[])[virtualRow.index]).errors > 0
+                          ? 'error-outline'
+                          : 'default-outline'
                       "
-                      class="flex items-center"
-                      :style="{
-                        fontSize: '0.625rem',
-                        lineHeight: 1,
-                        gap: '0.125rem',
-                        color: 'var(--o2-text-secondary)',
-                        whiteSpace: 'nowrap',
-                      }"
-                      :title="`${getEventCount((spans as any[])[virtualRow.index])} span event${getEventCount((spans as any[])[virtualRow.index]) > 1 ? 's' : ''}`"
-                      :data-test="`trace-tree-span-event-count-${(spans as any[])[virtualRow.index].spanId}`"
+                      icon="event-note"
+                      class="me-1 rounded!"
+                      :title="getEventCountLabel((spans as any[])[virtualRow.index])"
+                      data-test="span-event-count-badge"
+                      :data-test-span="`trace-tree-span-event-count-${(spans as any[])[virtualRow.index].spanId}`"
                     >
-                      <q-icon name="event_note" size="0.625rem" />
-                      {{ getEventCount((spans as any[])[virtualRow.index]) }}
-                    </span>
+                      {{ getEventSummary((spans as any[])[virtualRow.index]).total }}
+                      <template
+                        v-if="getEventSummary((spans as any[])[virtualRow.index]).errors > 0"
+                        #trailing
+                      >
+                        <span class="flex items-center gap-0.5" data-test="span-event-error-count">
+                          <OIcon
+                            name="error"
+                            size="xs"
+                            :label="getEventErrorLabel((spans as any[])[virtualRow.index])"
+                          />
+                          {{ getEventSummary((spans as any[])[virtualRow.index]).errors }}
+                        </span>
+                      </template>
+                    </OBadge>
                   </div>
                 </div>
               </div>
               <div
-                class="span-background-wrapper"
+                class="span-background-wrapper relative grow"
                 :style="{
-                  backgroundColor: (spans as any[])[virtualRow.index].style
-                    .backgroundColor,
+                  backgroundColor: (spans as any[])[virtualRow.index].style.backgroundColor,
                   borderLeft: `0.1875rem solid ${(spans as any[])[virtualRow.index].style.color}`,
-                  marginLeft: (spans as any[])[virtualRow.index].hasChildSpans
-                    ? '0.875rem'
-                    : '0',
+                  marginLeft: (spans as any[])[virtualRow.index].hasChildSpans ? '0.875rem' : '0',
                   width: '100%',
                 }"
                 :data-test="`trace-tree-span-background-${(spans as any[])[virtualRow.index].spanId}`"
               />
             </div>
           </div>
-          <div
-            v-if="!isSidebarOpen"
-            :style="{ width: `calc(100% - ${leftWidth}px)` }"
-          >
-            <span-block
+          <div v-if="!isSidebarOpen" :style="{ width: `calc(100% - ${leftWidth}px)` }">
+            <SpanBlock
               :span="(spans as any[])[virtualRow.index]"
               :depth="depth"
               :baseTracePosition="baseTracePosition"
@@ -384,12 +338,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                 height: '3.75rem',
               }"
               :spanDimensions="spanDimensions"
-              :isCollapsed="
-                collapseMapping[(spans as any[])[virtualRow.index].spanId]
-              "
+              :isCollapsed="collapseMapping[(spans as any[])[virtualRow.index].spanId]"
               :spanData="spanMap[(spans as any[])[virtualRow.index].spanId]"
               @toggle-collapse="toggleSpanCollapse"
               @select-span="selectSpan"
+              @select-span-event="selectSpanEvent"
               @view-logs="viewSpanLogs((spans as any[])[virtualRow.index])"
             />
           </div>
@@ -407,21 +360,27 @@ import {
   watch,
   computed,
   onMounted,
+  onBeforeUnmount,
+  type PropType,
 } from "vue";
 import useTraces from "@/composables/useTraces";
 import { useStore } from "vuex";
+import useTheme from "@/composables/useTheme";
 import SpanBlock from "./SpanBlock.vue";
+import { summarizeSpanEvents } from "@/composables/traces/useSpanEvents";
 import SpanKindBadge from "./components/SpanKindBadge.vue";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped, type I18nText } from "@/types/i18n";
+import { toast } from "@/lib/feedback/Toast/useToast";
 
 import { formatTokens, formatCost, isLLMTrace } from "@/utils/llmUtils";
-import {
-  getServiceIconDataUrl,
-  getSpanTechIconDataUrl,
-} from "@/utils/traces/convertTraceData";
+import { getServiceIconDataUrl, getSpanTechIconDataUrl } from "@/utils/traces/convertTraceData";
 import { getKindIcon } from "@/composables/traces/useTraceProcessing";
-import { useVirtualizer } from "@tanstack/vue-virtual";
+import { useVirtualizer, type VirtualItem } from "@tanstack/vue-virtual";
 import { useRouter } from "vue-router";
+import OBadge from "@/lib/core/Badge/OBadge.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import config from "@/aws-exports";
 
 export default defineComponent({
   name: "TraceTree",
@@ -448,7 +407,11 @@ export default defineComponent({
       default: 0,
     },
     spanDimensions: {
-      type: Object,
+      type: Object as PropType<{
+        height: number;
+        collapseWidth: number;
+        gap: number;
+      }>,
       default: () => {},
     },
     spanMap: {
@@ -471,6 +434,10 @@ export default defineComponent({
       type: String,
       default: "",
     },
+    hoveredSpanId: {
+      type: String,
+      default: "",
+    },
     isSidebarOpen: {
       type: Boolean,
       default: false,
@@ -483,15 +450,23 @@ export default defineComponent({
   emits: [
     "toggleCollapse",
     "selectSpan",
+    "selectSpanEvent",
+    "hoverSpan",
+    "unhoverSpan",
     "update-current-index",
     "search-result",
+    "view-correlated-logs",
   ],
   setup(props, { emit }) {
-    const { buildQueryDetails, navigateToLogs } = useTraces();
+    const { buildQueryDetails, navigateToLogs, searchObj } = useTraces();
     const store = useStore();
+    const { isDark } = useTheme();
 
-    const { t } = useI18n();
-    const router = useRouter();
+    const { t } = useI18nTyped();
+    useRouter();
+
+    // As there are some UX issues, disabling it for now
+    const enableHoverSelection = false;
 
     // ── Virtualizer ──────────────────────────────────────────────────────────
     const rowVirtualizer = useVirtualizer(
@@ -506,10 +481,20 @@ export default defineComponent({
     const virtualRows = computed(() => rowVirtualizer.value.getVirtualItems());
     const totalSize = computed(() => rowVirtualizer.value.getTotalSize());
 
+    const getVirtualRowKey = (row: VirtualItem): string | number => row.key as string | number;
+
+    const highlightedSpanId = computed(() => props.hoveredSpanId || props.selectedSpanId);
+
     onMounted(() => {
       if (props.selectedSpanId) {
         scrollToSpan(props.selectedSpanId as string, 300);
       }
+    });
+
+    onBeforeUnmount(() => {
+      // Drop any queued scroll so it can't fire against a torn-down virtualizer
+      // (the tree can remount since searchObj is a module-level singleton).
+      cancelScroll();
     });
 
     // ── CSS connector helpers (pre-computed, O(n) total) ────────────────────
@@ -573,8 +558,48 @@ export default defineComponent({
       emit("selectSpan", spanId);
     };
 
+    const selectSpanEvent = (payload: { spanId: string; eventIndex: number }) => {
+      emit("selectSpanEvent", payload);
+    };
+    const onHoverSpan = (spanId: string) => {
+      if (enableHoverSelection) emit("hoverSpan", spanId);
+    };
+    const onUnhoverSpan = () => {
+      if (enableHoverSelection) emit("unhoverSpan");
+    };
+
     const viewSpanLogs = (span: any) => {
-      const queryDetails = buildQueryDetails(span);
+      if (config.isEnterprise === "true") {
+        emit("view-correlated-logs", span);
+        return;
+      }
+      // OSS resolves the target stream from the header's picker. Without a
+      // selection we would navigate to `/logs?stream=`, which drops the filter
+      // and dumps an unfiltered result set on the user. The header's own View
+      // Logs button is disabled in this state; this row-level one is not, so
+      // say why instead of leaving it a silent dead end (same handling as #13722).
+      if (!searchObj.data.traceDetails.selectedLogStreams.length) {
+        toast({
+          variant: "warning",
+          message: t("search.selectLogsStreamFirst"),
+        });
+        return;
+      }
+      // `spans` are formatted nodes (camelCase, microseconds); `buildQueryDetails`
+      // reads the raw API shape (`start_time`/`end_time`, nanoseconds). Resolve the
+      // raw span the same way the rest of this component does rather than making the
+      // shared helper tolerate two shapes — passing a formatted node produced
+      // `from=NaN&to=NaN`. A span missing `span_id` gets a synthetic `spanId` that is
+      // absent from `spanMap`, so the lookup can miss.
+      const rawSpan = props.spanMap[span.spanId];
+      if (!rawSpan) {
+        toast({
+          variant: "warning",
+          message: t("traces.viewLogsUnavailable"),
+        });
+        return;
+      }
+      const queryDetails = buildQueryDetails(rawSpan);
       navigateToLogs(queryDetails);
     };
 
@@ -620,21 +645,52 @@ export default defineComponent({
         .filter((index: any) => index !== -1);
     };
 
+    // Tracks the pending scrollToSpan setTimeout so a newer scroll or an
+    // explicit cancel can clear an in-flight one. Non-reactive — never used in
+    // the template.
+    let pendingScrollTimeout: ReturnType<typeof setTimeout> | null = null;
+
     const scrollToSpan = (spanId: string, delay: number = 0) => {
       const spanIndex = (props.spans as any[]).findIndex(
         (s: any) => s.spanId === spanId || s.span_id === spanId,
       );
 
       if (spanIndex !== -1) {
-        setTimeout(() => {
+        // Clear any previously queued scroll so only the latest one runs.
+        if (pendingScrollTimeout !== null) {
+          clearTimeout(pendingScrollTimeout);
+        }
+        pendingScrollTimeout = setTimeout(() => {
+          pendingScrollTimeout = null;
           rowVirtualizer.value.scrollToIndex(spanIndex, { align: "center" });
         }, delay);
       }
     };
 
+    // Cancels any pending and in-flight programmatic scroll. Called when the
+    // selection is cleared (e.g. sidebar close) so the virtualizer stops
+    // forcing the previously-selected span back into view while the user
+    // scrolls manually.
+    const cancelScroll = () => {
+      if (pendingScrollTimeout !== null) {
+        clearTimeout(pendingScrollTimeout);
+        pendingScrollTimeout = null;
+      }
+      // TanStack's scrollToIndex runs a requestAnimationFrame retry loop that
+      // keeps re-scrolling until the target offset is reached; the loop only
+      // bails when its captured `currentScrollToIndex` no longer matches the
+      // instance's. Resetting it to null (the value the library inits it to)
+      // makes the next frame bail. There is no public API for this, so guard
+      // the access in case the internal field is renamed in a future
+      // @tanstack/virtual-core release.
+      const virtualizer = rowVirtualizer.value as any;
+      if (virtualizer && "currentScrollToIndex" in virtualizer) {
+        virtualizer.currentScrollToIndex = null;
+      }
+    };
+
     const scrollToMatch = () => {
-      if (searchResults.value.length === 0 || currentIndex.value === null)
-        return;
+      if (searchResults.value.length === 0 || currentIndex.value === null) return;
       scrollToSpan(searchResults.value[currentIndex.value]);
     };
 
@@ -661,10 +717,7 @@ export default defineComponent({
     };
 
     const nextMatch = () => {
-      if (
-        currentIndex.value !== null &&
-        currentIndex.value < searchResults.value.length - 1
-      ) {
+      if (currentIndex.value !== null && currentIndex.value < searchResults.value.length - 1) {
         currentIndex.value++;
         nextTick(() => {
           scrollToMatch();
@@ -696,44 +749,42 @@ export default defineComponent({
 
     // ── Icon maps ────────────────────────────────────────────────────────────
     const spanServiceIconUrlMap = computed(() => {
-      const isDark = store.state.theme === "dark";
       const cache = new Map<string, string>();
       for (const span of props.spans as any[]) {
         const key = `${span.serviceName}/${span.style?.color ?? ""}`;
         if (!cache.has(key)) {
           cache.set(
             key,
-            getServiceIconDataUrl(
-              span.serviceName,
-              isDark,
-              span.style?.color ?? "#9e9e9e",
-            ),
+            getServiceIconDataUrl(span.serviceName, isDark.value, span.style?.color ?? "#9e9e9e"),
           );
         }
       }
       return cache;
     });
 
-    const getSpanTech = (span: any): string | null => {
+    const getSpanTech = (span: any): string | undefined => {
       const attrs = span || {};
       return (
         attrs["db_system"] ||
         attrs["messaging_system"] ||
         attrs["rpc_system"] ||
-        (span.spanKind?.toUpperCase() === "CLIENT" && attrs["http_url"]
-          ? "http"
-          : null) ||
-        null
+        (span.spanKind?.toUpperCase() === "CLIENT" && attrs["http_url"] ? "http" : null) ||
+        undefined
       );
     };
 
+    // Resolve the tech icon URL for a span; undefined when no tech/icon.
+    const getSpanTechIcon = (span: any): string | undefined => {
+      const tech = getSpanTech(span);
+      return tech ? spanTechIconUrlMap.value.get(tech) : undefined;
+    };
+
     const spanTechIconUrlMap = computed(() => {
-      const isDark = store.state.theme === "dark";
       const map = new Map<string, string>();
       for (const span of props.spans as any[]) {
         const tech = getSpanTech(span);
         if (tech && !map.has(tech)) {
-          const url = getSpanTechIconDataUrl(tech, isDark);
+          const url = getSpanTechIconDataUrl(tech, isDark.value);
           if (url) map.set(tech, url);
         }
       }
@@ -747,43 +798,103 @@ export default defineComponent({
       return code !== null ? Number(code) : null;
     };
 
-    const getHttpStatusVars = (
-      span: any,
-    ): { text: string; bg: string } | null => {
+    const getHttpStatusVars = (span: any): { text: string; bg: string } | null => {
       const code = getHttpStatus(span);
       if (code === null || code < 200) return null;
       if (code < 300)
         return {
-          text: "var(--o2-status-success-text)",
-          bg: "var(--o2-status-success-bg)",
+          text: "var(--color-status-success-text)",
+          bg: "var(--color-status-success-bg)",
         };
       if (code < 400)
         return {
-          text: "var(--o2-status-info-text)",
-          bg: "var(--o2-status-info-bg)",
+          text: "var(--color-status-info-text)",
+          bg: "var(--color-status-info-bg)",
         };
       if (code < 500)
         return {
-          text: "var(--o2-status-warning-text)",
-          bg: "var(--o2-status-warning-bg)",
+          text: "var(--color-status-warning-text)",
+          bg: "var(--color-status-warning-bg)",
         };
       return {
-        text: "var(--o2-status-error-text)",
-        bg: "var(--o2-status-error-bg)",
+        text: "var(--color-status-error-text)",
+        bg: "var(--color-status-error-bg)",
       };
     };
 
-    const getEventCount = (span: any): number => {
-      return props.spanMap[span.spanId]?.events?.length ?? 0;
+    interface SpanEventSummary {
+      total: number;
+      errors: number;
+    }
+
+    /** Shared result for a span the trace carries no event payload for. */
+    const NO_SPAN_EVENTS: SpanEventSummary = Object.freeze({ total: 0, errors: 0 });
+
+    /**
+     * Every span's event tally, computed once per `spanMap`.
+     *
+     * The badge reads this five or six times per row — `v-if`, `:class`,
+     * `:title`, the text, and the label helper — and the row list is virtualized,
+     * so it re-renders on every scroll tick. Summarizing on demand meant
+     * re-running `JSON.parse` over the raw events payload 150+ times per frame
+     * for a screenful of rows. Keying the whole map off `spanMap` collapses that
+     * to one parse per span per trace.
+     */
+    const eventSummaryMap = computed<Record<string, SpanEventSummary>>(() => {
+      const timestampField = store.state.zoConfig?.timestamp_column;
+      const summaries: Record<string, SpanEventSummary> = {};
+
+      for (const [spanId, spanData] of Object.entries(props.spanMap ?? {})) {
+        summaries[spanId] = summarizeSpanEvents((spanData as any)?.events, timestampField);
+      }
+
+      return summaries;
+    });
+
+    const getEventSummary = (span: any): SpanEventSummary =>
+      eventSummaryMap.value[span.spanId] ?? NO_SPAN_EVENTS;
+
+    /**
+     * The badge is the honest fallback: markers can only show events that
+     * position inside the trace window, and 10.3% of spans in the `default`
+     * stream render narrower than one pixel. The badge shows the two tallies
+     * as icon-and-number pairs, so this full sentence is what its tooltip says.
+     */
+    const getEventCountLabel = (span: any): string => {
+      const { total, errors } = getEventSummary(span);
+      if (!errors)
+        return total === 1
+          ? t("traces.spanEventCount", { count: total })
+          : t("traces.spanEventCountPlural", { count: total });
+      return errors === 1
+        ? t("traces.spanEventCountWithErrors", { count: total, errors })
+        : t("traces.spanEventCountWithErrorsPlural", { count: total, errors });
+    };
+
+    /**
+     * The error icon's accessible name. Without it the error tally reaches a
+     * screen reader as a bare number beside a red glyph — severity by colour
+     * alone, which is the defect the badge exists to fix.
+     */
+    const getEventErrorLabel = (span: any): I18nText => {
+      const { errors } = getEventSummary(span);
+      return errors === 1
+        ? t("traces.spanEventErrorCount", { errors })
+        : t("traces.spanEventErrorCountPlural", { errors });
     };
 
     return {
       toggleSpanCollapse,
       selectSpan,
+      selectSpanEvent,
+      onHoverSpan,
+      onUnhoverSpan,
+      highlightedSpanId,
       store,
       viewSpanLogs,
       t,
       searchResults,
+      getVirtualRowKey,
       currentIndex,
       updateSearch,
       nextMatch,
@@ -791,19 +902,23 @@ export default defineComponent({
       isHighlighted,
       currentSelectedValue,
       scrollToSpan,
+      cancelScroll,
       scrollToMatch,
       findMatches,
       getChildCount,
+      getEventSummary,
+      getEventCountLabel,
+      getEventErrorLabel,
       formatTokens,
       formatCost,
       isLLMTrace,
       spanServiceIconUrlMap,
       spanTechIconUrlMap,
       getSpanTech,
+      getSpanTechIcon,
       getKindIcon,
       getHttpStatus,
       getHttpStatusVars,
-      getEventCount,
       // virtualizer
       virtualRows,
       totalSize,
@@ -811,142 +926,58 @@ export default defineComponent({
       ancestorSiblingMap,
     };
   },
-  components: { SpanBlock, SpanKindBadge },
+  components: { SpanBlock, SpanKindBadge, OBadge, OButton, OIcon },
 });
 </script>
 
-<style scoped lang="scss">
-.view-logs-container {
-  top: 0.25rem;
+<style scoped>
+/* keep(complex-state): span-row hover/selected ::before overlay tints plus
+   parent-state child reveal chains target descendants and pseudo-overlays that
+   Tailwind utilities can't express. The overlay is always present (transparent
+   at rest) so its background-color can transition — matching OTable row hover
+   (transition-colors duration-150) instead of snapping in abruptly. */
+.span-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
   right: 0;
-  visibility: hidden;
+  top: 0;
+  bottom: 0;
+  background-color: transparent;
+  pointer-events: none;
+  z-index: 999;
+  transition: background-color 150ms ease;
 }
 
-.span-count-box {
-  min-width: 1.2rem;
-  height: 1.2rem;
-  padding: 0 0.25rem;
-  border-radius: 50%;
-  border: 0.0625rem solid;
+.span-row:hover::before {
+  background-color: color-mix(in srgb, var(--color-accent) 20%, transparent);
+}
+
+.span-row:hover .operation-name-container {
+  background-color: transparent !important;
+}
+
+.span-row:hover .view-span-logs {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 0.75rem;
-  font-weight: 600;
-  margin-right: 0.25rem;
-  transition: background-color 0.2s ease;
+}
 
-  &:hover {
-    background-color: rgba(0, 0, 0, 0.05);
+/* Touch has no row hover — keep the span quick-action visible. */
+@media (max-width: 47.99rem) {
+  .view-span-logs {
+    display: flex;
   }
 }
 
-.bg-dark .span-count-box:hover {
-  background-color: rgba(255, 255, 255, 0.1);
+.span-row.span-row-selected::before {
+  background-color: color-mix(in srgb, var(--color-accent) 35%, transparent);
 }
 
-.span-leaf-dot {
-  width: 0.375rem;
-  height: 0.375rem;
-  border-radius: 50%;
-  margin-right: 0.25rem;
-  flex-shrink: 0;
-  align-self: center;
+.span-row.span-row-selected .operation-name-container {
+  background-color: transparent !important;
 }
 
-.span-name-section {
-  padding-left: 0.25rem;
-}
-
-.span-name-section-content {
-  display: block;
-}
-
-.span-background-wrapper {
-  flex-grow: 1;
+.span-row > * {
   position: relative;
-}
-
-.operation-name-container {
-  height: 1.875rem;
-  overflow: visible;
-}
-
-.span-row {
-  position: relative;
-  min-height: 1.875rem;
-
-  // Hover highlight via CSS — no JS required
-  &:hover::before {
-    content: "";
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 0;
-    bottom: 0;
-    background-color: rgba(0, 123, 255, 0.2);
-    pointer-events: none;
-    z-index: 999;
-  }
-
-  &:hover .operation-name-container {
-    background-color: transparent !important;
-  }
-
-  &:hover .view-logs-container {
-    visibility: visible;
-  }
-
-  &.span-row-selected {
-    &::before {
-      content: "";
-      position: absolute;
-      left: 0;
-      right: 0;
-      top: 0;
-      bottom: 0;
-      background-color: rgba(0, 123, 255, 0.35);
-      pointer-events: none;
-      z-index: 999;
-    }
-
-    .operation-name-container {
-      background-color: transparent !important;
-    }
-  }
-
-  > * {
-    position: relative;
-    z-index: 2;
-  }
-}
-</style>
-<style lang="scss">
-.view-logs-btn-text {
-  visibility: visible;
-}
-.view-span-logs {
-  background-color: inherit;
-  .view-logs-btn-text {
-    visibility: hidden;
-    width: 0;
-    transition: width 0.3s ease-in;
-  }
-  &:hover .view-logs-btn-text {
-    visibility: visible;
-    width: auto;
-  }
-}
-.border-right {
-  border-right: 0.0625rem solid rgb(236, 236, 236);
-}
-.highlighted {
-  background-color: yellow;
-  font-weight: bold;
-}
-.current-match {
-  background-color: yellow;
-  color: red;
-  font-weight: bold;
+  z-index: 2;
 }
 </style>

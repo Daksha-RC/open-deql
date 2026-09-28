@@ -15,7 +15,9 @@
 
 import config from "@/aws-exports";
 import { routeGuard } from "@/utils/zincutils";
+import SplunkHec from "@/components/ingestion/logs/SplunkHec.vue";
 import SyslogNg from "@/components/ingestion/logs/SyslogNg.vue";
+import LoongCollector from "@/components/ingestion/logs/LoongCollector.vue";
 import Ingestion from "@/views/Ingestion.vue";
 import FluentBit from "@/components/ingestion/logs/FluentBit.vue";
 import Fluentd from "@/components/ingestion/logs/Fluentd.vue";
@@ -27,19 +29,25 @@ import AzureConfig from "@/components/ingestion/recommended/AzureConfig.vue";
 import FileBeat from "@/components/ingestion/logs/FileBeat.vue";
 import OpenTelemetry from "@/components/ingestion/traces/OpenTelemetry.vue";
 import PrometheusConfig from "@/components/ingestion/metrics/PrometheusConfig.vue";
+import VMagentConfig from "@/components/ingestion/metrics/VMagentConfig.vue";
+import NightingaleConfig from "@/components/ingestion/metrics/NightingaleConfig.vue";
+import CategrafConfig from "@/components/ingestion/metrics/CategrafConfig.vue";
 import OtelCollector from "@/components/ingestion/metrics/OtelCollector.vue";
 import TelegrafConfig from "@/components/ingestion/metrics/TelegrafConfig.vue";
 import CloudWatchMetricConfig from "@/components/ingestion/metrics/CloudWatchMetrics.vue";
 import IngestLogs from "@/components/ingestion/logs/Index.vue";
 import IngestMetrics from "@/components/ingestion/metrics/Index.vue";
+import IngestProfiles from "@/components/ingestion/profiles/Index.vue";
 import IngestTraces from "@/components/ingestion/traces/Index.vue";
 import Recommended from "@/components/ingestion/Recommended.vue";
 import Custom from "@/components/ingestion/Custom.vue";
 import LogstashDatasource from "@/components/ingestion/logs/LogstashDatasource.vue";
+import ProfilesOtelCollector from "@/components/ingestion/profiles/OtelCollector.vue";
 
 import RUMWeb from "@/components/ingestion/recommended/FrontendRumConfig.vue";
 import KubernetesConfig from "@/components/ingestion/recommended/KubernetesConfig.vue";
 import LinuxConfig from "@/components/ingestion/recommended/LinuxConfig.vue";
+import MacOSConfig from "@/components/ingestion/recommended/MacOSConfig.vue";
 import OtelConfig from "@/components/ingestion/recommended/OtelConfig.vue";
 import WindowsConfig from "@/components/ingestion/recommended/WindowsConfig.vue";
 
@@ -52,6 +60,7 @@ import Redis from "@/components/ingestion/databases/Redis.vue";
 import CouchDB from "@/components/ingestion/databases/CouchDB.vue";
 import Elasticsearch from "@/components/ingestion/databases/Elasticsearch.vue";
 import MySQL from "@/components/ingestion/databases/MySQL.vue";
+import MariaDB from "@/components/ingestion/databases/MariaDB.vue";
 import SAPHana from "@/components/ingestion/databases/SAPHana.vue";
 import Snowflake from "@/components/ingestion/databases/Snowflake.vue";
 import Zookeeper from "@/components/ingestion/databases/Zookeeper.vue";
@@ -108,8 +117,12 @@ import Heroku from "@/components/ingestion/others/Heroku.vue";
 import AIIntegrations from "@/components/ingestion/AIIntegrations.vue";
 import AIIntegrationDetail from "@/components/ingestion/ai/AIIntegrationDetail.vue";
 import { aiCategories } from "@/components/ingestion/ai/data";
+import McpCrossLink from "@/components/ingestion/McpCrossLink.vue";
 
 const useIngestionRoutes = () => {
+  // One route per AI integration across all tabs. `aiCategories` is already
+  // deduped in data.ts (manifest cards reuse an existing route and the original
+  // is removed), so every routeName here is unique — no duplicate-name routes.
   const aiIntegrationRoutes = aiCategories.flatMap((category) =>
     category.integrations.map((integration) => ({
       path: `${category.slug}/${integration.slug}`,
@@ -131,7 +144,8 @@ const useIngestionRoutes = () => {
       name: "ingestion",
       component: Ingestion,
       meta: {
-        title: "Ingestion",
+        titleKey: "menu.ingestionText",
+        allowOnEmptyData: true,
       },
       beforeEnter(to: any, from: any, next: any) {
         routeGuard(to, from, next);
@@ -217,6 +231,22 @@ const useIngestionRoutes = () => {
                     routeGuard(to, from, next);
                   },
                 },
+                {
+                  path: "splunkhec",
+                  name: "splunkHec",
+                  component: SplunkHec,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
+                },
+                {
+                  path: "loongcollector",
+                  name: "loongcollector",
+                  component: LoongCollector,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
+                },
               ],
             },
             {
@@ -231,6 +261,30 @@ const useIngestionRoutes = () => {
                   path: "prometheus",
                   name: "prometheus",
                   component: PrometheusConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
+                },
+                {
+                  path: "vmagent",
+                  name: "vmagent",
+                  component: VMagentConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
+                },
+                {
+                  path: "nightingale",
+                  name: "nightingale",
+                  component: NightingaleConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
+                },
+                {
+                  path: "categraf",
+                  name: "categraf",
+                  component: CategrafConfig,
                   beforeEnter(to: any, from: any, next: any) {
                     routeGuard(to, from, next);
                   },
@@ -255,6 +309,24 @@ const useIngestionRoutes = () => {
                   path: "cloudwatchMetrics",
                   name: "cloudwatchMetrics",
                   component: CloudWatchMetricConfig,
+                  beforeEnter(to: any, from: any, next: any) {
+                    routeGuard(to, from, next);
+                  },
+                },
+              ],
+            },
+            {
+              path: "profiles",
+              name: "ingestProfiles",
+              component: IngestProfiles,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
+              children: [
+                {
+                  path: "otelcollector",
+                  name: "profilesOtelCollector",
+                  component: ProfilesOtelCollector,
                   beforeEnter(to: any, from: any, next: any) {
                     routeGuard(to, from, next);
                   },
@@ -322,6 +394,14 @@ const useIngestionRoutes = () => {
               },
             },
             {
+              path: "macos",
+              name: "ingestFromMacOS",
+              component: MacOSConfig,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
+            },
+            {
               path: "aws",
               name: "AWSConfig",
               component: AWSConfig,
@@ -357,6 +437,17 @@ const useIngestionRoutes = () => {
               path: "frontend-monitoring",
               name: "frontendMonitoring",
               component: RUMWeb,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
+            },
+            // Discoverability pointer → the MCP setup home in IAM. Registered on
+            // every edition, matching both the tab in Recommended.vue and the
+            // target "mcpServer" route, which are no longer build-gated.
+            {
+              path: "mcp",
+              name: "recommendedMcp",
+              component: McpCrossLink,
               beforeEnter(to: any, from: any, next: any) {
                 routeGuard(to, from, next);
               },
@@ -423,6 +514,14 @@ const useIngestionRoutes = () => {
               path: "mysql",
               name: "mysql",
               component: MySQL,
+              beforeEnter(to: any, from: any, next: any) {
+                routeGuard(to, from, next);
+              },
+            },
+            {
+              path: "mariadb",
+              name: "mariadb",
+              component: MariaDB,
               beforeEnter(to: any, from: any, next: any) {
                 routeGuard(to, from, next);
               },
@@ -770,6 +869,10 @@ const useIngestionRoutes = () => {
           },
           children: [
             {
+              // Named so the router doesn't warn about an unnamed empty-path
+              // child under a named parent. Nothing navigates to this name; it
+              // exists only to land /ai-integrations on the first integration.
+              name: "ai-integrations-default",
               path: "",
               redirect: () => {
                 const first = aiCategories[0].integrations[0];

@@ -80,9 +80,12 @@ impl JsonEncoder {
                         // f64
                     }
                     MetricType::HISTOGRAM => {
-                        // initial type row
-                        ret.push(json!(mf_map.clone()));
-
+                        // NOTE: no "type header" row is emitted here. The metrics
+                        // ingest path (`service::metrics::json::ingest`) requires a
+                        // `value` on every record and aborts the whole batch on a
+                        // value-less record. A header row carries no value, so emitting
+                        // it would drop every metric in the scrape (incl. counters).
+                        // `__type__` is already set on each real row below.
                         let h = m.get_histogram();
                         let mut upper_bounds: Vec<Value> = vec![];
                         let mut cumulative_counts: Vec<Value> = vec![];
@@ -105,9 +108,7 @@ impl JsonEncoder {
                         }
                         // individual buckets
                         let timestamp = crate::utils::time::now_micros();
-                        for (bound, value) in
-                            upper_bounds.into_iter().zip(cumulative_counts.into_iter())
-                        {
+                        for (bound, value) in upper_bounds.into_iter().zip(cumulative_counts) {
                             let mut row = Map::new();
                             row.insert("_timestamp".to_string(), json!(timestamp));
                             row.insert("__name__".to_string(), json!(format!("{}_bucket", name)));
@@ -122,8 +123,7 @@ impl JsonEncoder {
                         let count = json!(h.get_sample_count());
                         let sum = json!(h.get_sample_sum());
 
-                        for (ty, val) in ["count", "sum"].into_iter().zip([count, sum].into_iter())
-                        {
+                        for (ty, val) in ["count", "sum"].into_iter().zip([count, sum]) {
                             let mut row = Map::new();
                             row.insert("_timestamp".to_string(), json!(timestamp));
                             row.insert("__name__".to_string(), json!(format!("{}_{}", name, ty)));
@@ -136,9 +136,7 @@ impl JsonEncoder {
                     }
 
                     MetricType::SUMMARY => {
-                        // initial type row
-                        ret.push(json!(mf_map.clone()));
-
+                        // No value-less type header row (see HISTOGRAM note above).
                         let s = m.get_summary();
                         let mut quantiles = vec![];
                         let mut values = vec![];
@@ -150,7 +148,7 @@ impl JsonEncoder {
 
                         // individual buckets
                         let timestamp = crate::utils::time::now_micros();
-                        for (quantile, value) in quantiles.into_iter().zip(values.into_iter()) {
+                        for (quantile, value) in quantiles.into_iter().zip(values) {
                             let mut row = Map::new();
                             row.insert("_timestamp".to_string(), json!(timestamp));
                             row.insert("__name__".to_string(), json!(format!("{}_bucket", name)));
@@ -164,7 +162,7 @@ impl JsonEncoder {
                         let names = ["sum".to_string(), "count".to_string()];
 
                         let values = [json!(s.sample_sum()), json!(s.sample_count())];
-                        for (key, value) in names.into_iter().zip(values.into_iter()) {
+                        for (key, value) in names.into_iter().zip(values) {
                             let mut row = Map::new();
                             row.insert("_timestamp".to_string(), json!(timestamp));
                             row.insert("__name__".to_string(), json!(format!("{name}_{key}")));
@@ -180,7 +178,12 @@ impl JsonEncoder {
                     }
                 }
             }
-            ret.push(json!(mf_map));
+            // Only counter/gauge accumulate a `value` into `mf_map`; histogram/summary
+            // emit their own rows above and `continue`, leaving `mf_map` as a value-less
+            // header that must not be ingested.
+            if !matches!(metric_type, MetricType::HISTOGRAM | MetricType::SUMMARY) {
+                ret.push(json!(mf_map));
+            }
         }
         ret
     }
@@ -305,6 +308,15 @@ mod tests {
 
         let metrics = json.as_array().unwrap();
         assert!(metrics.len() > 1); // Should have multiple entries for buckets, sum, and count
+
+        // Every record must carry a `value` — the metrics ingest path rejects
+        // value-less records and aborts the whole batch. No type-header rows.
+        for m in metrics {
+            assert!(
+                m.get("value").is_some(),
+                "histogram record missing `value`: {m:?}"
+            );
+        }
 
         // Find the sum metric
         let sum_metric = metrics

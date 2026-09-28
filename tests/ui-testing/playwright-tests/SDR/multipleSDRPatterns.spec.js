@@ -8,10 +8,15 @@ async function ingestSingleLog(page, streamName, fieldName, fieldValue, maxRetri
   const orgId = getOrgIdentifier();
   const headers = getAuthHeaders();
 
+  // Unique marker so verification can query the search API for THIS exact record
+  // (WHERE sdr_test_id = '<marker>') instead of guessing which rendered row is latest.
+  const marker = `sdr-${require('crypto').randomUUID()}`;
+
   const logEntry = {
     level: "info",
     [fieldName]: fieldValue,
     log: `Test log with ${fieldName} = ${fieldValue}`,
+    sdr_test_id: marker,
     _timestamp: Date.now() * 1000
   };
 
@@ -44,7 +49,7 @@ async function ingestSingleLog(page, streamName, fieldName, fieldValue, maxRetri
     if (response.status === 200) {
       testLogger.info('Ingestion successful, waiting for stream to be indexed...');
       await page.waitForTimeout(5000);
-      return;
+      return marker;
     }
 
     // Check for "stream being deleted" error - retry with backoff
@@ -58,6 +63,26 @@ async function ingestSingleLog(page, streamName, fieldName, fieldValue, maxRetri
 
     testLogger.error(`Ingestion failed! Status: ${response.status}, Response:`, response.body);
     throw new Error(`Ingestion failed with status ${response.status}: ${JSON.stringify(response.body)}`);
+  }
+}
+
+// Wrap a page.request API call with retry tolerance for transient cloud-network
+// failures (e.g. "apiRequestContext.post: Connection timeout" / ECONNRESET on the
+// shared cloud gateway). Only retries genuine connection/timeout errors — a real
+// HTTP error response still surfaces via the caller's res.ok() check. Prevents a
+// single network blip from failing an expensive @slow flow (previously only
+// recovered by a full, minutes-long test-level retry).
+async function requestWithRetry(page, action, label, maxRetries = 3) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await action();
+    } catch (err) {
+      const msg = (err && err.message) || String(err);
+      const retriable = /Connection timeout|ECONNRESET|ECONNREFUSED|socket hang up|Request timed out|net::|timeout/i.test(msg);
+      if (!retriable || attempt === maxRetries) throw err;
+      testLogger.warn(`${label} failed (attempt ${attempt}/${maxRetries}): ${msg} — retrying`);
+      await page.waitForTimeout(attempt * 2000);
+    }
   }
 }
 
@@ -95,7 +120,7 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
 
   // Setup: Create patterns via browser-context API (sends cookies for cloud auth)
   test('setup: create patterns', {
-    tag: ['@sdr', '@cleanup', '@sdrMultiPattern']
+    tag: ['@sdr', '@setup', '@sdrMultiPattern']
   }, async ({ page }) => {
     testLogger.info(`=== SETUP: Creating 4 patterns via page.request, testRunId: ${testRunId} ===`);
     const baseUrl = (process.env.INGESTION_URL || process.env.ZO_BASE_URL || 'http://localhost:5080').replace(/\/$/, '');
@@ -104,10 +129,14 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
     const allPatternsToCreate = [...queryTimePatterns, ...ingestionTimePatterns];
 
     for (const patternDef of allPatternsToCreate) {
-      const res = await page.request.post(`${baseUrl}/api/${org}/re_patterns`, {
-        headers,
-        data: { name: patternDef.name, description: patternDef.description, pattern: patternDef.pattern }
-      });
+      const res = await requestWithRetry(
+        page,
+        () => page.request.post(`${baseUrl}/api/${org}/re_patterns`, {
+          headers,
+          data: { name: patternDef.name, description: patternDef.description, pattern: patternDef.pattern }
+        }),
+        `create pattern ${patternDef.name}`
+      );
       if (!res.ok()) {
         const body = await res.text();
         throw new Error(`Failed to create pattern ${patternDef.name}: ${res.status()} ${body}`);
@@ -116,7 +145,11 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
     }
 
     // Verify all patterns exist
-    const listRes = await page.request.get(`${baseUrl}/api/${org}/re_patterns`, { headers });
+    const listRes = await requestWithRetry(
+      page,
+      () => page.request.get(`${baseUrl}/api/${org}/re_patterns`, { headers }),
+      'list patterns'
+    );
     const listData = await listRes.json();
     const existingNames = new Set((listData.patterns || []).map(p => p.name));
     for (const p of allPatternsToCreate) {
@@ -130,7 +163,7 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
   // Multiple patterns on ONE field (SEQUENTIAL FLOW)
   // This test has 10 steps with multiple navigations, so needs extended timeout
   test('should link 4 patterns to one field and verify with sequential ingestion', {
-    tag: ['@sdr', '@poc', '@sdrMultiPattern']
+    tag: ['@sdr', '@poc', '@sdrMultiPattern', '@slow']
   }, async ({ page }, testInfo) => {
     // Extend timeout to 7 minutes - 10 sequential steps with navigation + CI overhead
     test.setTimeout(420000);
@@ -140,8 +173,8 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
 
     // ==================== STEP 1: Ingest log #1 for query-time drop pattern ====================
     testLogger.info('========== STEP 1: Ingest log with value "application.log" ==========');
-    await ingestSingleLog(page, testStreamName, fieldName, queryTimePatterns[0].value); // "application.log"
-    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, false);
+    const markerLog1 = await ingestSingleLog(page, testStreamName, fieldName, queryTimePatterns[0].value); // "application.log"
+    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, false, markerLog1);
     testLogger.info('STEP 1 PASSED: Log #1 ingested, field visible (no patterns yet)');
 
     // ==================== STEP 2: Link query-time DROP pattern ====================
@@ -156,14 +189,15 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
     testLogger.info('STEP 2 PASSED: Query-time DROP pattern linked');
 
     // ==================== STEP 3: Verify query-time DROP on existing log ====================
+    // No re-ingestion: query-time drop transforms log #1 at search time. Reuse its marker.
     testLogger.info('========== STEP 3: Verify query-time DROP works on EXISTING log ==========');
-    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, true, false);
+    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, true, false, markerLog1);
     testLogger.info('STEP 3 PASSED: Field DROPPED at query time (no re-ingestion needed)');
 
     // ==================== STEP 4: Ingest log #2 for query-time redact pattern ====================
     testLogger.info('========== STEP 4: Ingest log with value "14:30:45" ==========');
-    await ingestSingleLog(page, testStreamName, fieldName, queryTimePatterns[1].value); // "14:30:45"
-    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, false);
+    const markerLog2 = await ingestSingleLog(page, testStreamName, fieldName, queryTimePatterns[1].value); // "14:30:45"
+    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, false, markerLog2);
     testLogger.info('STEP 4 PASSED: Log #2 ingested, field visible (pattern not yet linked)');
 
     // ==================== STEP 5: Link query-time REDACT pattern ====================
@@ -178,8 +212,9 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
     testLogger.info('STEP 5 PASSED: Query-time REDACT pattern linked (now 2 patterns total)');
 
     // ==================== STEP 6: Verify query-time REDACT on existing log ====================
+    // No re-ingestion: query-time redact transforms log #2 at search time. Reuse its marker.
     testLogger.info('========== STEP 6: Verify query-time REDACT works on EXISTING log ==========');
-    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, true);
+    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, true, markerLog2);
     testLogger.info('STEP 6 PASSED: Field REDACTED at query time (no re-ingestion needed)');
 
     // ==================== STEP 7: Link ingestion-time DROP pattern ====================
@@ -195,8 +230,8 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
 
     // ==================== STEP 8: Ingest log #3 and verify ingestion-time DROP ====================
     testLogger.info('========== STEP 8: Ingest log with value "AB12CDEF1234567890" ==========');
-    await ingestSingleLog(page, testStreamName, fieldName, ingestionTimePatterns[0].value); // IFSC code
-    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, true, false);
+    const markerLog3 = await ingestSingleLog(page, testStreamName, fieldName, ingestionTimePatterns[0].value); // IFSC code
+    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, true, false, markerLog3);
     testLogger.info('STEP 8 PASSED: Field DROPPED at ingestion time');
 
     // ==================== STEP 9: Link ingestion-time REDACT pattern ====================
@@ -212,8 +247,8 @@ test.describe("Multiple Patterns on One Field", { tag: '@enterprise' }, () => {
 
     // ==================== STEP 10: Ingest log #4 and verify ingestion-time REDACT ====================
     testLogger.info('========== STEP 10: Ingest log with value "25/12/2024" ==========');
-    await ingestSingleLog(page, testStreamName, fieldName, ingestionTimePatterns[1].value); // Date
-    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, true);
+    const markerLog4 = await ingestSingleLog(page, testStreamName, fieldName, ingestionTimePatterns[1].value); // Date
+    await pm.sdrVerificationPage.verifySingleFieldInLatestLog(pm.logsPage, testStreamName, fieldName, false, true, markerLog4);
     testLogger.info('STEP 10 PASSED: Field REDACTED at ingestion time');
 
     testLogger.info('=== ALL 4 PATTERNS ON ONE FIELD TEST COMPLETED SUCCESSFULLY ===');

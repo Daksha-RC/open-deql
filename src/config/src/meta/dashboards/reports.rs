@@ -32,12 +32,14 @@ pub enum ReportMediaType {
     #[default]
     Pdf,
     Png,
+    Csv,
 }
 
 impl From<i16> for ReportMediaType {
     fn from(v: i16) -> Self {
         match v {
             1 => ReportMediaType::Png,
+            2 => ReportMediaType::Csv,
             _ => ReportMediaType::Pdf,
         }
     }
@@ -48,6 +50,7 @@ impl From<ReportMediaType> for i16 {
         match t {
             ReportMediaType::Pdf => 0,
             ReportMediaType::Png => 1,
+            ReportMediaType::Csv => 2,
         }
     }
 }
@@ -219,7 +222,9 @@ pub struct Report {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(value_type = String, format = DateTime)]
     pub updated_at: Option<DateTime<FixedOffset>>,
+    #[serde(default)]
     pub owner: String,
+    #[serde(default)]
     pub last_edited_by: String,
 }
 

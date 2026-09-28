@@ -13,8 +13,14 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { buildPrefillFromPanel } from "@/utils/alerts/prefill/fromPanel";
+import { useAlertCreation } from "@/composables/alerts/useAlertCreation";
 import { ref } from "vue";
-import { exportFile } from "quasar";
+import { downloadFile } from "@/utils/dom";
+import { toast } from "@/lib/feedback/Toast/useToast";
+// `gt`, not useI18nTyped: this composable takes router/store as injected deps
+// so it can be constructed outside a component, and useI18n() throws there.
+import { gt, type TranslateFn } from "@/types/i18n";
 
 // Helper function to properly wrap CSV values
 export const wrapCsvValue = (val: any): string => {
@@ -27,10 +33,7 @@ export const wrapCsvValue = (val: any): string => {
 
   // Wrap in quotes if the value contains comma, quotes, or newlines
   const needsQuotes =
-    str.includes(",") ||
-    str.includes('"') ||
-    str.includes("\n") ||
-    str.includes("\r");
+    str.includes(",") || str.includes('"') || str.includes("\n") || str.includes("\r");
   return needsQuotes ? `"${str}"` : str;
 };
 
@@ -83,10 +86,7 @@ export function usePanelAlertCreation({
     contextMenuVisible.value = false;
   };
 
-  const handleCreateAlert = (selection: {
-    condition: string;
-    threshold: number;
-  }) => {
+  const handleCreateAlert = (selection: { condition: string; threshold: number }) => {
     hideContextMenu();
 
     // Prepare panel data to pass to alert creation
@@ -126,14 +126,8 @@ export function usePanelAlertCreation({
         // Extract from SQL to get the exact case (without quotes)
         if (sqlQuery) {
           // Look for pattern: aggregation_func(...) as "alias" or aggregation_func(...) as alias
-          const escapedAlias = aliasOrColumn.replace(
-            /[.*+?^${}()|[\]\\]/g,
-            "\\$&",
-          );
-          const regex = new RegExp(
-            `\\s+as\\s+(["']?${escapedAlias}["']?)(?:\\s|,|\\)|$)`,
-            "i",
-          );
+          const escapedAlias = aliasOrColumn.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const regex = new RegExp(`\\s+as\\s+(["']?${escapedAlias}["']?)(?:\\s|,|\\)|$)`, "i");
           const match = sqlQuery.match(regex);
           if (match && match[1]) {
             // Strip quotes - the parser will add them back if needed
@@ -169,29 +163,35 @@ export function usePanelAlertCreation({
       }
     }
 
-    const panelDataToPass = {
-      panelTitle: panelSchema.value.title || "Unnamed Panel",
-      panelId: panelSchema.value.id,
-      queries: panelSchema.value.queries,
-      queryType: queryType,
-      timeRange: selectedTimeObj.value,
-      threshold: selection.threshold,
-      condition: selection.condition,
-      // Pass the Y-axis column name for threshold comparison
-      yAxisColumn: yAxisColumn,
-      // Pass the executed query with variables already replaced
-      executedQuery: executedQuery,
-    };
+    // The panel's y-axis extraction above is this surface's own knowledge; from
+    // here on it is the shared path — the same adapter, launcher, and form that
+    // every other surface uses. No confirm dialog here: the user already chose
+    // the threshold and condition in the context menu itself.
+    const { openAlertCreation } = useAlertCreation({ router, store });
 
-    // Navigate to alert creation page
-    router.push({
-      name: "addAlert",
-      query: {
-        org_identifier: store.state.selectedOrganization.identifier,
-        fromPanel: "true",
-        panelData: encodeURIComponent(JSON.stringify(panelDataToPass)),
-      },
-    });
+    const launched = openAlertCreation(
+      buildPrefillFromPanel({
+        panelTitle: panelSchema.value.title || "Unnamed Panel",
+        panelId: panelSchema.value.id,
+        queries: panelSchema.value.queries,
+        queryType,
+        timeRange: selectedTimeObj.value,
+        threshold: selection.threshold,
+        condition: selection.condition as "above" | "below",
+        yAxisColumn,
+        executedQuery,
+      }),
+    );
+
+    // There is no confirm dialog on this path, so a refusal would otherwise be
+    // an unexplained no-op — the user right-clicks, picks a threshold, and
+    // nothing happens. Say why instead.
+    if (!launched) {
+      toast({
+        variant: "error",
+        message: gt("toastMessages.dashboard.panelQueryHasNoStreamToAlertOn"),
+      });
+    }
   };
 
   return {
@@ -212,6 +212,7 @@ export function usePanelDownload({
   tableRendererRef,
   showErrorNotification,
   showPositiveNotification,
+  t,
 }: {
   panelSchema: any;
   data: any;
@@ -219,6 +220,7 @@ export function usePanelDownload({
   tableRendererRef: any;
   showErrorNotification: any;
   showPositiveNotification: any;
+  t: TranslateFn;
 }) {
   const downloadDataAsCSV = (title: string) => {
     // if panel type is table then download data as csv
@@ -229,7 +231,7 @@ export function usePanelDownload({
       try {
         // Check if data exists
         if (!data?.value || data?.value?.length === 0) {
-          showErrorNotification("No data available to download");
+          showErrorNotification(t("dashboard.noDataAvailableToDownload"));
           return;
         }
 
@@ -242,11 +244,11 @@ export function usePanelDownload({
 
           // Iterate through each response item (multiple queries can produce multiple responses)
           // Use filteredData to exclude hidden queries
-          filteredData?.value?.forEach((promData: any, queryIndex: number) => {
+          filteredData?.value?.forEach((promData: any) => {
             if (!promData?.result || !Array.isArray(promData.result)) return;
 
             // Iterate through each result (time series)
-            promData.result.forEach((series: any, seriesIndex: number) => {
+            promData.result.forEach((series: any) => {
               const metricLabels = series.metric || {};
 
               // Iterate through values array (timestamp, value pairs)
@@ -294,10 +296,9 @@ export function usePanelDownload({
           const flattenedData: any[] = [];
 
           // Iterate through all datasets/arrays in the response
-          data?.value?.forEach((dataset: any, datasetIndex: number) => {
+          data?.value?.forEach((dataset: any) => {
             // Skip if dataset is empty or not an array
-            if (!dataset || !Array.isArray(dataset) || dataset.length === 0)
-              return;
+            if (!dataset || !Array.isArray(dataset) || dataset.length === 0) return;
 
             dataset.forEach((row: any) => {
               flattenedData.push({
@@ -308,7 +309,7 @@ export function usePanelDownload({
 
           // If after flattening we have no data, show notification and return
           if (flattenedData.length === 0) {
-            showErrorNotification("No data available to download");
+            showErrorNotification(t("dashboard.noDataAvailableToDownload"));
             return;
           }
 
@@ -323,30 +324,24 @@ export function usePanelDownload({
 
           // Create CSV content with headers and data rows
           csvContent = [
-            headers?.join(","), // Headers row
-            ...flattenedData?.map((row: any) =>
-              headers
-                ?.map((header: any) => wrapCsvValue(row[header] ?? ""))
-                .join(","),
+            headers.join(","), // Headers row
+            ...flattenedData.map((row: any) =>
+              headers.map((header: any) => wrapCsvValue(row[header] ?? "")).join(","),
             ),
           ].join("\r\n");
         }
 
-        const status = exportFile(
-          (title ?? "chart-export") + ".csv",
-          csvContent,
-          "text/csv",
-        );
+        const status = downloadFile((title ?? "chart-export") + ".csv", csvContent, "text/csv");
 
         if (status === true) {
-          showPositiveNotification("Chart data downloaded as a CSV file", {
+          showPositiveNotification(t("dashboard.chartDataDownloadedCsv"), {
             timeout: 2000,
           });
         } else {
-          showErrorNotification("Browser denied file download...");
+          showErrorNotification(t("dashboard.browserDeniedFileDownload"));
         }
       } catch (error) {
-        showErrorNotification("Failed to download data as CSV");
+        showErrorNotification(t("dashboard.failedToDownloadCsv"));
       }
     }
   };
@@ -360,39 +355,104 @@ export function usePanelDownload({
         // Handle non-table charts
         // Use filteredData for PromQL to exclude hidden queries, otherwise use data
         const chartData =
-          panelSchema.value.queryType === "promql"
-            ? filteredData.value
-            : data.value;
+          panelSchema.value.queryType === "promql" ? filteredData.value : data.value;
 
         if (!chartData || !chartData.length) {
-          showErrorNotification("No data available to download");
+          showErrorNotification(t("dashboard.noDataAvailableToDownload"));
           return;
         }
 
         // Export the data as JSON
         const content = JSON.stringify(chartData, null, 2);
 
-        const status = exportFile(
+        const status = downloadFile(
           (title ?? "data-export") + ".json",
           content,
           "application/json",
         );
 
         if (status === true) {
-          showPositiveNotification("Chart data downloaded as a JSON file", {
+          showPositiveNotification(t("dashboard.chartDataDownloadedJson"), {
             timeout: 2000,
           });
         } else {
-          showErrorNotification("Browser denied file download...");
+          showErrorNotification(t("dashboard.browserDeniedFileDownload"));
         }
       }
     } catch (error) {
-      showErrorNotification("Failed to download data as JSON");
+      showErrorNotification(t("dashboard.failedToDownloadJson"));
+    }
+  };
+
+  /**
+   * Returns the CSV string for the panel's current data without triggering a
+   * file download. Used by the report server via window.oo_getAllPanelsCsv().
+   */
+  const getPanelCsvString = (): string | null => {
+    if (panelSchema.value.type === "table") {
+      return tableRendererRef?.value?.getTableCsvString() ?? null;
+    }
+
+    if (!data?.value || data?.value?.length === 0) return null;
+
+    if (panelSchema.value.queryType === "promql") {
+      const flattenedData: any[] = [];
+
+      filteredData?.value?.forEach((promData: any) => {
+        if (!promData?.result || !Array.isArray(promData.result)) return;
+
+        promData.result.forEach((series: any) => {
+          const metricLabels = series.metric || {};
+          series.values.forEach((point: any) => {
+            flattenedData.push({
+              timestamp: point[0],
+              value: point[1],
+              ...metricLabels,
+            });
+          });
+        });
+      });
+
+      if (flattenedData.length === 0) return null;
+
+      const allKeys = new Set<string>();
+      flattenedData.forEach((row) => Object.keys(row).forEach((k) => allKeys.add(k)));
+      const keys = Array.from(allKeys).sort((a, b) => {
+        if (a === "timestamp") return -1;
+        if (b === "timestamp") return 1;
+        if (a === "value") return -1;
+        if (b === "value") return 1;
+        return a.localeCompare(b);
+      });
+
+      return [
+        keys.join(","),
+        ...flattenedData.map((row) => keys.map((key) => wrapCsvValue(row[key] ?? "")).join(",")),
+      ].join("\r\n");
+    } else {
+      const flattenedData: any[] = [];
+
+      data?.value?.forEach((dataset: any) => {
+        if (!dataset || !Array.isArray(dataset) || dataset.length === 0) return;
+        dataset.forEach((row: any) => flattenedData.push({ ...row }));
+      });
+
+      if (flattenedData.length === 0) return null;
+
+      const allKeys = new Set<string>();
+      flattenedData.forEach((row) => Object.keys(row).forEach((k) => allKeys.add(k)));
+      const headers = Array.from(allKeys).sort();
+
+      return [
+        headers.join(","),
+        ...flattenedData.map((row) => headers.map((h) => wrapCsvValue(row[h] ?? "")).join(",")),
+      ].join("\r\n");
     }
   };
 
   return {
     downloadDataAsCSV,
     downloadDataAsJSON,
+    getPanelCsvString,
   };
 }

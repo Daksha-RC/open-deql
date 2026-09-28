@@ -20,7 +20,7 @@ use datafusion::arrow::datatypes::Schema;
 use crate::{
     db::{
         IndexStatement,
-        postgres::{CLIENT, CLIENT_DDL, create_index},
+        postgres::{CLIENT_DDL, CLIENT_RW, create_index},
     },
     errors::{Error, Result},
 };
@@ -58,7 +58,7 @@ impl super::SchemaHistory for PostgresSchemaHistory {
         schema: Schema,
     ) -> Result<()> {
         let value = json::to_string(&schema)?;
-        let pool = CLIENT.clone();
+        let pool = CLIENT_RW.clone();
         DB_QUERY_NUMS
             .with_label_values(&["insert", "schema_history"])
             .inc();
@@ -146,13 +146,11 @@ mod tests {
 
     #[test]
     fn test_postgres_schema_history_new() {
-        let s = PostgresSchemaHistory::new();
-        drop(s);
+        let _history = PostgresSchemaHistory::new();
     }
 
     #[test]
     fn test_postgres_schema_history_default() {
-        let s = PostgresSchemaHistory::default();
-        drop(s);
+        let _history = PostgresSchemaHistory::default();
     }
 }

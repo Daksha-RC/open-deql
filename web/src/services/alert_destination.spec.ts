@@ -56,7 +56,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.post).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations`,
-        params.data
+        params.data,
       );
     });
 
@@ -74,7 +74,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.post).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations?module=${params.module}`,
-        params.data
+        params.data,
       );
     });
 
@@ -92,7 +92,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.post).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations`,
-        params.data
+        params.data,
       );
     });
   });
@@ -111,7 +111,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.put).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`,
-        params.data
+        params.data,
       );
     });
 
@@ -129,7 +129,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.put).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}?module=${params.module}`,
-        params.data
+        params.data,
       );
     });
 
@@ -146,7 +146,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.put).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`,
-        params.data
+        params.data,
       );
     });
   });
@@ -166,7 +166,7 @@ describe("alert_destination service", () => {
       await destination.list(params);
 
       expect(mockHttpInstance.get).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}`
+        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}`,
       );
     });
 
@@ -185,7 +185,7 @@ describe("alert_destination service", () => {
       await destination.list(params);
 
       expect(mockHttpInstance.get).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}&module=${params.module}`
+        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}&module=${params.module}`,
       );
     });
 
@@ -204,7 +204,7 @@ describe("alert_destination service", () => {
       await destination.list(params);
 
       expect(mockHttpInstance.get).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}`
+        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}`,
       );
     });
 
@@ -222,8 +222,44 @@ describe("alert_destination service", () => {
       await destination.list(params);
 
       expect(mockHttpInstance.get).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations?page_num=3&page_size=100&sort_by=name&desc=true`
+        `/api/${params.org_identifier}/alerts/destinations?page_num=3&page_size=100&sort_by=name&desc=true`,
       );
+    });
+
+    it("should append include_usage when requested", async () => {
+      const params = {
+        org_identifier: "org123",
+        page_num: 1,
+        page_size: 100000,
+        desc: false,
+        sort_by: "name",
+        module: "alert",
+        include_usage: true,
+      };
+
+      mockHttpInstance.get.mockResolvedValue({ data: [] });
+
+      await destination.list(params);
+
+      expect(mockHttpInstance.get).toHaveBeenCalledWith(
+        `/api/${params.org_identifier}/alerts/destinations?page_num=${params.page_num}&page_size=${params.page_size}&sort_by=${params.sort_by}&desc=${params.desc}&module=${params.module}&include_usage=true`,
+      );
+    });
+
+    it("should not append include_usage when not requested", async () => {
+      const params = {
+        org_identifier: "org123",
+        page_num: 1,
+        page_size: 100,
+        desc: false,
+        sort_by: "name",
+      };
+
+      mockHttpInstance.get.mockResolvedValue({ data: [] });
+
+      await destination.list(params);
+
+      expect(mockHttpInstance.get.mock.calls[0][0]).not.toContain("include_usage");
     });
   });
 
@@ -239,7 +275,7 @@ describe("alert_destination service", () => {
       await destination.get_by_name(params);
 
       expect(mockHttpInstance.get).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`
+        `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`,
       );
     });
 
@@ -254,7 +290,7 @@ describe("alert_destination service", () => {
       await destination.get_by_name(params);
 
       expect(mockHttpInstance.get).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`
+        `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`,
       );
     });
   });
@@ -271,7 +307,7 @@ describe("alert_destination service", () => {
       await destination.delete(params);
 
       expect(mockHttpInstance.delete).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`
+        `/api/${params.org_identifier}/alerts/destinations/${encodeURIComponent(params.destination_name)}`,
       );
     });
 
@@ -286,7 +322,7 @@ describe("alert_destination service", () => {
       await destination.delete(params);
 
       expect(mockHttpInstance.delete).toHaveBeenCalledWith(
-        `/api/${params.org_identifier}/alerts/destinations/my%20slack%20destination`
+        `/api/${params.org_identifier}/alerts/destinations/my%20slack%20destination`,
       );
     });
   });
@@ -302,7 +338,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.delete).toHaveBeenCalledWith(
         `/api/${org_identifier}/alerts/destinations/bulk`,
-        { data }
+        { data },
       );
     });
 
@@ -316,7 +352,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.delete).toHaveBeenCalledWith(
         `/api/${org_identifier}/alerts/destinations/bulk`,
-        { data }
+        { data },
       );
     });
   });
@@ -338,7 +374,7 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.post).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations/test`,
-        params.data
+        params.data,
       );
     });
 
@@ -358,8 +394,37 @@ describe("alert_destination service", () => {
 
       expect(mockHttpInstance.post).toHaveBeenCalledWith(
         `/api/${params.org_identifier}/alerts/destinations/test`,
-        params.data
+        params.data,
       );
+    });
+  });
+
+  describe("Slack OAuth", () => {
+    it("starts OAuth for the selected organization", async () => {
+      mockHttpInstance.post.mockResolvedValue({ data: { authorizationUrl: "https://slack.com" } });
+
+      await destination.startSlackOAuth({ org_identifier: "org 123" });
+
+      expect(mockHttpInstance.post).toHaveBeenCalledWith(
+        "/api/org%20123/alerts/destinations/slack/oauth/start",
+      );
+    });
+
+    it("exchanges the callback code and state without putting either in the URL", async () => {
+      mockHttpInstance.post.mockResolvedValue({ data: { channel: "alerts" } });
+
+      await destination.exchangeSlackOAuth({
+        org_identifier: "org123",
+        code: "temporary-code",
+        state: "signed-state",
+      });
+
+      expect(mockHttpInstance.post).toHaveBeenCalledWith(
+        "/api/org123/alerts/destinations/slack/oauth/exchange",
+        { code: "temporary-code", state: "signed-state" },
+      );
+      expect(mockHttpInstance.post.mock.calls[0][0]).not.toContain("temporary-code");
+      expect(mockHttpInstance.post.mock.calls[0][0]).not.toContain("signed-state");
     });
   });
 
@@ -369,7 +434,7 @@ describe("alert_destination service", () => {
       mockHttpInstance.post.mockRejectedValue(error);
 
       await expect(
-        destination.create({ org_identifier: "org123", destination_name: "d1", data: {} })
+        destination.create({ org_identifier: "org123", destination_name: "d1", data: {} }),
       ).rejects.toThrow("Validation error");
     });
 
@@ -378,7 +443,7 @@ describe("alert_destination service", () => {
       mockHttpInstance.put.mockRejectedValue(error);
 
       await expect(
-        destination.update({ org_identifier: "org123", destination_name: "d1", data: {} })
+        destination.update({ org_identifier: "org123", destination_name: "d1", data: {} }),
       ).rejects.toThrow("Not found");
     });
 
@@ -387,7 +452,13 @@ describe("alert_destination service", () => {
       mockHttpInstance.get.mockRejectedValue(error);
 
       await expect(
-        destination.list({ org_identifier: "org123", page_num: 1, page_size: 20, desc: false, sort_by: "name" })
+        destination.list({
+          org_identifier: "org123",
+          page_num: 1,
+          page_size: 20,
+          desc: false,
+          sort_by: "name",
+        }),
       ).rejects.toThrow("Unauthorized");
     });
 
@@ -396,7 +467,7 @@ describe("alert_destination service", () => {
       mockHttpInstance.delete.mockRejectedValue(error);
 
       await expect(
-        destination.delete({ org_identifier: "org123", destination_name: "d1" })
+        destination.delete({ org_identifier: "org123", destination_name: "d1" }),
       ).rejects.toThrow("Forbidden");
     });
 
@@ -405,7 +476,7 @@ describe("alert_destination service", () => {
       mockHttpInstance.post.mockRejectedValue(error);
 
       await expect(
-        destination.test({ org_identifier: "org123", data: { type: "webhook" } })
+        destination.test({ org_identifier: "org123", data: { type: "webhook" } }),
       ).rejects.toThrow("Connection refused");
     });
   });

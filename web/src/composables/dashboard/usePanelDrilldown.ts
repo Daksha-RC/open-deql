@@ -13,23 +13,25 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-import {
-  ref,
-  computed,
-  watch,
-  nextTick,
-  onBeforeMount,
-  onUnmounted,
-} from "vue";
-import {
-  getAllDashboardsByFolderId,
-  getDashboard,
-  getFoldersList,
-} from "@/utils/commons";
+import { ref, computed, watch, nextTick, onBeforeMount, onUnmounted } from "vue";
+import type { TranslateFn } from "@/types/i18n";
+import { getAllDashboardsByFolderId, getDashboard, getFoldersList } from "@/utils/commons";
 import { b64EncodeUnicode, escapeSingleQuotes } from "@/utils/zincutils";
 import { getUTCTimestampFromZonedTimestamp } from "@/utils/dashboard/dateTimeUtils";
-import { normalizeVariableSyntax } from "@/utils/dashboard/variables/variablesUtils";
+import {
+  normalizeVariableSyntax,
+  replaceVariablePlaceholders,
+} from "@/utils/dashboard/variables/variablesUtils";
 import searchService from "@/services/search";
+import { isCrossLinkingEnabledForStream } from "@/utils/crossLinking";
+import { isSafeNavigableUrl } from "@/utils/safeUrl";
+import { extractFields } from "@/utils/query/sqlUtils";
+import {
+  maxParenDepth,
+  SQL_PARSE_MAX_DEPTH,
+  stripWherePredicate,
+} from "@/utils/query/sqlComplexity";
+import { EXEMPLAR_SERIES_ID } from "@/utils/dashboard/exemplars/applyExemplarSeries";
 
 export function usePanelDrilldown({
   panelSchema,
@@ -38,7 +40,6 @@ export function usePanelDrilldown({
   metadata,
   data,
   panelData,
-  filteredData,
   resultMetaData,
   store,
   route,
@@ -54,6 +55,8 @@ export function usePanelDrilldown({
   selectedAnnotationData,
   isCursorOverPanel,
   showErrorNotification,
+  t,
+  onExemplarClick,
 }: {
   panelSchema: any;
   variablesData: any;
@@ -77,9 +80,17 @@ export function usePanelDrilldown({
   selectedAnnotationData: any;
   isCursorOverPanel: any;
   showErrorNotification: any;
+  t: TranslateFn;
+  onExemplarClick?: (params: any) => void | Promise<void>;
 }) {
   // Cross-linking: store cross-links from result_schema response
   const crossLinksData: any = ref({ stream_links: [], org_links: [] });
+
+  // Panel query's WHERE, parsed by the backend (result_schema); "" falls back to client extraction.
+  const panelBaseWhere = ref("");
+
+  // Per-stream WHERE for join panels ({stream -> scoped WHERE}), parsed by the backend.
+  const panelWhereByStream = ref<Record<string, string>>({});
 
   const drilldownArray: any = ref([]);
 
@@ -103,9 +114,7 @@ export function usePanelDrilldown({
   });
 
   // get interval from resultMetaData if it exists
-  const interval = computed(
-    () => resultMetaData?.value?.[0]?.[0]?.histogram_interval,
-  );
+  const interval = computed(() => resultMetaData?.value?.[0]?.[0]?.histogram_interval);
 
   // get interval in micro seconds
   const intervalMicro = computed(() => interval.value * 1000 * 1000);
@@ -124,59 +133,65 @@ export function usePanelDrilldown({
     // if the str is same as the key, return it's value(it can be an string or array).
     for (const key in obj) {
       // ${varName} == str or {{varName}} == str
-      if (`\$\{${key}\}` == str || `{{${key}}}` == str) {
+      if (`$\{${key}}` === str || `{{${key}}}` === str) {
         return obj[key];
       }
     }
 
     // Replace both {{key}} and ${key} patterns
-    return str.replace(/(?:\{\{([^}]+)\}\})|(?:\$\{([^}]+)\})/g, function (_: any, mustacheKey: any, dollarKey: any) {
-      const key = (mustacheKey || dollarKey).trim();
-      // Split the key into parts by either a dot or a ["xyz"] pattern and filter out empty strings
-      let parts = key.split(/\.|\["(.*?)"\]/).filter(Boolean);
+    return str.replace(
+      /(?:\{\{([^}]+)\}\})|(?:\$\{([^}]+)\})/g,
+      function (_: any, mustacheKey: any, dollarKey: any) {
+        const key = (mustacheKey || dollarKey).trim();
+        // Split the key into parts by either a dot or a ["xyz"] pattern and filter out empty strings
+        let parts = key.split(/\.|\["(.*?)"\]/).filter(Boolean);
 
-      let value = obj;
-      for (let part of parts) {
-        if (value && part in value) {
-          value = value[part];
-        } else {
-          return mustacheKey ? "{{" + key + "}}" : "${" + key + "}";
+        let value = obj;
+        for (let part of parts) {
+          if (value && part in value) {
+            value = value[part];
+          } else {
+            return mustacheKey ? "{{" + key + "}}" : "${" + key + "}";
+          }
         }
-      }
-      return value;
-    });
+        return value;
+      },
+    );
   };
 
   const replaceDrilldownToLogs = (str: any, obj: any) => {
     str = normalizeVariableSyntax(str);
     // If str is exactly equal to a key, return its value directly
     for (const key in obj) {
-      if (`\$\{${key}\}` === str || `{{${key}}}` === str) {
+      if (`$\{${key}}` === str || `{{${key}}}` === str) {
         let value = obj[key];
 
         // Ensure string values are wrapped in quotes
-        return typeof value === "string" ? `'${value}'` : value;
+        return typeof value === "string" ? `'${escapeSingleQuotes(value)}'` : value;
       }
     }
 
     // Replace both {{key}} and ${key} patterns
-    return str.replace(/(?:\{\{([^}]+)\}\})|(?:\$\{([^}]+)\})/g, function (_: any, mustacheKey: any, dollarKey: any) {
-      const key = (mustacheKey || dollarKey).trim();
-      // Split the key into parts by either a dot or a ["xyz"] pattern and filter out empty strings
-      let parts = key.split(/\.|\["(.*?)"\]/).filter(Boolean);
+    return str.replace(
+      /(?:\{\{([^}]+)\}\})|(?:\$\{([^}]+)\})/g,
+      function (_: any, mustacheKey: any, dollarKey: any) {
+        const key = (mustacheKey || dollarKey).trim();
+        // Split the key into parts by either a dot or a ["xyz"] pattern and filter out empty strings
+        let parts = key.split(/\.|\["(.*?)"\]/).filter(Boolean);
 
-      let value = obj;
-      for (let part of parts) {
-        if (value && part in value) {
-          value = value[part];
-        } else {
-          return mustacheKey ? "{{" + key + "}}" : "${" + key + "}"; // Keep the placeholder if the key is not found
+        let value = obj;
+        for (let part of parts) {
+          if (value && part in value) {
+            value = value[part];
+          } else {
+            return mustacheKey ? "{{" + key + "}}" : "${" + key + "}"; // Keep the placeholder if the key is not found
+          }
         }
-      }
 
-      // Ensure string values are wrapped in quotes
-      return typeof value === "string" ? `'${value}'` : value;
-    });
+        // Ensure string values are wrapped in quotes
+        return typeof value === "string" ? `'${escapeSingleQuotes(value)}'` : value;
+      },
+    );
   };
 
   // get offset from parent
@@ -191,25 +206,14 @@ export function usePanelDrilldown({
   }
 
   // Helper function to calculate popup offset
-  const calculatePopupOffset = (
-    offsetX: any,
-    offsetY: any,
-    popupRef: any,
-    containerRef: any,
-  ) => {
+  const calculatePopupOffset = (offsetX: any, offsetY: any, popupRef: any, containerRef: any) => {
     let offSetValues = { left: offsetX, top: offsetY };
 
     if (popupRef.value) {
-      if (
-        offSetValues.top + popupRef.value.offsetHeight >
-        containerRef.value.offsetHeight
-      ) {
+      if (offSetValues.top + popupRef.value.offsetHeight > containerRef.value.offsetHeight) {
         offSetValues.top -= popupRef.value.offsetHeight;
       }
-      if (
-        offSetValues.left + popupRef.value.offsetWidth >
-        containerRef.value.offsetWidth
-      ) {
+      if (offSetValues.left + popupRef.value.offsetWidth > containerRef.value.offsetWidth) {
         offSetValues.left -= popupRef.value.offsetWidth;
       }
     }
@@ -228,10 +232,7 @@ export function usePanelDrilldown({
     return { originalQuery, streamName };
   };
 
-  const calculateTimeRange = (
-    hoveredTimestamp: number | null,
-    interval: number | undefined,
-  ) => {
+  const calculateTimeRange = (hoveredTimestamp: number | null, interval: number | undefined) => {
     if (interval && hoveredTimestamp) {
       const startTime = hoveredTimestamp; // hovertedTimestamp is in microseconds
       return {
@@ -259,20 +260,120 @@ export function usePanelDrilldown({
     breakdownValue?: string,
   ): string => {
     let whereClause = ast?.where
-      ? parser
-          .sqlify({ type: "select", where: ast.where })
-          .slice("SELECT".length)
+      ? parser.sqlify({ type: "select", where: ast.where }).slice("SELECT".length)
       : "";
 
     if (breakdownColumn && breakdownValue) {
-      const breakdownCondition = `${breakdownColumn} = '${breakdownValue}'`;
-      whereClause += whereClause
-        ? ` AND ${breakdownCondition}`
-        : ` WHERE ${breakdownCondition}`;
+      const breakdownCondition = `${breakdownColumn} = '${escapeSingleQuotes(String(breakdownValue))}'`;
+      whereClause += whereClause ? ` AND ${breakdownCondition}` : ` WHERE ${breakdownCondition}`;
     }
 
     return whereClause;
   };
+
+  // Table cell → Logs drilldown: drillable = a plain column_ref (aggregates invalid in WHERE).
+  const cellDrilldownFields: any = ref(new Map());
+  const cellDrilldownByQuery: any = ref(new Map());
+  // SELECT * / dynamic-columns tables: every column id is drillable (see wildcard branch).
+  const cellDrilldownWildcard: any = ref(null);
+
+  const drilldownColumnAliases = computed<string[]>(
+    () => Array.from(cellDrilldownFields.value.keys()) as string[],
+  );
+  const drilldownAllColumns = computed(() => !!cellDrilldownWildcard.value);
+
+  const isSelectStar = (ast: any): boolean =>
+    Array.isArray(ast?.columns) &&
+    ast.columns.some((col: any) => col?.expr?.column === "*" || col?.expr?.type === "star");
+
+  const computeCellDrilldownFields = async () => {
+    const map = new Map<string, any>();
+    const byQuery = new Map<number, Map<string, any>>();
+    let wildcard: any = null;
+    const schema = panelSchema.value;
+    if (!schema || schema.type !== "table" || schema.queryType === "promql") {
+      cellDrilldownFields.value = map;
+      cellDrilldownByQuery.value = byQuery;
+      cellDrilldownWildcard.value = null;
+      return;
+    }
+    if (!parser) await importSqlParser();
+
+    const queries = schema.queries ?? [];
+    const singleQuery = queries.length === 1;
+
+    queries.forEach((query: any, queryIndex: number) => {
+      const executedQuery = metadata?.value?.queries?.[queryIndex]?.query ?? query?.query;
+      const streamName = query?.fields?.stream;
+      const streamType = query?.fields?.stream_type;
+      if (!executedQuery || !streamName) return;
+
+      // astify() is exponential in WHERE nesting; only SELECT/FROM are read below.
+      const parseTarget = stripWherePredicate(executedQuery);
+      if (maxParenDepth(parseTarget) > SQL_PARSE_MAX_DEPTH) return;
+
+      let parsed: any;
+      try {
+        parsed = parser.astify(parseTarget);
+      } catch {
+        return;
+      }
+      const ast = Array.isArray(parsed) ? parsed[0] : parsed;
+      if (!ast || ast.type !== "select") return;
+
+      const isJoin = (ast.from?.length ?? 0) > 1;
+
+      const aliasToStream = new Map<string, string>();
+      (Array.isArray(ast.from) ? ast.from : []).forEach((f: any) => {
+        if (!f?.table) return;
+        if (f.as) aliasToStream.set(f.as, f.table);
+        aliasToStream.set(f.table, f.table);
+      });
+
+      const fields = extractFields(ast, "_timestamp", parser);
+
+      // SELECT *: resolve drillable columns by id at click time (needs the response).
+      if (!fields.length && !isJoin && singleQuery && isSelectStar(ast)) {
+        wildcard = { streamName, streamType, query: executedQuery };
+        return;
+      }
+
+      const perQuery = new Map<string, any>();
+      fields.forEach((field: any) => {
+        if (field.aggregationFunction || !field.column) return;
+        const resolvedStream = field.streamAlias
+          ? (aliasToStream.get(field.streamAlias) ?? streamName)
+          : streamName;
+        const entry = {
+          column: field.column,
+          streamName: resolvedStream,
+          streamType,
+          query: executedQuery,
+          isJoin,
+        };
+        map.set(field.alias, entry);
+        perQuery.set(field.alias, entry);
+      });
+      if (perQuery.size) byQuery.set(queryIndex, perQuery);
+    });
+
+    cellDrilldownFields.value = map;
+    cellDrilldownByQuery.value = byQuery;
+    cellDrilldownWildcard.value = wildcard;
+  };
+
+  watch(
+    () => [
+      metadata?.value?.queries,
+      panelSchema.value?.queries,
+      panelSchema.value?.type,
+      panelSchema.value?.queryType,
+    ],
+    () => {
+      computeCellDrilldownFields();
+    },
+    { immediate: true, deep: true },
+  );
 
   const replaceVariablesValue = (
     query: any,
@@ -282,120 +383,34 @@ export function usePanelDrilldown({
     // Normalize spaces inside variable syntax before replacement
     query = normalizeVariableSyntax(query);
     const queryType = panelSchema?.value?.queryType;
+
+    const variablesByName = new Map<string, any>();
     currentDependentVariablesData?.forEach((variable: any) => {
-      const variableName = `$${variable.name}`;
-      const variableNameWithBrackets = `\${${variable.name}}`;
-
-      let variableValue = "";
-      if (Array.isArray(variable.value)) {
-        const value = variable.value
-          .map(
-            (value: any) =>
-              `'${variable.escapeSingleQuotes ? escapeSingleQuotes(value) : value}'`,
-          )
-          .join(",");
-        const possibleVariablesPlaceHolderTypes = [
-          // Mustache forms
-          {
-            placeHolder: `{{${variable.name}:csv}}`,
-            value: variable.value.join(","),
-          },
-          {
-            placeHolder: `{{${variable.name}:pipe}}`,
-            value: variable.value.join("|"),
-          },
-          {
-            placeHolder: `{{${variable.name}:doublequote}}`,
-            value: variable.value.map((value: any) => `"${value}"`).join(","),
-          },
-          {
-            placeHolder: `{{${variable.name}:singlequote}}`,
-            value: value,
-          },
-          {
-            placeHolder: `{{${variable.name}}}`,
-            value: queryType === "sql" ? value : variable.value.join("|"),
-          },
-          // Dollar-sign forms (existing)
-          {
-            placeHolder: `\${${variable.name}:csv}`,
-            value: variable.value.join(","),
-          },
-          {
-            placeHolder: `\${${variable.name}:pipe}`,
-            value: variable.value.join("|"),
-          },
-          {
-            placeHolder: `\${${variable.name}:doublequote}`,
-            value: variable.value.map((value: any) => `"${value}"`).join(","),
-          },
-          {
-            placeHolder: `\${${variable.name}:singlequote}`,
-            value: value,
-          },
-          {
-            placeHolder: `\${${variable.name}}`,
-            value: queryType === "sql" ? value : variable.value.join("|"),
-          },
-          {
-            placeHolder: `\$${variable.name}`,
-            value: queryType === "sql" ? value : variable.value.join("|"),
-          },
-        ];
-
-        possibleVariablesPlaceHolderTypes.forEach((placeHolderObj) => {
-          // if (query.includes(placeHolderObj.placeHolder)) {
-          //   metadata.push({
-          //     type: "variable",
-          //     name: variable.name,
-          //     value: placeHolderObj.value,
-          //   });
-          // }
-          query = query.replaceAll(
-            placeHolderObj.placeHolder,
-            placeHolderObj.value,
-          );
-        });
-      } else {
-        variableValue =
-          variable.value === null
-            ? ""
-            : `${
-                variable.escapeSingleQuotes
-                  ? escapeSingleQuotes(variable.value)
-                  : variable.value
-              }`;
-        // if (query.includes(variableName)) {
-        //   metadata.push({
-        //     type: "variable",
-        //     name: variable.name,
-        //     value: variable.value,
-        //   });
-        // }
-
-        // Replace all forms of the variable placeholder in the query, 
-        // placeholders can be in the form of {{varName}}, ${varName}, ${varName}, {{varName:csv}}, ${varName:csv} etc. 
-        // which will be replaced with the variable value. For csv and pipe forms, if the variable value is an array, it will be joined with comma or pipe respectively. 
-        // For doublequote form, the variable value will be wrapped with double quotes. 
-        // For singlequote form, the variable value will be wrapped with single quotes.
-        const mustachePlaceholder = `{{${variable.name}}}`;
-        query = query.replaceAll(`{{${variable.name}:csv}}`, variableValue);
-        query = query.replaceAll(`{{${variable.name}:pipe}}`, variableValue);
-        query = query.replaceAll(
-          `{{${variable.name}:doublequote}}`,
-          variableValue,
-        );
-        query = query.replaceAll(
-          `{{${variable.name}:singlequote}}`,
-          variableValue,
-        );
-        query = query.replaceAll(mustachePlaceholder, variableValue);
-        query = query.replaceAll(variableNameWithBrackets, variableValue);
-        query = query.replaceAll(variableName, variableValue);
-      }
+      if (!variablesByName.has(variable.name)) variablesByName.set(variable.name, variable);
     });
 
-    return query;
+    return replaceVariablePlaceholders(query, variablesByName.keys(), ({ name, format }) => {
+      const variable = variablesByName.get(name);
+      const escape = (value: any) => escapeSingleQuotes(String(value));
+
+      if (!Array.isArray(variable.value)) {
+        return variable.value === null ? "" : `${escape(variable.value)}`;
+      }
+
+      const singleQuoted = variable.value.map((value: any) => `'${escape(value)}'`).join(",");
+      switch (format) {
+        case "csv":
+          return variable.value.join(",");
+        case "pipe":
+          return variable.value.join("|");
+        case "doublequote":
+          return variable.value.map((value: any) => `"${value}"`).join(",");
+        case "singlequote":
+          return singleQuoted;
+        default:
+          return queryType === "sql" ? singleQuoted : variable.value.join("|");
+      }
+    });
   };
 
   const constructLogsUrl = (
@@ -406,19 +421,13 @@ export function usePanelDrilldown({
     currentUrl: string,
   ) => {
     const logsUrl = new URL(currentUrl + "/logs");
-    logsUrl.searchParams.set(
-      "stream_type",
-      queryDetails.queries[0]?.fields?.stream_type,
-    );
+    logsUrl.searchParams.set("stream_type", queryDetails.queries[0]?.fields?.stream_type);
     logsUrl.searchParams.set("stream", streamName);
     logsUrl.searchParams.set("from", calculatedTimeRange.startTime.toString());
     logsUrl.searchParams.set("to", calculatedTimeRange.endTime.toString());
     logsUrl.searchParams.set("sql_mode", "true");
     logsUrl.searchParams.set("query", encodedQuery);
-    logsUrl.searchParams.set(
-      "org_identifier",
-      store.state.selectedOrganization.identifier,
-    );
+    logsUrl.searchParams.set("org_identifier", store.state.selectedOrganization.identifier);
     if (store.state.zoConfig.quick_mode_enabled) {
       logsUrl.searchParams.set("quick_mode", "true");
     } else {
@@ -438,11 +447,14 @@ export function usePanelDrilldown({
     for (const f of fields) {
       aliasMap[f.name] = f.alias || f.name;
     }
-    return url.replace(/(?:\{\{\s*(\w+)\s*\}\})|(?:\$?\{\s*(\w+)\s*\})/g, (_match: string, mustacheField: string, dollarField: string) => {
-      const fieldName = mustacheField || dollarField;
-      const resolved = aliasMap[fieldName] || fieldName;
-      return '${row.field["' + resolved + '"]}';
-    });
+    return url.replace(
+      /(?:\{\{\s*(\w+)\s*\}\})|(?:\$?\{\s*(\w+)\s*\})/g,
+      (_match: string, mustacheField: string, dollarField: string) => {
+        const fieldName = mustacheField || dollarField;
+        const resolved = aliasMap[fieldName] || fieldName;
+        return '${row.field["' + resolved + '"]}';
+      },
+    );
   };
 
   // Cross-linking: merge stream + org links with field-level replacement
@@ -473,9 +485,7 @@ export function usePanelDrilldown({
     // Add org links only if they have at least one matched field NOT covered by stream
     for (const link of org_links) {
       const matchedFields = link.fields.filter((f: any) => f.alias);
-      const hasUncovered = matchedFields.some(
-        (f: any) => !streamCoveredFields.has(f.name),
-      );
+      const hasUncovered = matchedFields.some((f: any) => !streamCoveredFields.has(f.name));
       if (matchedFields.length > 0 && !hasUncovered) continue;
 
       result.push({
@@ -505,10 +515,14 @@ export function usePanelDrilldown({
   };
 
   const onChartClick = async (params: any, ...args: any) => {
+    // An exemplar marker opens its trace, never the drilldown menu or an annotation.
+    if (params?.seriesId === EXEMPLAR_SERIES_ID) {
+      await onExemplarClick?.(params);
+      return;
+    }
     // Check if we have both drilldown and annotation at the same point
     const hasAnnotation =
-      params?.componentType === "markLine" ||
-      params?.componentType === "markArea";
+      params?.componentType === "markLine" || params?.componentType === "markArea";
     const hasDrilldown = panelSchema.value.config.drilldown?.length > 0;
 
     // If in annotation add mode, handle that first
@@ -517,14 +531,14 @@ export function usePanelDrilldown({
         if (hasAnnotation) {
           editAnnotation(params?.data?.annotationDetails);
         } else {
-          handleAddAnnotation(
-            params?.data?.[0] || params?.data?.time || params?.data?.name,
-            null,
-          );
+          handleAddAnnotation(params?.data?.[0] || params?.data?.time || params?.data?.name, null);
         }
         return;
       }
     }
+
+    // Cross-links are fetched lazily (not on panel render) — resolve them now, before use.
+    await ensureDrilldownSchema();
 
     // Store click parameters for drilldown (including cross-links)
     const crossLinkItems = getCrossLinkDrilldownItems();
@@ -584,10 +598,7 @@ export function usePanelDrilldown({
     }
 
     // Hide popups if no content to display
-    if (
-      !shouldShowDrilldown &&
-      (!hasAnnotation || !params?.data?.annotationDetails?.text)
-    ) {
+    if (!shouldShowDrilldown && (!hasAnnotation || !params?.data?.annotationDetails?.text)) {
       hidePopupsAndOverlays();
     }
   };
@@ -610,16 +621,8 @@ export function usePanelDrilldown({
         if (panelSchema.value?.type === "table" && drilldownParams[1]?.[0]) {
           // Table: row data is directly available
           const rowData = drilldownParams[1][0];
-          const panelFields: any = [
-            ...(panelSchema.value.queries?.[0]?.fields?.x || []),
-            ...(panelSchema.value.queries?.[0]?.fields?.y || []),
-            ...(panelSchema.value.queries?.[0]?.fields?.z || []),
-          ];
           for (const lf of linkFields) {
             const alias = lf.alias || lf.name;
-            const pf = panelFields.find(
-              (f: any) => f.alias === alias || f.label === lf.name,
-            );
             const val = rowData[alias] ?? rowData[lf.name];
             if (val !== undefined && val !== null) {
               fieldName = lf.name;
@@ -638,8 +641,7 @@ export function usePanelDrilldown({
           const record: Record<string, any> = {};
           const queryResult = data.value?.[0]?.result;
           const xFields = panelSchema.value?.queries?.[0]?.fields?.x || [];
-          const breakdownFields =
-            panelSchema.value?.queries?.[0]?.fields?.breakdown || [];
+          const breakdownFields = panelSchema.value?.queries?.[0]?.fields?.breakdown || [];
 
           let xAxisValue: any;
           if (isPieOrDonut) {
@@ -657,19 +659,10 @@ export function usePanelDrilldown({
             for (const row of queryResult) {
               let matches = true;
               if (xFields.length > 0 && xAxisValue !== undefined) {
-                if (String(row[xFields[0].alias]) !== String(xAxisValue))
-                  matches = false;
+                if (String(row[xFields[0].alias]) !== String(xAxisValue)) matches = false;
               }
-              if (
-                matches &&
-                breakdownFields.length > 0 &&
-                seriesName &&
-                !isPieOrDonut
-              ) {
-                if (
-                  String(row[breakdownFields[0].alias]) !== String(seriesName)
-                )
-                  matches = false;
+              if (matches && breakdownFields.length > 0 && seriesName && !isPieOrDonut) {
+                if (String(row[breakdownFields[0].alias]) !== String(seriesName)) matches = false;
               }
               if (matches) {
                 Object.assign(record, row);
@@ -700,9 +693,7 @@ export function usePanelDrilldown({
 
         // Get query
         const currentQuery =
-          metadata?.value?.queries?.[0]?.query ??
-          panelSchema?.value?.queries?.[0]?.query ??
-          "";
+          metadata?.value?.queries?.[0]?.query ?? panelSchema?.value?.queries?.[0]?.query ?? "";
 
         // Resolve the 6 fixed variables
         const resolvedUrl = rawUrl
@@ -717,7 +708,10 @@ export function usePanelDrilldown({
           .replace(/(?:\{\{start_time\}\})|(?:\$\{start_time\})/g, String(startTime))
           .replace(/(?:\{\{end_time\}\})|(?:\$\{end_time\})/g, String(endTime))
           .replace(/(?:\{\{query\}\})|(?:\$\{query\})/g, encodeURIComponent(currentQuery))
-          .replace(/(?:\{\{query_encoded\}\})|(?:\$\{query_encoded\})/g, b64EncodeUnicode(currentQuery));
+          .replace(
+            /(?:\{\{query_encoded\}\})|(?:\$\{query_encoded\})/g,
+            b64EncodeUnicode(currentQuery),
+          );
 
         window.open(resolvedUrl, "_blank");
       } catch (error) {
@@ -729,10 +723,7 @@ export function usePanelDrilldown({
     // if panelSchema exists
     if (panelSchema.value) {
       // check if drilldown data exists
-      if (
-        !panelSchema.value.config.drilldown ||
-        panelSchema.value.config.drilldown.length == 0
-      ) {
+      if (!panelSchema.value.config.drilldown || panelSchema.value.config.drilldown.length == 0) {
         return;
       }
 
@@ -755,10 +746,7 @@ export function usePanelDrilldown({
           : null;
         const breakdown = queryDetails.queries[0].fields?.breakdown || [];
 
-        const calculatedTimeRange = calculateTimeRange(
-          hoveredTimestamp,
-          intervalMicro.value,
-        );
+        const calculatedTimeRange = calculateTimeRange(hoveredTimestamp, intervalMicro.value);
 
         let modifiedQuery = originalQuery;
 
@@ -777,27 +765,19 @@ export function usePanelDrilldown({
             ?.filter((fromEntry: any) => fromEntry.as)
             .map((fromEntry: any) => fromEntry.as);
 
-          const aliasClause = tableAliases?.length
-            ? ` AS ${tableAliases.join(", ")}`
-            : "";
+          const aliasClause = tableAliases?.length ? ` AS ${tableAliases.join(", ")}` : "";
 
           const breakdownColumn = breakdown[0]?.column;
 
           const seriesIndex = drilldownParams[0]?.seriesIndex;
           const breakdownSeriesName =
-            seriesIndex !== undefined
-              ? panelData.value.options.series[seriesIndex]
-              : undefined;
+            seriesIndex !== undefined ? panelData.value.options.series[seriesIndex] : undefined;
           const uniqueSeriesName = breakdownSeriesName
             ? breakdownSeriesName.originalSeriesName
             : drilldownParams[0]?.seriesName;
           const breakdownValue = uniqueSeriesName;
 
-          const whereClause = buildWhereClause(
-            ast,
-            breakdownColumn,
-            breakdownValue,
-          );
+          const whereClause = buildWhereClause(ast, breakdownColumn, breakdownValue);
 
           modifiedQuery = `SELECT * FROM "${streamName}"${aliasClause} ${whereClause}`;
         } else if (drilldownData.data.logsMode === "auto" && isPromQLQuery) {
@@ -828,12 +808,8 @@ export function usePanelDrilldown({
 
           // Add query and encoded query
           drilldownVariables.query =
-            metadata?.value?.queries[0]?.query ??
-            panelSchema?.value?.queries[0]?.query ??
-            "";
-          drilldownVariables.query_encoded = b64EncodeUnicode(
-            drilldownVariables.query,
-          );
+            metadata?.value?.queries[0]?.query ?? panelSchema?.value?.queries[0]?.query ?? "";
+          drilldownVariables.query_encoded = b64EncodeUnicode(drilldownVariables.query);
 
           // Handle different chart types
           if (panelSchema.value.type == "table") {
@@ -868,16 +844,13 @@ export function usePanelDrilldown({
             }
           } else {
             drilldownVariables.series = {
-              __name: ["pie", "donut", "heatmap"].includes(
-                panelSchema.value.type,
-              )
+              __name: ["pie", "donut", "heatmap"].includes(panelSchema.value.type)
                 ? drilldownParams[0].name
                 : drilldownParams[0].seriesName,
               __value: Array.isArray(drilldownParams[0].value)
                 ? drilldownParams[0].value[drilldownParams[0].value.length - 1]
                 : drilldownParams[0].value,
-              __axisValue:
-                drilldownParams?.[0]?.value?.[0] ?? drilldownParams?.[0]?.name,
+              __axisValue: drilldownParams?.[0]?.value?.[0] ?? drilldownParams?.[0]?.name,
             };
           }
 
@@ -908,9 +881,7 @@ export function usePanelDrilldown({
         const pos = window.location.pathname.indexOf("/web/");
         const currentUrl =
           pos > -1
-            ? window.location.origin +
-              window.location.pathname.slice(0, pos) +
-              "/web"
+            ? window.location.origin + window.location.pathname.slice(0, pos) + "/web"
             : window.location.origin;
 
         const logsUrl = constructLogsUrl(
@@ -932,7 +903,9 @@ export function usePanelDrilldown({
               query: Object.fromEntries(logsUrl.searchParams.entries()),
             });
           }
-        } catch (error) {}
+        } catch {
+          /* ignore: best-effort navigation */
+        }
       };
 
       // need to change dynamic variables to it's value using current variables, current chart data(params)
@@ -950,10 +923,7 @@ export function usePanelDrilldown({
         ).getTime();
       }
 
-      if (
-        selectedTimeObj?.value?.end_time &&
-        selectedTimeObj?.value?.end_time != "Invalid Date"
-      ) {
+      if (selectedTimeObj?.value?.end_time && selectedTimeObj?.value?.end_time != "Invalid Date") {
         drilldownVariables.end_time = new Date(
           selectedTimeObj?.value?.end_time?.toISOString(),
         ).getTime();
@@ -962,13 +932,9 @@ export function usePanelDrilldown({
       // param to pass current query
       // use metadata query[replaced variables values] or panelSchema query
       drilldownVariables.query =
-        metadata?.value?.queries[0]?.query ??
-        panelSchema?.value?.queries[0]?.query ??
-        "";
+        metadata?.value?.queries[0]?.query ?? panelSchema?.value?.queries[0]?.query ?? "";
       drilldownVariables.query_encoded = b64EncodeUnicode(
-        metadata?.value?.queries[0]?.query ??
-          panelSchema?.value?.queries[0]?.query ??
-          "",
+        metadata?.value?.queries[0]?.query ?? panelSchema?.value?.queries[0]?.query ?? "",
       );
 
       // if chart type is 'table' then we need to pass the table name
@@ -976,11 +942,7 @@ export function usePanelDrilldown({
         const fields: any = {};
         panelSchema.value.queries.forEach((query: any) => {
           // take all field from x, y and z
-          const panelFields: any = [
-            ...query.fields.x,
-            ...query.fields.y,
-            ...query.fields.z,
-          ];
+          const panelFields: any = [...query.fields.x, ...query.fields.y, ...query.fields.z];
           panelFields.forEach((field: any) => {
             // we have label and alias, use both in dynamic values
             fields[field.label] = drilldownParams[1][0][field.alias];
@@ -1017,8 +979,7 @@ export function usePanelDrilldown({
           __value: Array.isArray(drilldownParams[0].value)
             ? drilldownParams[0].value[drilldownParams[0].value.length - 1]
             : drilldownParams[0].value,
-          __axisValue:
-            drilldownParams?.[0]?.value?.[0] ?? drilldownParams?.[0]?.name,
+          __axisValue: drilldownParams?.[0]?.value?.[0] ?? drilldownParams?.[0]?.name,
         };
       }
 
@@ -1031,30 +992,33 @@ export function usePanelDrilldown({
       // if drilldown by url
       if (drilldownData.type == "byUrl") {
         try {
+          // Guard the RESOLVED url. The form schema rejects a hostile one at
+          // save time, but that is client-side only: a direct dashboard PUT
+          // stores anything, and dashboards saved before the schema existed
+          // are still in the DB. A variable VALUE can also carry a scheme.
+          const resolved = replacePlaceholders(drilldownData.data.url, drilldownVariables);
+          if (!isSafeNavigableUrl(resolved)) return;
           // open url
           return window.open(
-            replacePlaceholders(drilldownData.data.url, drilldownVariables),
+            resolved,
             drilldownData.targetBlank ? "_blank" : "_self",
+            "noopener,noreferrer",
           );
-        } catch (error) {}
+        } catch {
+          /* ignore: best-effort window.open */
+        }
       } else if (drilldownData.type == "logs") {
         try {
           navigateToLogs();
         } catch (error) {
-          showErrorNotification("Failed to navigate to logs");
+          showErrorNotification(t("dashboard.failedToNavigateToLogs"));
         }
       } else if (drilldownData.type == "byDashboard") {
         // we have folder, dashboard and tabs name
         // so we have to get id of folder, dashboard and tab
 
         // get folder id
-        if (
-          !store.state.organizationData.folders ||
-          (Array.isArray(store.state.organizationData.folders) &&
-            store.state.organizationData.folders.length === 0)
-        ) {
-          await getFoldersList(store);
-        }
+        await getFoldersList(store);
         const folderId = store.state.organizationData.folders.find(
           (folder: any) => folder.name == drilldownData.data.folder,
         )?.folderId;
@@ -1064,10 +1028,7 @@ export function usePanelDrilldown({
         }
 
         // get dashboard id
-        const allDashboardData = await getAllDashboardsByFolderId(
-          store,
-          folderId,
-        );
+        const allDashboardData = await getAllDashboardsByFolderId(store, folderId);
 
         const dashboardId = allDashboardData?.find(
           (dashboard: any) => dashboard.title === drilldownData.data.dashboard,
@@ -1081,9 +1042,8 @@ export function usePanelDrilldown({
 
         // get tab id
         const tabId =
-          dashboardData.tabs.find(
-            (tab: any) => tab.name == drilldownData.data.tab,
-          )?.tabId ?? dashboardData.tabs[0].tabId;
+          dashboardData.tabs.find((tab: any) => tab.name == drilldownData.data.tab)?.tabId ??
+          dashboardData.tabs[0].tabId;
 
         // if targetBlank is true then create new url
         // else made changes in current router only
@@ -1094,9 +1054,7 @@ export function usePanelDrilldown({
           // url will be: origin from window.location.origin + pathname up to /web/ + /web/
           let currentUrl: any =
             pos > -1
-              ? window.location.origin +
-                window.location.pathname.slice(0, pos) +
-                "/web"
+              ? window.location.origin + window.location.pathname.slice(0, pos) + "/web"
               : window.location.origin;
 
           // always, go to view dashboard page
@@ -1118,7 +1076,7 @@ export function usePanelDrilldown({
               );
             }
           });
-
+          url.searchParams.set("org_identifier", store.state.selectedOrganization.identifier);
           url.searchParams.set("dashboard", dashboardData.dashboardId);
           url.searchParams.set("folder", folderId);
           url.searchParams.set("tab", tabId);
@@ -1135,9 +1093,8 @@ export function usePanelDrilldown({
 
           drilldownData.data.variables.forEach((variable: any) => {
             if (variable?.name?.trim() && variable?.value?.trim()) {
-              oldParams[
-                "var-" + replacePlaceholders(variable.name, drilldownVariables)
-              ] = replacePlaceholders(variable.value, drilldownVariables);
+              oldParams["var-" + replacePlaceholders(variable.name, drilldownVariables)] =
+                replacePlaceholders(variable.value, drilldownVariables);
             }
           });
 
@@ -1158,31 +1115,74 @@ export function usePanelDrilldown({
         }
       }
     }
+    return;
   };
 
-  // Cross-linking: fetch cross-links when the executed query (with variables resolved) changes
-  watch(
-    () =>
-      metadata.value?.queries?.[0]?.query ||
-      panelSchema.value?.queries?.[0]?.query,
-    async (newQuery: string) => {
-      if (
-        !store.state.zoConfig?.enable_cross_linking ||
-        !newQuery ||
-        panelSchema.value?.queryType === "promql"
-      ) {
-        crossLinksData.value = { stream_links: [], org_links: [] };
-        return;
-      }
+  // Cross-links + panel WHERE both come from result_schema. This is LAZY: a dashboard refresh
+  // must NOT fire one result_schema per panel — it's fetched on the first drilldown interaction
+  // (chart click / cell search icon) and cached PER QUERY. Multi-query panels fetch one schema
+  // per clicked query index, on demand, so clicking a 2nd-query cell fetches that query's schema.
+  interface DrilldownSchema {
+    crossLinks: { stream_links: unknown[]; org_links: unknown[] };
+    baseWhere: string;
+    whereByStream: Record<string, string>;
+  }
+  const EMPTY_SCHEMA: DrilldownSchema = {
+    crossLinks: { stream_links: [], org_links: [] },
+    baseWhere: "",
+    whereByStream: {},
+  };
+  // Keyed by executed query string (not index) so identical queries share one fetch.
+  const schemaCache = new Map<string, DrilldownSchema>();
+  const schemaInFlight = new Map<string, Promise<void>>();
+
+  // Reflect a resolved schema onto the shared refs the consumers read.
+  const applyDrilldownSchema = (s: DrilldownSchema) => {
+    crossLinksData.value = s.crossLinks;
+    panelBaseWhere.value = s.baseWhere;
+    panelWhereByStream.value = s.whereByStream;
+  };
+
+  const resetDrilldownSchema = () => {
+    schemaCache.clear();
+    schemaInFlight.clear();
+    applyDrilldownSchema(EMPTY_SCHEMA);
+  };
+
+  // Fetch cross-links + WHERE for the clicked query, once, on demand, and apply them to the
+  // shared refs. Concurrent callers of the same query share the in-flight promise; a repeat
+  // click on a query already fetched hits the cache. `queryIndex` selects the multi-query cell.
+  const ensureDrilldownSchema = async (queryIndex = 0): Promise<void> => {
+    const query =
+      metadata.value?.queries?.[queryIndex]?.query ||
+      panelSchema.value?.queries?.[queryIndex]?.query ||
+      "";
+    // Cross-linking is only supported for logs streams; skip the result_schema call for panels
+    // backed by other stream types (metrics, traces, enrichment_tables) to avoid failing requests.
+    const crossLinkStreamType = panelSchema.value?.queries?.[queryIndex]?.fields?.stream_type;
+    if (
+      !isCrossLinkingEnabledForStream(store.state.zoConfig, crossLinkStreamType) ||
+      !query ||
+      panelSchema.value?.queryType === "promql"
+    ) {
+      applyDrilldownSchema(EMPTY_SCHEMA);
+      return;
+    }
+    const cached = schemaCache.get(query);
+    if (cached) {
+      applyDrilldownSchema(cached);
+      return;
+    }
+    const inFlight = schemaInFlight.get(query);
+    if (inFlight) return inFlight;
+    const fetchPromise = (async () => {
       try {
         const response = await searchService.result_schema(
           {
             org_identifier: store.state.selectedOrganization.identifier,
             query: {
               query: {
-                sql: store.state.zoConfig.sql_base64_enabled
-                  ? b64EncodeUnicode(newQuery)
-                  : newQuery,
+                sql: store.state.zoConfig.sql_base64_enabled ? b64EncodeUnicode(query) : query,
                 query_fn: null,
                 start_time: (Date.now() - 3600000) * 1000,
                 end_time: Date.now() * 1000,
@@ -1190,9 +1190,7 @@ export function usePanelDrilldown({
                 streaming_output: false,
                 streaming_id: null,
               },
-              ...(store.state.zoConfig.sql_base64_enabled
-                ? { encoding: "base64" }
-                : {}),
+              ...(store.state.zoConfig.sql_base64_enabled ? { encoding: "base64" } : {}),
             },
             page_type: "dashboards",
             is_streaming: false,
@@ -1200,15 +1198,31 @@ export function usePanelDrilldown({
           },
           "dashboards",
         );
-        crossLinksData.value = response.data?.cross_links || {
-          stream_links: [],
-          org_links: [],
+        const schema: DrilldownSchema = {
+          crossLinks: response.data?.cross_links || { stream_links: [], org_links: [] },
+          baseWhere: response.data?.where_clause ?? "",
+          whereByStream: response.data?.where_by_stream ?? {},
         };
+        schemaCache.set(query, schema);
+        applyDrilldownSchema(schema);
       } catch {
-        crossLinksData.value = { stream_links: [], org_links: [] };
+        applyDrilldownSchema(EMPTY_SCHEMA);
+      } finally {
+        schemaInFlight.delete(query);
       }
+    })();
+    schemaInFlight.set(query, fetchPromise);
+    return fetchPromise;
+  };
+
+  // Any executed query changed → drop the whole cache (do NOT fetch; that was the per-panel
+  // fan-out on every dashboard refresh). The next drilldown interaction refetches per query.
+  watch(
+    () => (metadata.value?.queries ?? panelSchema.value?.queries ?? []).map((q: any) => q?.query),
+    () => {
+      resetDrilldownSchema();
     },
-    { immediate: true },
+    { deep: true },
   );
 
   return {
@@ -1220,5 +1234,14 @@ export function usePanelDrilldown({
     parser,
     interval,
     intervalMicro,
+    drilldownColumnAliases,
+    drilldownAllColumns,
+    // Per-column drilldown target, join-aware: the row's own query first, then any query.
+    getCellDrilldownField: (queryIndex: number, alias: string) =>
+      cellDrilldownByQuery.value.get(queryIndex)?.get(alias) ??
+      cellDrilldownFields.value.get(alias),
+    panelBaseWhere,
+    panelWhereByStream,
+    ensureDrilldownSchema,
   };
 }

@@ -15,592 +15,683 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <q-page class="q-pa-none" style="min-height: inherit; height: calc(100vh - 88px); ">
-
+  <div class="flex h-full flex-col p-0">
     <!-- Full-page Import View -->
     <ImportModelPricing
       v-if="showImportModelPricingPage"
       :existing-models="models.filter((m: any) => !isReadOnly(m)).map((m: any) => m.name)"
       @cancel:hideform="showImportModelPricingPage = false"
-      @update:list="fetchModels"
+      @update:list="refreshModels"
     />
 
     <!-- Test Match Dialog -->
-    <TestModelMatchDialog
-      v-model="showTestMatchDialog"
-    />
+    <TestModelMatchDialog v-model="showTestMatchDialog" />
 
     <!-- Main List View -->
-    <div v-if="!showImportModelPricingPage">
-
-    <!-- List View Header -->
-    <div class="tw:flex tw:justify-between tw:items-center tw:px-4 tw:py-3 tw:h-[68px] tw:border-b-[1px]">
-      <div class="q-table__title tw:font-[600]" data-test="model-pricing-list-title">
-        {{ t('modelPricing.header') }}
-        <q-btn icon="info_outline" flat round dense size="sm" color="grey-6" class="tw:mb-0.5">
-          <q-tooltip class="bg-grey-9">
-            {{ t('modelPricing.matchingPriorityTooltip') }}
-          </q-tooltip>
-        </q-btn>
-      </div>
-      <div class="tw:flex tw:flex-wrap tw:items-center tw:gap-2">
-        <div class="app-tabs-container tw:h-[36px]">
-          <app-tabs
-            class="tabs-selection-container"
-            :tabs="tabOptions"
-            v-model:active-tab="selectedTab"
-            @update:active-tab="onTabChange"
-          />
-        </div>
-        <q-input
-          v-model="filterQuery"
-          borderless
-          dense
-          class="no-border o2-search-input"
-          :placeholder="t('modelPricing.searchPlaceholder')"
-        >
-          <template #prepend>
-            <q-icon class="o2-search-input-icon" name="search" />
-          </template>
-        </q-input>
-        <q-btn
-          class="o2-secondary-button tw:h-[36px]"
-          no-caps
-          flat
-          :label="t('modelPricing.refresh')"
+    <OPageLayout
+      overflow-first
+      v-if="!showImportModelPricingPage"
+      icon="paid"
+      :subtitle="t('settings.modelPricingList.subtitle')"
+      bleed
+    >
+      <template #title>
+        {{ t("modelPricing.header") }}
+        <OButton variant="ghost" size="icon-sm" class="-ms-1" data-test="model-pricing-info-btn">
+          <OIcon name="info-outline" size="sm" />
+          <OTooltip :content="t('modelPricing.matchingPriorityTooltip')" />
+        </OButton>
+      </template>
+      <template #actions-overflow>
+        <OButton
+          variant="outline"
+          size="sm"
           :loading="refreshing"
           @click="refreshBuiltIn"
           data-test="model-pricing-refresh-btn"
-        />
-        <q-btn
-          class="o2-secondary-button tw:h-[36px]"
-          no-caps
-          flat
-          :label="t('modelPricing.testBtn')"
+        >
+          {{ t("modelPricing.refresh") }}
+        </OButton>
+        <OButton
+          variant="outline"
+          size="sm"
           @click="showTestMatchDialog = true"
           data-test="model-pricing-test-match-btn"
-        />
-        <q-btn
-          class="o2-secondary-button tw:h-[36px]"
-          no-caps
-          flat
-          :label="t('modelPricing.importBtn')"
+        >
+          {{ t("modelPricing.testBtn") }}
+        </OButton>
+        <OButton
+          variant="outline"
+          size="sm"
           @click="openImport"
           data-test="model-pricing-import-btn"
-        />
-        <q-btn
-          class="o2-primary-button tw:h-[36px]"
-          no-caps
-          flat
-          :label="t('modelPricing.newModel')"
+        >
+          {{ t("modelPricing.importBtn") }}
+        </OButton>
+      </template>
+      <template #actions>
+        <OButton
+          variant="primary"
+          size="sm"
           @click="openEditor(null)"
           data-test="model-pricing-add-btn"
-        />
-      </div>
-    </div>
+        >
+          {{ t("modelPricing.newModel") }}
+        </OButton>
+      </template>
 
-    <!-- List Table -->
-    <q-table
-      ref="qTableRef"
-      data-test="model-pricing-list-table"
-      :rows="filteredModels"
-      :columns="columns"
-      row-key="id"
-      v-model:pagination="pagination"
-      :sort-method="customSort"
-      class="o2-quasar-table o2-row-md o2-quasar-table-header-sticky"
-      :style="filteredModels.length
-        ? 'width: 100%; height: calc(100vh - var(--navbar-height) - 87px); overflow-y: auto;'
-        : 'width: 100%'"
-    >
-      <template v-slot:header="props">
-        <q-tr :props="props">
-          <q-th
-            v-for="col in props.cols"
-            :key="col.name"
-            :props="props"
-            :style="col.style"
-          >
-            <template v-if="col.name === 'select'">
-              <q-checkbox
-                v-if="selectableModels.length > 0"
-                :model-value="allSelected"
-                :indeterminate="someSelected"
-                size="sm"
-                class="o2-table-checkbox"
-                @update:model-value="toggleSelectAll"
-                data-test="model-pricing-select-all"
+      <!-- List Table -->
+      <div class="bg-card-glass-bg min-h-0 flex-1 overflow-hidden">
+        <OTable
+          ref="qTableRef"
+          :frame="false"
+          data-test="model-pricing-list-table"
+          :data="filteredModels"
+          :columns="columns"
+          row-key="id"
+          :loading="loading"
+          :forbidden="forbidden"
+          :selected-ids="selectedIds"
+          selection="multiple"
+          pagination="client"
+          :page-size="20"
+          :page-size-options="[20, 50, 100, 250, 500]"
+          sorting="client"
+          filter-mode="client"
+          :default-columns="false"
+          :enable-column-resize="true"
+          :persist-columns="true"
+          table-id="settings-model-pricing"
+          :show-global-filter="false"
+          tree
+          tree-column-id="name"
+          :get-row-warning="
+            (row: any) => !!(row.children?.length && shadowingParentNames.has(row.name))
+          "
+          @update:selected-ids="handleSelectedIdsUpdate"
+        >
+          <!-- Toolbar: Built-in/Custom tabs + search -->
+          <template #toolbar>
+            <div class="flex w-full min-w-0 items-center gap-2 max-md:contents md:max-lg:flex-wrap">
+              <div class="app-tabs-container h-9">
+                <AppTabs
+                  class="tabs-selection-container"
+                  mobile-dropdown
+                  :tabs="tabOptions"
+                  v-model:active-tab="selectedTab"
+                  @update:active-tab="onTabChange"
+                />
+              </div>
+              <OSearchInput
+                v-model="filterQuery"
+                class="ms-auto w-64 max-md:ms-0 max-md:w-auto max-md:min-w-40 max-md:flex-1 md:max-lg:ms-0 md:max-lg:w-full"
+                :placeholder="t('modelPricing.searchPlaceholder')"
               />
-            </template>
-            <template v-else>
-              <span class="tw:inline-flex tw:items-center tw:gap-1" :class="{ 'tw:pl-6': col.name === 'name' }">
-                {{ col.label }}
-                <q-icon
-                  v-if="col.tooltip"
-                  name="info_outline"
-                  size="13px"
-                  class="col-header-info-icon"
-                >
-                  <q-tooltip :delay="200" anchor="top middle" self="bottom middle" style="max-width: 260px; white-space: normal;">
-                    {{ col.tooltip }}
-                  </q-tooltip>
-                </q-icon>
+            </div>
+          </template>
+          <template #toolbar-trailing>
+            <ORefreshButton
+              layout="inline"
+              variant="outline"
+              :last-run-at="lastUpdatedAt"
+              :loading="fetching"
+              shortcut-id="modelPricingRefresh"
+              data-test="model-pricing-list-refresh-btn"
+              @click="refreshModels"
+            />
+          </template>
+          <template #tree-warning="{ row }">
+            <div class="flex items-center gap-2 py-1 text-sm leading-none">
+              <OIcon name="warning-amber" size="sm" class="text-status-warning-text opacity-85" />
+              <span class="leading-tight">
+                {{ t("modelPricing.shadowedWarningBanner", { name: row.name }) }}
               </span>
-            </template>
-          </q-th>
-        </q-tr>
-      </template>
-
-      <template #no-data>
-        <div v-if="loading" class="full-width column flex-center q-mt-xs" style="font-size: 1.5rem">
-          <q-spinner-hourglass size="50px" color="primary" style="margin-top: 20vh" />
-        </div>
-        <div
-          v-else
-          class="full-width column flex-center"
-          style="height: calc(100vh - 220px); gap: 8px;"
-        >
-          <q-icon name="monetization_on" size="48px" color="grey-4" />
-          <div class="text-subtitle1 text-grey-7 q-mt-sm">{{ t('modelPricing.noModels') }}</div>
-          <div class="text-caption text-grey-7">
-            {{ t('modelPricing.noModelsDesc') }}
-          </div>
-          <q-btn
-            class="o2-primary-button q-mt-md tw:h-[36px]"
-            no-caps
-            flat
-            :label="t('modelPricing.newModel')"
-            @click="openEditor(null)"
-            data-test="model-pricing-empty-add-btn"
-          />
-        </div>
-      </template>
-
-      <template v-slot:body="props">
-        <!-- Parent row -->
-        <q-tr
-          :props="props"
-        >
-          <q-td
-            v-for="col in columns"
-            :key="col.name"
-            :props="props"
-            :style="col.style"
-            :class="{
-              'tree-name-cell': col.name === 'name',
-              'tree-parent-expanded': col.name === 'name' && props.row.children?.length > 0 && expandedParents.has(props.row.id),
-            }"
-          >
-            <template v-if="col.name === 'select'">
-              <q-checkbox
-                :model-value="selectedIds.includes(props.row.id)"
-                size="sm"
-                class="o2-table-checkbox"
-                @update:model-value="toggleSelect(props.row.id)"
-                :data-test="`model-pricing-select-${props.rowIndex}`"
-              />
-            </template>
-            <template v-else-if="col.name === 'name'">
-              <div class="row items-center no-wrap tree-node-content">
-                <div class="tree-icon-wrapper">
-                  <q-icon
-                    v-if="props.row.children?.length > 0"
-                    :name="expandedParents.has(props.row.id) ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
-                    size="xs"
-                    class="cursor-pointer tree-expand-icon"
-                    @click.stop="toggleExpand(props.row.id)"
-                  />
-                </div>
-                <span v-if="getSource(props.row) === 'built_in'" class="tw:shrink-0 tw:cursor-default tw:inline-flex tw:mr-1">
-                  <img :src="ooLogo" class="tw:w-[16px] tw:h-[16px]" alt="OpenObserve" />
-                  <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceBuiltIn') }}</q-tooltip>
-                </span>
-                <q-icon
-                  v-else-if="getSource(props.row) === 'meta_org' || (getSource(props.row) === 'org' && props.row.org_id !== orgIdentifier)"
-                  name="corporate_fare"
-                  size="16px"
-                  class="tw:shrink-0 tw:cursor-default tw:mr-1 source-icon"
+            </div>
+          </template>
+          <template #cell-name="{ row }">
+            <div class="relative z-2 flex min-h-6 flex-nowrap items-center">
+              <span
+                v-if="getSource(row) === 'built_in'"
+                class="me-1 inline-flex shrink-0 cursor-default"
+              >
+                <img :src="ooLogo" class="h-4 w-4" :alt="t('modelPricing.openObserveLogoAlt')" />
+                <OTooltip
+                  side="top"
+                  align="center"
+                  :content="t('modelPricing.sourceBuiltIn', { product: raw('OpenObserve') })"
+                />
+              </span>
+              <span
+                v-else-if="
+                  getSource(row) === 'meta_org' ||
+                  (getSource(row) === 'org' && row.org_id !== orgIdentifier)
+                "
+                class="me-1 inline-flex shrink-0 cursor-default"
+              >
+                <OIcon name="corporate-fare" size="sm" class="text-text-secondary" />
+                <OTooltip side="top" align="center" :content="t('modelPricing.sourceInherited')" />
+              </span>
+              <span v-else class="me-1 inline-flex shrink-0 cursor-default">
+                <OIcon name="person" size="sm" class="text-text-secondary" />
+                <OTooltip side="top" align="center" :content="t('modelPricing.sourceCustom')" />
+              </span>
+              <div class="block w-full truncate">{{ row.name }}</div>
+            </div>
+          </template>
+          <template #cell-match_pattern="{ row }">
+            <div class="flex min-w-0 items-center gap-1">
+              <OCode
+                truncate
+                :class="{
+                  '[text-decoration-color:currentColor] opacity-50 [text-decoration:line-through]':
+                    isChildRow(row),
+                }"
+                >{{ row.match_pattern }}</OCode
+              >
+              <OIcon
+                v-if="isChildRow(row)"
+                name="warning-amber"
+                size="xs"
+                class="text-status-warning-text shrink-0 opacity-85"
+              >
+                <OTooltip
+                  side="top"
+                  align="center"
+                  :content="t('modelPricing.shadowedTooltip', { name: getParentName(row) })"
+                />
+              </OIcon>
+            </div>
+          </template>
+          <template #cell-pricing="{ row }">
+            <div class="flex flex-wrap gap-1">
+              <template
+                v-if="getDefaultTier(row) && Object.keys(getDefaultTier(row).prices || {}).length"
+              >
+                <ODimensionChip
+                  v-for="(price, key) in getVisiblePrices(row)"
+                  :key="key"
+                  :dim-key="key as string"
+                  :key-label="formatPriceKey(key as string)"
+                  :value="formatPerMillion(price as number)"
+                />
+                <OTag
+                  v-if="getOverflowCount(row) > 0"
+                  type="countChip"
+                  value="neutral"
+                  clickable
+                  @click.stop="openPricingDialog(row)"
                 >
-                  <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceInherited') }}</q-tooltip>
-                </q-icon>
-                <q-icon
-                  v-else
-                  name="person"
-                  size="16px"
-                  class="tw:shrink-0 tw:cursor-default tw:mr-1 source-icon"
-                >
-                  <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceCustom') }}</q-tooltip>
-                </q-icon>
-                <div class="o2-table-cell-content">{{ props.row.name }}</div>
-                <q-tooltip
-                  v-if="props.row.name.length > 30"
-                  anchor="top middle" self="bottom middle" :delay="500"
-                  style="max-width: none; white-space: normal; word-break: break-all;"
-                >{{ props.row.name }}</q-tooltip>
-              </div>
-            </template>
-            <template v-else-if="col.name === 'match_pattern'">
-              <div class="tw:flex tw:items-center tw:gap-1">
-                <code class="text-caption pattern-code o2-table-cell-content">{{ props.row.match_pattern }}</code>
-              </div>
-            </template>
-            <template v-else-if="col.name === 'pricing'">
-              <div class="tw:flex tw:flex-wrap tw:gap-1">
-                <template v-if="getDefaultTier(props.row) && Object.keys(getDefaultTier(props.row).prices || {}).length">
-                  <span
-                    v-for="(price, key) in getVisiblePrices(props.row)"
-                    :key="key"
-                    class="dimension-badge"
-                    :class="getPriceKeyColorClass(key as string)"
-                  >
-                    <span class="tw:font-medium">{{ formatPriceKey(key as string) }}</span>=<span>{{ formatPerMillion(price as number) }}</span>
-                  </span>
-                  <span
-                    v-if="getOverflowCount(props.row) > 0"
-                    class="dimension-badge badge-more tw:cursor-pointer"
-                    @click.stop="openPricingDialog(props.row)"
-                  >
-                    +{{ getOverflowCount(props.row) }} {{ t('modelPricing.overflowMore') }}
-                    <q-tooltip :delay="400" anchor="top middle" self="bottom middle" class="pricing-overflow-tooltip">
-                      <div class="pricing-breakdown-tooltip">
-                        <div class="pricing-breakdown-title">{{ props.row.name }}</div>
-                        <table class="pricing-breakdown-table">
+                  +{{ getOverflowCount(row) }}
+                  {{ t("modelPricing.overflowMore") }}
+                  <OTooltip>
+                    <template #content>
+                      <div class="min-w-60">
+                        <div class="text-compact mb-0.75 font-bold">
+                          {{ row.name }}
+                        </div>
+                        <table class="w-full border-collapse">
                           <thead>
                             <tr>
-                              <th>{{ t('modelPricing.usageType') }}</th>
-                              <th>{{ t('modelPricing.colPricingSimple') }}</th>
+                              <th
+                                class="text-2xs text-table-header-text bg-table-header-bg border-table-header-border border-b ps-0 pe-4 pt-0 pb-1 text-left font-semibold"
+                              >
+                                {{ t("modelPricing.usageType") }}
+                              </th>
+                              <th
+                                class="text-2xs text-table-header-text bg-table-header-bg border-table-header-border border-b ps-0 pe-0 pt-0 pb-1 text-right font-semibold"
+                              >
+                                {{ t("modelPricing.colPricingSimple") }}
+                              </th>
                             </tr>
                           </thead>
                           <tbody>
-                            <tr v-for="([key, price]) in sortedPriceEntries(getDefaultTier(props.row)?.prices || {})" :key="key">
-                              <td>{{ formatPriceKey(key) }}</td>
-                              <td>{{ formatPerMillion(price) }}</td>
+                            <tr
+                              v-for="[key, price] in sortedPriceEntries(
+                                getDefaultTier(row)?.prices || {},
+                              )"
+                              :key="key"
+                            >
+                              <td class="py-0.5 ps-0 pe-4 text-xs">{{ formatPriceKey(key) }}</td>
+                              <td class="py-0.5 ps-0 pe-0 text-right text-xs font-medium">
+                                {{ formatPerMillion(price) }}
+                              </td>
                             </tr>
                           </tbody>
                         </table>
                       </div>
-                    </q-tooltip>
-                  </span>
-                </template>
-                <span v-else class="text-grey-5">—</span>
-              </div>
-            </template>
-            <template v-else-if="col.name === 'actions'">
-              <div class="tw:flex tw:items-center tw:gap-1 tw:justify-end">
-                <template v-if="!isReadOnly(props.row)">
-                  <q-btn
-                    dense unelevated size="sm" round flat
-                    :color="props.row.enabled ? 'negative' : 'positive'"
-                    :icon="props.row.enabled ? outlinedPause : outlinedPlayArrow"
-                    :title="props.row.enabled ? t('modelPricing.actionDisable') : t('modelPricing.actionEnable')"
-                    @click.stop="toggleEnabled(props.row, !props.row.enabled)"
-                    data-test="model-pricing-toggle-btn"
-                  />
-                  <q-btn padding="sm" unelevated size="sm" round flat icon="edit" :title="t('modelPricing.actionEdit')"
-                    @click.stop="openEditor(props.row)" data-test="model-pricing-edit-btn" />
-                  <q-btn padding="sm" unelevated size="sm" round flat :icon="outlinedDelete" :title="t('modelPricing.actionDelete')"
-                    @click.stop="confirmDelete(props.row)" data-test="model-pricing-delete-btn" />
-                  <q-btn padding="sm" unelevated size="sm" round flat icon="content_copy" :title="t('modelPricing.actionDuplicate')"
-                    @click.stop="duplicateModel(props.row)" data-test="model-pricing-duplicate-btn" />
-                </template>
-                <template v-else>
-                  <q-btn padding="sm" unelevated size="sm" round flat icon="content_copy" :title="t('modelPricing.actionClone')"
-                    @click.stop="duplicateModel(props.row)" data-test="model-pricing-clone-btn" />
-                </template>
-              </div>
-            </template>
-            <template v-else>
-              <div class="o2-table-cell-content">{{ props.row[col.field] }}</div>
-            </template>
-          </q-td>
-        </q-tr>
-
-        <!-- Inline children (not counted by q-table pagination) -->
-        <template v-if="props.row.children?.length > 0 && expandedParents.has(props.row.id)">
-          <!-- Shadow banner -->
-          <q-tr class="shadow-banner-row">
-            <q-td :colspan="columns.length" class="shadow-banner-cell">
-              <div class="shadow-banner-tree-line"></div>
-              <q-icon name="warning_amber" size="13px" class="shadow-banner-icon" />
-              {{ t('modelPricing.shadowBannerPrefix') }}
-              <strong :title="props.row.name">
-                {{ props.row.name.length > 25 ? props.row.name.slice(0, 25) + '…' : props.row.name }}
-              </strong>
-              {{ t('modelPricing.shadowBannerSuffix') }}
-            </q-td>
-          </q-tr>
-          <!-- Child rows -->
-          <q-tr
-            v-for="(child, idx) in props.row.children"
-            :key="child.id"
-            class="child-pricing-row"
-          >
-            <q-td
-              v-for="col in columns"
-              :key="col.name"
-              :style="col.style + (col.align ? `; text-align: ${col.align};` : '')"
-              :class="{
-                'tree-name-cell': col.name === 'name',
-                'tree-child': col.name === 'name',
-                'tree-last-child': col.name === 'name' && idx === props.row.children.length - 1,
-              }"
-            >
-              <template v-if="col.name === 'select'">
-                <q-checkbox
-                  :model-value="selectedIds.includes(child.id)"
-                  size="sm"
-                  class="o2-table-checkbox"
-                  @update:model-value="toggleSelect(child.id)"
-                />
-              </template>
-              <template v-else-if="col.name === 'name'">
-                <div class="row items-center no-wrap tree-node-content tree-child-content">
-                  <div class="tree-dot-marker" :class="{ 'tree-dot-parent': child.children?.length > 0 }" />
-                  <span v-if="getSource(child) === 'built_in'" class="tw:shrink-0 tw:cursor-default tw:inline-flex tw:mr-1">
-                    <img :src="ooLogo" class="tw:w-[16px] tw:h-[16px]" alt="OpenObserve" />
-                    <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceBuiltIn') }}</q-tooltip>
-                  </span>
-                  <q-icon
-                    v-else-if="getSource(child) === 'meta_org' || (getSource(child) === 'org' && child.org_id !== orgIdentifier)"
-                    name="corporate_fare" size="16px" class="tw:shrink-0 tw:cursor-default tw:mr-1 source-icon"
-                  >
-                    <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceInherited') }}</q-tooltip>
-                  </q-icon>
-                  <q-icon v-else name="person" size="16px" class="tw:shrink-0 tw:cursor-default tw:mr-1 source-icon">
-                    <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceCustom') }}</q-tooltip>
-                  </q-icon>
-                  <div class="o2-table-cell-content tw:opacity-70">{{ child.name }}</div>
-                  <q-tooltip v-if="child.name.length > 30" anchor="top middle" self="bottom middle" :delay="500"
-                    style="max-width: none; white-space: normal; word-break: break-all;">{{ child.name }}</q-tooltip>
-                </div>
-              </template>
-              <template v-else-if="col.name === 'match_pattern'">
-                <div class="tw:flex tw:items-center tw:gap-1">
-                  <code class="text-caption pattern-code o2-table-cell-content shadowed-pattern">{{ child.match_pattern }}</code>
-                  <q-icon name="warning_amber" size="14px" class="tw:shrink-0 shadowed-icon" color="orange-10">
-                    <q-tooltip :delay="300" anchor="top middle" self="bottom middle" style="max-width: 260px; white-space: normal;">
-                      {{ t('modelPricing.shadowedTooltip', { name: props.row.name }) }}
-                    </q-tooltip>
-                  </q-icon>
-                </div>
-              </template>
-              <template v-else-if="col.name === 'pricing'">
-                <div class="tw:flex tw:flex-wrap tw:gap-1">
-                  <template v-if="getDefaultTier(child) && Object.keys(getDefaultTier(child).prices || {}).length">
-                    <span
-                      v-for="(price, key) in getVisiblePrices(child)"
-                      :key="key"
-                      class="dimension-badge"
-                      :class="getPriceKeyColorClass(key as string)"
-                    >
-                      <span class="tw:font-medium">{{ formatPriceKey(key as string) }}</span>=<span>{{ formatPerMillion(price as number) }}</span>
-                    </span>
-                    <span
-                      v-if="getOverflowCount(child) > 0"
-                      class="dimension-badge badge-more tw:cursor-pointer"
-                      @click.stop="openPricingDialog(child)"
-                    >
-                      +{{ getOverflowCount(child) }} {{ t('modelPricing.overflowMore') }}
-                      <q-tooltip :delay="400" anchor="top middle" self="bottom middle" class="pricing-overflow-tooltip">
-                        <div class="pricing-breakdown-tooltip">
-                          <div class="pricing-breakdown-title">{{ child.name }}</div>
-                          <table class="pricing-breakdown-table">
-                            <thead><tr><th>{{ t('modelPricing.usageType') }}</th><th>{{ t('modelPricing.colPricingSimple') }}</th></tr></thead>
+                    </template>
+                  </OTooltip>
+                </OTag>
+                <OTag
+                  v-if="hasTimeBasedTiers(row)"
+                  type="countChip"
+                  value="neutral"
+                  clickable
+                  icon="schedule"
+                  data-test="model-pricing-time-based-chip"
+                  @click.stop="openPricingDialog(row)"
+                >
+                  {{ t("modelPricing.timeBasedChip") }}
+                  <OTooltip side="top" align="center">
+                    <template #content>
+                      <div class="min-w-60">
+                        <div class="text-compact mb-1 font-bold">{{ row.name }}</div>
+                        <div
+                          v-for="(tier, tIdx) in row.tiers ?? []"
+                          :key="tIdx"
+                          class="mb-2 last:mb-0"
+                        >
+                          <div class="text-2xs font-semibold">
+                            {{ tier.name || t("modelPricing.tierDefaultName") }}
+                          </div>
+                          <div
+                            v-if="tier.utc_windows?.length"
+                            class="text-2xs font-mono opacity-70"
+                          >
+                            {{ formatUtcWindows(tier.utc_windows) }}
+                          </div>
+                          <div v-if="tierWindowsLocal(tier)" class="text-2xs font-mono opacity-70">
+                            {{ t("modelPricing.localTimeHint", { range: tierWindowsLocal(tier) }) }}
+                          </div>
+                          <div
+                            v-if="!tier.condition && !tier.utc_windows?.length"
+                            class="text-2xs opacity-70"
+                          >
+                            {{ t("modelPricing.tierAlwaysActive") }}
+                          </div>
+                          <table class="mt-0.5 w-full border-collapse">
                             <tbody>
-                              <tr v-for="([key, price]) in sortedPriceEntries(getDefaultTier(child)?.prices || {})" :key="key">
-                                <td>{{ formatPriceKey(key) }}</td>
-                                <td>{{ formatPerMillion(price) }}</td>
+                              <tr
+                                v-for="[key, price] in sortedPriceEntries(tier.prices || {})"
+                                :key="key"
+                              >
+                                <td class="py-0.5 ps-0 pe-4 text-xs">{{ formatPriceKey(key) }}</td>
+                                <td class="py-0.5 ps-0 pe-0 text-right text-xs font-medium">
+                                  {{ formatPerMillion(price) }}
+                                </td>
                               </tr>
                             </tbody>
                           </table>
                         </div>
-                      </q-tooltip>
-                    </span>
-                  </template>
-                  <span v-else class="text-grey-5">—</span>
-                </div>
+                      </div>
+                    </template>
+                  </OTooltip>
+                </OTag>
               </template>
-              <template v-else-if="col.name === 'actions'">
-                <div class="tw:flex tw:items-center tw:gap-1 tw:justify-end">
-                  <template v-if="!isReadOnly(child)">
-                    <q-btn dense unelevated size="sm" round flat
-                      :color="child.enabled ? 'negative' : 'positive'"
-                      :icon="child.enabled ? outlinedPause : outlinedPlayArrow"
-                      :title="child.enabled ? t('modelPricing.actionDisable') : t('modelPricing.actionEnable')"
-                      @click.stop="toggleEnabled(child, !child.enabled)" />
-                    <q-btn padding="sm" unelevated size="sm" round flat icon="edit" :title="t('modelPricing.actionEdit')"
-                      @click.stop="openEditor(child)" />
-                    <q-btn padding="sm" unelevated size="sm" round flat :icon="outlinedDelete" :title="t('modelPricing.actionDelete')"
-                      @click.stop="confirmDelete(child)" />
-                    <q-btn padding="sm" unelevated size="sm" round flat icon="content_copy" :title="t('modelPricing.actionDuplicate')"
-                      @click.stop="duplicateModel(child)" />
+              <span v-else class="text-text-muted">&mdash;</span>
+            </div>
+          </template>
+          <template #cell-actions="{ row }">
+            <div class="flex items-center justify-end gap-1">
+              <template v-if="!isReadOnly(row)">
+                <OButton
+                  :variant="row.enabled ? 'ghost-destructive' : 'ghost-success'"
+                  size="icon-sm"
+                  class="max-md:hidden"
+                  :title="
+                    row.enabled ? t('modelPricing.actionDisable') : t('modelPricing.actionEnable')
+                  "
+                  @click.stop="toggleEnabled(row, !row.enabled)"
+                  data-test="model-pricing-toggle-btn"
+                  :data-row-action="row.enabled ? 'pause' : 'resume'"
+                  :icon-left="row.enabled ? 'pause' : 'play-arrow'"
+                />
+                <OButton
+                  variant="ghost"
+                  size="icon-sm"
+                  class="max-md:hidden"
+                  :title="t('modelPricing.actionEdit')"
+                  @click.stop="openEditor(row)"
+                  data-test="model-pricing-edit-btn"
+                  data-row-action="edit"
+                  icon-left="edit"
+                />
+                <OButton
+                  variant="ghost-destructive"
+                  size="icon-sm"
+                  class="max-md:hidden"
+                  :title="t('modelPricing.actionDelete')"
+                  @click.stop="confirmDelete(row)"
+                  data-test="model-pricing-delete-btn"
+                  data-row-action="delete"
+                  icon-left="delete"
+                />
+                <OButton
+                  variant="ghost"
+                  size="icon-sm"
+                  class="max-md:hidden"
+                  :title="t('modelPricing.actionDuplicate')"
+                  @click.stop="duplicateModel(row)"
+                  data-test="model-pricing-duplicate-btn"
+                  data-row-action="duplicate"
+                  icon-left="content-copy"
+                />
+                <ODropdown side="bottom" align="end">
+                  <template #trigger>
+                    <OButton
+                      icon-left="more-vert"
+                      variant="ghost"
+                      size="icon-xs-sq"
+                      class="md:hidden"
+                      data-test="model-pricing-row-more-actions"
+                      @click.stop
+                    />
                   </template>
-                  <template v-else>
-                    <q-btn padding="sm" unelevated size="sm" round flat icon="content_copy" :title="t('modelPricing.actionClone')"
-                      @click.stop="duplicateModel(child)" />
-                  </template>
-                </div>
+                  <ODropdownItem
+                    :icon-left="row.enabled ? 'pause' : 'play-arrow'"
+                    :variant="row.enabled ? 'destructive' : 'default'"
+                    class="md:hidden"
+                    data-test="model-pricing-toggle-btn-menu"
+                    @select="toggleEnabled(row, !row.enabled)"
+                  >
+                    <span>{{
+                      row.enabled ? t("modelPricing.actionDisable") : t("modelPricing.actionEnable")
+                    }}</span>
+                  </ODropdownItem>
+                  <ODropdownItem
+                    icon-left="edit"
+                    class="md:hidden"
+                    data-test="model-pricing-edit-btn-menu"
+                    @select="openEditor(row)"
+                  >
+                    <span>{{ t("modelPricing.actionEdit") }}</span>
+                  </ODropdownItem>
+                  <ODropdownItem
+                    icon-left="delete"
+                    variant="destructive"
+                    class="md:hidden"
+                    data-test="model-pricing-delete-btn-menu"
+                    @select="confirmDelete(row)"
+                  >
+                    <span>{{ t("modelPricing.actionDelete") }}</span>
+                  </ODropdownItem>
+                  <ODropdownItem
+                    icon-left="content-copy"
+                    class="md:hidden"
+                    data-test="model-pricing-duplicate-btn-menu"
+                    @select="duplicateModel(row)"
+                  >
+                    <span>{{ t("modelPricing.actionDuplicate") }}</span>
+                  </ODropdownItem>
+                </ODropdown>
               </template>
               <template v-else>
-                <div class="o2-table-cell-content">{{ child[col.field] }}</div>
+                <OButton
+                  variant="ghost"
+                  size="icon-sm"
+                  :title="t('modelPricing.actionClone')"
+                  @click.stop="duplicateModel(row)"
+                  data-test="model-pricing-clone-btn"
+                  data-row-action="duplicate"
+                  icon-left="content-copy"
+                />
               </template>
-            </q-td>
-          </q-tr>
-        </template>
-      </template>
-
-      <template #bottom="scope">
-        <div class="bottom-btn tw:h-[48px]">
-          <div class="o2-table-footer-title tw:flex tw:items-center tw:w-[100px]">
-            {{ t('modelPricing.modelsCount', { count: resultTotal }) }}
-          </div>
-          <q-btn
-            v-if="selectedCount > 0"
-            data-test="model-pricing-export-selected-btn"
-            class="q-mr-sm no-border o2-secondary-button tw:w-[300px] tw:h-[36px]"
-            no-caps
-            dense
-            style="width: 160px; height: 32px;"
-            icon="download"
-            :label="t('modelPricing.exportSelected', { count: selectedCount })"
-            @click="exportSelected"
-          />
-          <q-btn
-            v-if="selectedCount > 0 && selectedIdsOnlyContainsOwn"
-            data-test="model-pricing-delete-selected-btn"
-            class="q-mr-sm no-border o2-secondary-button"
-            style="width: 160px; height: 32px;"
-            no-caps
-            flat
-            :icon="outlinedDelete"
-            :label="t('modelPricing.deleteSelected', { count: selectedCount })"
-            @click="confirmDeleteSelected"
-          />
-          <QTablePagination
-            :scope="scope"
-            :position="'bottom'"
-            :resultTotal="resultTotal"
-            :perPageOptions="perPageOptions"
-            @update:changeRecordPerPage="changePagination"
-          />
-        </div>
-      </template>
-    </q-table>
-    </div> <!-- end v-if="!showImportModelPricingPage" -->
-
-  <!-- Pricing detail side panel -->
-  <q-dialog v-model="showPricingDialog" position="right" maximized>
-    <div :class="store.state.theme === 'dark' ? 'bg-dark' : 'bg-white'" class="pricing-dialog-panel">
-      <div class="add-stream-header row items-center no-wrap q-px-md">
-        <div class="col tw:flex tw:items-center tw:gap-2 tw:min-w-0">
-          <!-- Source icon -->
-          <span v-if="getSource(pricingDialogRow) === 'built_in'" class="tw:shrink-0 tw:cursor-default tw:inline-flex">
-            <img :src="ooLogo" class="tw:w-[18px] tw:h-[18px]" alt="OpenObserve" />
-            <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceBuiltIn') }}</q-tooltip>
-          </span>
-          <q-icon
-            v-else-if="pricingDialogRow && (getSource(pricingDialogRow) === 'meta_org' || (getSource(pricingDialogRow) === 'org' && pricingDialogRow.org_id !== orgIdentifier))"
-            name="corporate_fare"
-            size="18px"
-            class="tw:shrink-0 tw:cursor-default source-icon"
-          >
-            <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceInherited') }}</q-tooltip>
-          </q-icon>
-          <q-icon
-            v-else
-            name="person"
-            size="18px"
-            class="tw:shrink-0 tw:cursor-default source-icon"
-          >
-            <q-tooltip :delay="500" anchor="top middle" self="bottom middle">{{ t('modelPricing.sourceCustom') }}</q-tooltip>
-          </q-icon>
-          <div style="font-size: 18px" class="tw:truncate">
-            {{ pricingDialogRow?.name }}
-            <q-tooltip
-              v-if="pricingDialogRow?.name && pricingDialogRow.name.length > 20"
-              :delay="300"
-              anchor="bottom middle"
-              self="top middle"
-              style="max-width: none; white-space: normal; word-break: break-all;"
-            >{{ pricingDialogRow.name }}</q-tooltip>
-          </div>
-        </div>
-        <div class="col-auto">
-          <q-btn v-close-popup round flat icon="cancel" />
-        </div>
-      </div>
-      <q-separator />
-      <div class="q-pa-md pricing-dialog-body">
-        <div v-if="pricingDialogRow">
-          <!-- Pattern section -->
-          <div class="tw:mb-4">
-            <div class="pricing-section-label">{{ t('modelPricing.colPattern') }}</div>
-            <code class="text-caption pattern-code pattern-code-panel">{{ pricingDialogRow.match_pattern }}</code>
-          </div>
-          <q-separator class="tw:mb-4" />
-
-          <!-- Pricing per 1M tokens section -->
-          <div>
-            <div class="pricing-section-label tw:mt-2">{{ t('modelPricing.colPricing') }}</div>
-            <div v-if="sortedPriceEntries(getDefaultTier(pricingDialogRow)?.prices || {}).length" class="pricing-panel-table-wrap">
-              <table class="pricing-panel-table">
-                <thead>
-                  <tr>
-                    <th>{{ t('modelPricing.usageType') }}</th>
-                    <th>{{ t('modelPricing.colPricing') }}</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="([key, price]) in sortedPriceEntries(getDefaultTier(pricingDialogRow)?.prices || {})" :key="key">
-                    <td>{{ formatPriceKey(key) }}</td>
-                    <td>{{ formatPerMillion(price) }}</td>
-                  </tr>
-                </tbody>
-              </table>
             </div>
-            <span v-else class="text-grey-5">—</span>
+          </template>
+
+          <template #empty>
+            <OEmptyState
+              size="hero"
+              preset="no-model-pricing"
+              :filtered="isFiltered"
+              data-test="model-pricing-empty-state"
+              @action="(id) => (id === 'clear-filters' ? clearFilters() : openEditor(null))"
+            />
+          </template>
+
+          <template #bottom>
+            <div class="flex h-12 w-full items-center gap-x-2">
+              <div class="flex w-25 items-center text-xs font-normal max-md:hidden">
+                {{ t("modelPricing.modelsCount", { count: resultTotal }) }}
+              </div>
+              <OButton
+                v-if="selectedCount > 0"
+                data-test="model-pricing-export-selected-btn"
+                variant="outline"
+                size="sm"
+                @click="exportSelected"
+              >
+                <template #icon-left><OIcon name="download" size="xs" /></template>
+                {{ t("modelPricing.exportSelected", { count: selectedCount }) }}
+              </OButton>
+              <OButton
+                v-if="selectedCount > 0 && selectedIdsOnlyContainsOwn"
+                data-test="model-pricing-delete-selected-btn"
+                variant="outline-destructive"
+                size="sm"
+                :loading="bulkDeleteLoading"
+                @click="confirmDeleteSelected"
+                icon-left="delete"
+              >
+                {{ t("modelPricing.deleteSelected", { count: selectedCount }) }}
+              </OButton>
+            </div>
+          </template>
+        </OTable>
+      </div>
+    </OPageLayout>
+    <!-- end v-if="!showImportModelPricingPage" -->
+
+    <!-- Pricing detail side panel -->
+    <ODrawer
+      data-test="model-pricing-list-pricing-drawer"
+      v-model:open="showPricingDialog"
+      :width="30"
+      :title="pricingDialogRow?.match_pattern"
+      :title-data-test="'model-pricing-drawer-title'"
+      :sub-title="t('modelPricing.modelDetails')"
+    >
+      <!-- Source (built-in / inherited / custom) indicator trails on the right. -->
+      <template #header-right>
+        <span
+          v-if="getSource(pricingDialogRow) === 'built_in'"
+          class="inline-flex shrink-0 cursor-default"
+        >
+          <img :src="ooLogo" class="h-4.5 w-4.5" :alt="t('modelPricing.openObserveLogoAlt')" />
+          <OTooltip
+            side="top"
+            align="center"
+            :content="t('modelPricing.sourceBuiltIn', { product: raw('OpenObserve') })"
+          />
+        </span>
+        <span
+          v-else-if="
+            pricingDialogRow &&
+            (getSource(pricingDialogRow) === 'meta_org' ||
+              (getSource(pricingDialogRow) === 'org' && pricingDialogRow.org_id !== orgIdentifier))
+          "
+          class="inline-flex shrink-0 cursor-default"
+        >
+          <OIcon name="corporate-fare" size="sm" class="text-text-secondary" />
+          <OTooltip side="top" align="center" :content="t('modelPricing.sourceInherited')" />
+        </span>
+        <span v-else class="inline-flex shrink-0 cursor-default">
+          <OIcon name="person" size="sm" class="text-text-secondary" />
+          <OTooltip side="top" align="center" :content="t('modelPricing.sourceCustom')" />
+        </span>
+      </template>
+
+      <div class="flex-1 overflow-y-auto">
+        <div v-if="pricingDialogRow">
+          <div class="mb-4">
+            <OText variant="label" class="mb-1.5 block">
+              {{ t("modelPricing.colPattern") }}
+            </OText>
+            <!-- No `copyable`: OCode's copy is navigator.clipboard-only and fails
+                 silently on HTTP, unlike @/utils/clipboard's execCommand fallback. -->
+            <OCode block class="max-h-75 overflow-y-auto">{{
+              pricingDialogRow.match_pattern
+            }}</OCode>
+          </div>
+          <OSeparator class="mb-4" />
+
+          <div>
+            <OText variant="label" class="mt-2 mb-1.5 block">
+              {{ t("modelPricing.colPricing") }}
+            </OText>
+            <div v-if="drawerTiers.length" class="mt-2 flex flex-col gap-3">
+              <div
+                v-for="(tier, tIdx) in drawerTiers"
+                :key="tIdx"
+                class="border-card-glass-border rounded-default overflow-hidden border"
+                :data-test="`model-pricing-drawer-tier-${tIdx}`"
+              >
+                <!-- Tier header — only worth the space when there IS more than one tier -->
+                <div
+                  v-if="drawerTiers.length > 1"
+                  class="bg-surface-panel border-card-glass-border border-b px-3.5 py-2.5"
+                >
+                  <div class="text-compact font-semibold">
+                    {{ tier.name || t("modelPricing.tierDefaultName") }}
+                  </div>
+                  <div v-if="tier.condition" class="mt-0.5">
+                    <OCode
+                      >{{ tier.condition.usage_key }} {{ operatorSymbol(tier.condition.operator) }}
+                      {{ tier.condition.value }}</OCode
+                    >
+                  </div>
+                  <div v-if="tier.utc_windows?.length" class="mt-2">
+                    <div class="text-2xs mb-1.5 opacity-55">
+                      {{ t("modelPricing.timeWindows") }}
+                      <span class="ms-1 font-mono">{{ formatUtcWindows(tier.utc_windows) }}</span>
+                    </div>
+                    <div
+                      v-if="tierWindowsLocal(tier)"
+                      class="text-2xs mb-1.5 opacity-55"
+                      data-test="model-pricing-drawer-tier-local-hint"
+                    >
+                      {{ t("modelPricing.localTimeHint", { range: tierWindowsLocal(tier) }) }}
+                    </div>
+                    <UtcHoursBar :windows="tier.utc_windows" />
+                  </div>
+                  <div
+                    v-if="!tier.condition && !tier.utc_windows?.length"
+                    class="text-2xs mt-0.5 opacity-55"
+                  >
+                    {{ t("modelPricing.tierAlwaysActive") }}
+                  </div>
+                </div>
+                <table
+                  v-if="sortedPriceEntries(tier.prices || {}).length"
+                  class="w-full border-collapse"
+                >
+                  <thead>
+                    <tr>
+                      <th
+                        class="text-2xs text-table-header-text bg-table-header-bg border-table-header-border border-b px-3.5 py-1.5 text-left font-semibold"
+                      >
+                        {{ t("modelPricing.usageType") }}
+                      </th>
+                      <th
+                        class="text-2xs text-table-header-text bg-table-header-bg border-table-header-border border-b px-3.5 py-1.5 text-right font-semibold"
+                      >
+                        {{ t("modelPricing.colPricing") }}
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr
+                      v-for="[key, price] in sortedPriceEntries(tier.prices || {})"
+                      :key="key"
+                      class="last:[&>td]:border-b-0"
+                    >
+                      <td class="text-compact border-table-row-divider border-b px-3.5 py-2">
+                        {{ formatPriceKey(key) }}
+                      </td>
+                      <td
+                        class="text-compact border-table-row-divider border-b px-3.5 py-2 text-right font-semibold"
+                      >
+                        {{ formatPerMillion(price) }}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+                <div v-else class="text-text-muted px-3.5 py-2 text-xs">&mdash;</div>
+              </div>
+            </div>
+            <span v-else class="text-text-muted">&mdash;</span>
           </div>
         </div>
       </div>
-    </div>
-  </q-dialog>
+    </ODrawer>
 
-  <confirm-dialog
-    v-model="confirmDialogMeta.show"
-    :title="confirmDialogMeta.title"
-    :message="confirmDialogMeta.message"
-    @update:ok="confirmDialogMeta.onConfirm()"
-    @update:cancel="resetConfirmDialog"
-  />
-  </q-page>
+    <ConfirmDialog
+      v-model="confirmDialogMeta.show"
+      :title="confirmDialogMeta.title"
+      :message="confirmDialogMeta.message"
+      @update:ok="confirmDialogMeta.onConfirm()"
+      @update:cancel="resetConfirmDialog"
+    />
+  </div>
 </template>
 
 <script lang="ts" setup>
-import { ref, computed, onBeforeMount, onActivated, onMounted } from "vue";
-import { useI18n } from "vue-i18n";
+import { useQuery } from "@tanstack/vue-query";
+import { modelPricingQuery } from "@/services/model_pricing.queries";
+import { modelPricingKeys } from "@/services/model_pricing.querykeys";
+import { queryClient } from "@/composables/query/queryClient";
+import { ref, computed, onBeforeMount, onActivated, watch } from "vue";
+import { raw, useI18nTyped } from "@/types/i18n";
 import { useStore } from "vuex";
+import useTheme from "@/composables/useTheme";
 import { useRouter } from "vue-router";
-import { useQuasar } from "quasar";
-import { outlinedDelete, outlinedPause, outlinedPlayArrow } from "@quasar/extras/material-icons-outlined";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import OPageLayout from "@/lib/core/PageLayout/OPageLayout.vue";
 import { getImageURL } from "@/utils/zincutils";
 import modelPricingService from "@/services/model_pricing";
 import ImportModelPricing from "@/components/settings/ImportModelPricing.vue";
 import AppTabs from "@/components/common/AppTabs.vue";
-import QTablePagination from "@/components/shared/grid/Pagination.vue";
 import ConfirmDialog from "@/components/ConfirmDialog.vue";
 import TestModelMatchDialog from "@/components/settings/TestModelMatchDialog.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownItem from "@/lib/overlay/Dropdown/ODropdownItem.vue";
+import ODrawer from "@/lib/overlay/Drawer/ODrawer.vue";
+import OSearchInput from "@/lib/forms/SearchInput/OSearchInput.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import ORefreshButton from "@/lib/core/RefreshButton/ORefreshButton.vue";
+import OTable from "@/lib/core/Table/OTable.vue";
+import OEmptyState from "@/lib/core/EmptyState/OEmptyState.vue";
+import OTag from "@/lib/core/Badge/OTag.vue";
+import ODimensionChip from "@/lib/core/Badge/ODimensionChip.vue";
+import OSeparator from "@/lib/core/Separator/OSeparator.vue";
+import type { OTableColumnDef } from "@/lib/core/Table/OTable.types";
+import UtcHoursBar from "@/components/settings/UtcHoursBar.vue";
+import OCode from "@/lib/core/Code/OCode.vue";
+import OText from "@/lib/core/Typography/OText.vue";
+import { operatorSymbol, formatUtcWindows, formatUtcWindowsInTz } from "@/utils/formatters";
+import { toast } from "@/lib/feedback/Toast/useToast";
+import { useShortcuts } from "@/lib/vue-shortcut-manager";
+import { isInputFocused } from "@/utils/keyboardShortcuts";
 
-const { t } = useI18n();
+const { t } = useI18nTyped();
 const store = useStore();
+const { isDark } = useTheme();
 const router = useRouter();
-const q = useQuasar();
 
 const qTableRef = ref<any>(null);
-const models = ref<any[]>([]);
-const loading = ref(true);
+const orgIdentifier = computed(() => store.state.selectedOrganization?.identifier || "");
+
+const modelsQuery = useQuery(() =>
+  Object.assign(modelPricingQuery(orgIdentifier.value), { enabled: !!orgIdentifier.value }),
+);
+
+// The list is the query, not a copy of it: any invalidation of the scope
+// repaints these rows with no wiring here.
+const models = computed(() => modelsQuery.data.value ?? []);
+const loading = modelsQuery.isPending;
+// Request in flight, with rows still on screen — the refresh button's
+// spinner. `loading` stays for the skeleton, which only a cold read wants.
+const fetching = modelsQuery.isFetching;
+// Epoch ms of the last successful read — drives the button's "1m ago" label.
+const lastUpdatedAt = modelsQuery.dataUpdatedAt;
+// A 403 lands in the query's error rather than a loader's catch, so derive the no-access state from it.
+const forbidden = computed(() => {
+  const e: any = modelsQuery.error.value;
+  return e?.status === 403 || e?.response?.status === 403;
+});
 const refreshing = ref(false);
 
-// Pricing detail side panel
 const showPricingDialog = ref(false);
 const pricingDialogRow = ref<any>(null);
 
@@ -611,8 +702,9 @@ function openPricingDialog(row: any) {
 
 const confirmDialogMeta = ref({
   show: false,
-  title: "",
-  message: "",
+  // raw("") is only the empty placeholder — the real values are assigned from t().
+  title: raw(""),
+  message: raw(""),
   onConfirm: async () => {},
 });
 
@@ -623,34 +715,18 @@ const filterQuery = ref("");
 const showImportModelPricingPage = ref(false);
 const showTestMatchDialog = ref(false);
 const selectedIds = ref<string[]>([]);
+const bulkDeleteLoading = ref(false);
 const selectedTab = ref("all");
 
 const tabOptions = computed(() => [
-  { label: t("modelPricing.tabAll"), value: "all" },
-  { label: t("modelPricing.tabCustom"), value: "org" },
-  { label: t("modelPricing.tabSystem"), value: "inherited" },
+  { label: t("modelPricing.tabAll"), value: "all", icon: "format-list-bulleted" },
+  { label: t("modelPricing.tabCustom"), value: "org", icon: "tune" },
+  { label: t("modelPricing.tabSystem"), value: "inherited", icon: "business" },
 ]);
 
 function onTabChange() {
   selectedIds.value = [];
 }
-
-const perPageOptions: any = [
-  { label: "20", value: 20 },
-  { label: "50", value: 50 },
-  { label: "100", value: 100 },
-  { label: "250", value: 250 },
-  { label: "500", value: 500 },
-];
-
-function changePagination(val: { label: string; value: any }) {
-  pagination.value.rowsPerPage = val.value;
-  qTableRef.value?.setPagination(pagination.value);
-}
-
-const hasSelectableModels = computed(() =>
-  models.value.length > 0
-);
 
 /** Flat list of all models (parents + children) for ID-based lookups. */
 const allModels = computed(() => {
@@ -662,98 +738,100 @@ const allModels = computed(() => {
   return result;
 });
 
-const columns = computed(() => {
-  const cols: any[] = [];
-  if (hasSelectableModels.value) {
-    cols.push({ name: "select", label: "", field: "select", align: "center", style: "width: 40px; min-width: 40px; max-width: 40px;" });
+/** Set of model ids that are children of some parent (= shadowed rows). */
+const childIds = computed(() => {
+  const ids = new Set<string>();
+  for (const m of models.value) {
+    for (const c of m.children ?? []) ids.add(c.id);
   }
-  cols.push(
-    { name: "name", label: t("modelPricing.colModel"), field: "name", align: "left", sortable: true, style: "width: 280px; min-width: 280px; max-width: 280px;", tooltip: t("modelPricing.colModelTooltip") },
-    { name: "match_pattern", label: t("modelPricing.colMatchPattern"), field: "match_pattern", align: "left", style: "width: 280px; min-width: 280px; max-width: 280px; overflow: hidden;", tooltip: t("modelPricing.colMatchPatternTooltip") },
-    { name: "pricing", label: t("modelPricing.colPricing"), field: "pricing", align: "left", style: "min-width: 200px;", tooltip: t("modelPricing.colPricingTooltip") },
-    { name: "actions", label: t("modelPricing.colActions"), field: "actions", align: "center", style: "width: 120px; min-width: 120px; max-width: 120px;", classes: "actions-column", headerClasses: "actions-column" },
-  );
-  return cols;
+  return ids;
 });
 
-const pagination = ref({ rowsPerPage: 20 });
+function isChildRow(row: any): boolean {
+  return !!(row && childIds.value.has(row.id));
+}
+
+function getParentName(row: any): string {
+  for (const m of models.value) {
+    if (m.children?.some((c: any) => c.id === row.id)) return m.name;
+  }
+  return "";
+}
+
+const columns: OTableColumnDef[] = [
+  {
+    id: "name",
+    header: t("modelPricing.colModel"),
+    accessorKey: "name",
+    sortable: true,
+    resizable: true,
+    hideable: true,
+    minSize: 180,
+    meta: { align: "left", flex: true },
+  },
+  {
+    id: "match_pattern",
+    header: t("modelPricing.colMatchPattern"),
+    accessorKey: "match_pattern",
+    resizable: true,
+    hideable: true,
+    minSize: 200,
+    meta: { align: "left", flex: true },
+  },
+  {
+    id: "pricing",
+    header: t("modelPricing.colPricing"),
+    accessorKey: "pricing",
+    resizable: true,
+    hideable: true,
+    minSize: 200,
+    meta: { align: "left", flex: true },
+  },
+  {
+    id: "actions",
+    header: t("modelPricing.colActions"),
+    isAction: true,
+    pinned: "right",
+    size: 168,
+    minSize: 44,
+    meta: { align: "center", actionCount: 4 },
+  },
+];
 
 const resultTotal = computed(() => filteredModels.value.length);
 
-// Selection helpers
-const selectableModels = computed(() =>
-  filteredModels.value
-);
-
-/** Selectable rows visible on the current page (parents + expanded children). */
-const currentPageSelectableModels = computed(() => {
-  const perPage = pagination.value.rowsPerPage || 0;
-  const allParents = filteredModels.value;
-  const pageParents = perPage === 0
-    ? allParents
-    : allParents.slice(
-        ((qTableRef.value?.computedPagination?.page ?? 1) - 1) * perPage,
-        (qTableRef.value?.computedPagination?.page ?? 1) * perPage,
-      );
-  const result: any[] = [];
-  for (const parent of pageParents) {
-    result.push(parent);
-    if (parent.children?.length > 0 && expandedParents.value.has(parent.id)) {
-      result.push(...parent.children);
-    }
-  }
-  return result;
-});
+function handleSelectedIdsUpdate(ids: string[]) {
+  selectedIds.value = ids;
+}
 
 const selectedIdsOnlyContainsOwn = computed(() => {
   if (selectedIds.value.length === 0) return false;
-  return selectedIds.value.every(id => {
+  return selectedIds.value.every((id) => {
     const model = allModels.value.find((m: any) => m.id === id);
     return model && !isReadOnly(model);
   });
 });
 
 const selectedCount = computed(() => selectedIds.value.length);
-const allSelected = computed(() =>
-  currentPageSelectableModels.value.length > 0 &&
-  currentPageSelectableModels.value.every((m: any) => selectedIds.value.includes(m.id))
-);
-const someSelected = computed(() =>
-  selectedCount.value > 0 && !allSelected.value
-);
-
-function toggleSelectAll() {
-  const pageIds = currentPageSelectableModels.value.map((m: any) => m.id);
-  if (allSelected.value) {
-    selectedIds.value = [];
-  } else {
-    // Select only the current page's selectable items — clear any off-screen selections
-    selectedIds.value = [...pageIds];
-  }
-}
-
-function toggleSelect(id: string) {
-  const idx = selectedIds.value.indexOf(id);
-  if (idx >= 0) {
-    selectedIds.value.splice(idx, 1);
-  } else {
-    selectedIds.value.push(id);
-  }
-}
 
 /** Get the source of a model: 'built_in', 'meta_org', or 'org'. */
 function getSource(model: any): string {
-  return model.source || 'org';
+  return model.source || "org";
 }
-
 
 /** True when a model entry is read-only (built-in or from another org). */
 function isReadOnly(model: any): boolean {
-  return model.source === 'built_in' || model.org_id !== orgIdentifier.value;
+  return model.source === "built_in" || model.org_id !== orgIdentifier.value;
 }
 
-function sectionLabel(section: string): string {
-  return section === 'built_in' ? 'Built-in (OpenObserve)' : 'Global';
+// True when the search box or a non-"all" tab is narrowing the list. Drives
+// OEmptyState's `:filtered` so an empty result reads as "No model pricing found"
+// (with Clear filters) rather than the first-run "create your first" card.
+const isFiltered = computed(() => !!filterQuery.value.trim() || selectedTab.value !== "all");
+
+function clearFilters() {
+  filterQuery.value = "";
+  selectedTab.value = "all";
 }
 
 const filteredModels = computed(() => {
@@ -762,105 +840,68 @@ const filteredModels = computed(() => {
     const search = filterQuery.value.toLowerCase();
     items = items.filter(
       (m: any) =>
-        m.name.toLowerCase().includes(search) ||
-        m.match_pattern.toLowerCase().includes(search)
+        m.name.toLowerCase().includes(search) || m.match_pattern.toLowerCase().includes(search),
     );
   }
 
   // Tab filtering
   const tab = selectedTab.value;
-  if (tab === 'org') {
-    items = items.filter((m: any) => getSource(m) === 'org' && m.org_id === orgIdentifier.value);
-    return items.map((m: any) => ({ ...m, __sectionStart: null }));
-  }
-  if (tab === 'inherited') {
-    const metaItems = items.filter((m: any) => getSource(m) === 'meta_org' || (getSource(m) === 'org' && m.org_id !== orgIdentifier.value));
-    const builtInItems = items.filter((m: any) => getSource(m) === 'built_in');
-    const sorted: any[] = [];
-    if (metaItems.length > 0) {
-      metaItems[0] = { ...metaItems[0], __sectionStart: 'meta_org' };
-      for (let i = 1; i < metaItems.length; i++) metaItems[i] = { ...metaItems[i], __sectionStart: null };
-      sorted.push(...metaItems);
-    }
-    if (builtInItems.length > 0) {
-      builtInItems[0] = { ...builtInItems[0], __sectionStart: 'built_in' };
-      for (let i = 1; i < builtInItems.length; i++) builtInItems[i] = { ...builtInItems[i], __sectionStart: null };
-      sorted.push(...builtInItems);
-    }
-    return sorted;
+  if (tab === "org") {
+    items = items.filter((m: any) => getSource(m) === "org" && m.org_id === orgIdentifier.value);
+  } else if (tab === "inherited") {
+    items = items.filter(
+      (m: any) =>
+        getSource(m) === "meta_org" ||
+        getSource(m) === "built_in" ||
+        (getSource(m) === "org" && m.org_id !== orgIdentifier.value),
+    );
   }
 
-  // "all" tab — group by source with section headers
-  const orgItems = items.filter((m: any) => getSource(m) === 'org' && m.org_id === orgIdentifier.value);
-  const metaItems = items.filter((m: any) => getSource(m) === 'meta_org' || (getSource(m) === 'org' && m.org_id !== orgIdentifier.value));
-  const builtInItems = items.filter((m: any) => getSource(m) === 'built_in');
-
-  const sorted: any[] = [];
-
-  // Add org items
-  sorted.push(...orgItems);
-
-  // Add meta section
-  if (metaItems.length > 0) {
-    metaItems[0] = { ...metaItems[0], __sectionStart: 'meta_org' };
-    for (let i = 1; i < metaItems.length; i++) {
-      metaItems[i] = { ...metaItems[i], __sectionStart: null };
-    }
-    sorted.push(...metaItems);
-  }
-
-  // Add built-in section
-  if (builtInItems.length > 0) {
-    builtInItems[0] = { ...builtInItems[0], __sectionStart: 'built_in' };
-    for (let i = 1; i < builtInItems.length; i++) {
-      builtInItems[i] = { ...builtInItems[i], __sectionStart: null };
-    }
-    sorted.push(...builtInItems);
-  }
-
-  // Ensure org items don't have section markers
-  for (const item of orgItems) {
-    item.__sectionStart = null;
-  }
-
-  return sorted;
+  return items;
 });
 
-/** Sort within each section group (q-table only receives parent rows). */
-function customSort(rows: any[], sortBy: string, descending: boolean) {
-  if (!sortBy) return rows;
+/** Names of parents that shadow at least one child — used to gate the warning row. */
+const shadowingParentNames = computed(() => {
+  const names = new Set<string>();
+  for (const m of models.value) {
+    if (m.children?.length) names.add(m.name);
+  }
+  return names;
+});
 
-  const compare = (a: any, b: any) => {
-    const aVal = (a[sortBy] ?? '').toString().toLowerCase();
-    const bVal = (b[sortBy] ?? '').toString().toLowerCase();
-    const cmp = aVal.localeCompare(bVal);
-    return descending ? -cmp : cmp;
-  };
-
-  const orgRows = rows.filter((r: any) => getSource(r) === 'org' && r.org_id === orgIdentifier.value);
-  const metaRows = rows.filter((r: any) => getSource(r) === 'meta_org' || (getSource(r) === 'org' && r.org_id !== orgIdentifier.value));
-  const builtInRows = rows.filter((r: any) => getSource(r) === 'built_in');
-
-  orgRows.sort(compare);
-  metaRows.sort(compare);
-  builtInRows.sort(compare);
-
-  [...orgRows, ...metaRows, ...builtInRows].forEach((r: any) => { r.__sectionStart = null; });
-  if (metaRows.length > 0) metaRows[0].__sectionStart = 'meta_org';
-  if (builtInRows.length > 0) builtInRows[0].__sectionStart = 'built_in';
-
-  return [...orgRows, ...metaRows, ...builtInRows];
+/** Shorten usage key for display: replace underscores with hyphens, drop trailing "_tokens". */
+function formatPriceKey(key: string): string {
+  return key.replace(/_tokens$/, "").replace(/_/g, "-");
 }
 
+function formatPerMillion(pricePerToken: number | undefined | null): string {
+  if (pricePerToken == null || pricePerToken === undefined) return "$0.00";
+  if (pricePerToken === 0) return "$0.00";
+  const perMillion = pricePerToken * 1_000_000;
+  return `$${perMillion.toFixed(2)}`;
+}
+
+// Mirrors the backend fallback rule: the default tier is the one restricted by
+// neither a usage condition nor a UTC time window (peak / off-peak pricing).
 function getDefaultTier(model: any) {
-  // Find the first unconditional tier (the fallback/default tier).
-  // The editor always stores the default as tiers[0], but inherited/built-in
-  // entries might have a different order.
-  const fallback = model.tiers?.find((t: any) => !t.condition);
+  const fallback = model.tiers?.find((t: any) => !t.condition && !t.utc_windows?.length);
   return fallback || model.tiers?.[0];
 }
 
-const PRICE_KEY_ORDER = ['input', 'output'];
+/** True when any tier is restricted to UTC hours — i.e. peak / off-peak pricing. */
+function hasTimeBasedTiers(model: any): boolean {
+  return !!model.tiers?.some((t: any) => t.utc_windows?.length);
+}
+
+/** All of the drawer row's tiers, in stored order (default tier included). */
+const drawerTiers = computed<any[]>(() => pricingDialogRow.value?.tiers ?? []);
+
+/** A tier's windows in the user's timezone, or "" when that adds nothing (UTC). */
+function tierWindowsLocal(tier: any): string {
+  return formatUtcWindowsInTz(tier?.utc_windows ?? [], store.state.timezone);
+}
+
+const PRICE_KEY_ORDER = ["input", "output"];
 
 function sortedPriceEntries(prices: Record<string, number>): [string, number][] {
   return Object.entries(prices).sort(([a], [b]) => {
@@ -889,73 +930,37 @@ function getOverflowCount(model: any): number {
   return Math.max(0, total - MAX_VISIBLE_PRICES);
 }
 
-// ── Parent-children expand/collapse ──────────────────────────────────────────
-
-const expandedParents = ref(new Set<string>());
-
-function toggleExpand(id: string) {
-  const next = new Set(expandedParents.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  expandedParents.value = next;
-}
-
-
-/** Shorten usage key for display: replace underscores with hyphens, drop trailing "_tokens". */
-function formatPriceKey(key: string): string {
-  return key.replace(/_tokens$/, '').replace(/_/g, '-');
-}
-
-function getPriceKeyColorClass(key: string): string {
-  const k = key.toLowerCase();
-  if (k.includes('input')) return 'badge-blue';
-  if (k.includes('output')) return 'badge-green';
-  // Hash-based color for all other arbitrary keys
-  const palette = ['badge-cyan', 'badge-purple', 'badge-pink', 'badge-orange', 'badge-amber', 'badge-violet', 'badge-rose', 'badge-teal', 'badge-indigo'];
-  let hash = 0;
-  for (let i = 0; i < key.length; i++) {
-    hash = ((hash << 5) - hash) + key.charCodeAt(i);
-    hash = hash & hash;
-  }
-  return palette[Math.abs(hash) % palette.length];
-}
-
-function formatPerMillion(pricePerToken: number | undefined | null): string {
-  if (pricePerToken == null || pricePerToken === undefined) return "$0.00";
-  if (pricePerToken === 0) return "$0.00";
-  const perMillion = pricePerToken * 1_000_000;
-  return `$${perMillion.toFixed(2)}`;
-}
-
-const orgIdentifier = computed(
-  () => store.state.selectedOrganization?.identifier || ""
-);
-
 const ooLogo = computed(() =>
-  store.state.theme === "dark"
+  isDark.value
     ? getImageURL("openobserve_favicon_dark.ico")
-    : getImageURL("images/common/openobserve_favicon.png")
+    : getImageURL("images/common/openobserve_favicon.png"),
 );
 
-/** Show error notification only for non-403 errors.
- *  403 errors are already handled by the global HTTP interceptor (persistent top banner). */
 function notifyError(prefix: string, e: any) {
   if (e?.response?.status === 403) return;
   const msg = e?.response?.data?.message || e?.message || t("modelPricing.errUnknown");
-  q.notify({ type: "negative", message: `${prefix}: ${msg}`, position: "bottom", timeout: 5000 });
+  toast({
+    variant: "error",
+    message: t("toastMessages.settings.message", { prefix: prefix, message: msg }),
+    timeout: 5000,
+  });
 }
 
-async function fetchModels() {
-  loading.value = true;
-  try {
-    const res = await modelPricingService.list(orgIdentifier.value);
-    models.value = res.data || [];
-  } catch (e: any) {
-    notifyError(t("modelPricing.errLoadModels"), e);
-  } finally {
-    loading.value = false;
-  }
+// Bound to the refresh button and to child "list changed" events: both must
+// reach the server, and a named handler keeps the event payload out of `force`.
+const refreshModels = () => fetchModels(true);
+
+// `force` is only meaningful for an explicit refresh now: a write that
+// invalidates the model-pricing scope repaints these rows on its own.
+async function fetchModels(force = false) {
+  if (force) await modelsQuery.refetch();
 }
+
+// The query owns its failure, so this reports it once per error however the
+// read was triggered.
+watch(modelsQuery.error, (e: any) => {
+  if (e) notifyError(t("modelPricing.errLoadModels"), e);
+});
 
 function openEditor(model: any) {
   if (model) {
@@ -973,16 +978,15 @@ function openEditor(model: any) {
 
 async function toggleEnabled(model: any, enabled: boolean) {
   try {
-    // Strip internal UI fields before sending to API
     const { __sectionStart, ...clean } = model;
     const updated = { ...clean, enabled };
     await modelPricingService.update(orgIdentifier.value, model.id, updated);
-    await fetchModels(); // refetch to reflect server state
+    await fetchModels(true);
     const displayName = model.name.length > 30 ? model.name.slice(0, 30) + "…" : model.name;
     const message = enabled
       ? t("modelPricing.modelEnabledNotif", { name: displayName })
       : t("modelPricing.modelDisabledNotif", { name: displayName });
-    q.notify({ type: "positive", message, position: "bottom", timeout: 3000 });
+    toast({ variant: "success", message });
   } catch (e: any) {
     notifyError(t("modelPricing.errUpdate"), e);
   }
@@ -991,7 +995,11 @@ async function toggleEnabled(model: any, enabled: boolean) {
 function duplicateModel(model: any) {
   router.push({
     name: "modelPricingEditor",
-    query: { org_identifier: orgIdentifier.value, id: model.id, duplicate: "true" },
+    query: {
+      org_identifier: orgIdentifier.value,
+      id: model.id,
+      duplicate: "true",
+    },
   });
 }
 
@@ -1003,8 +1011,17 @@ function confirmDelete(model: any) {
     onConfirm: async () => {
       try {
         await modelPricingService.delete(orgIdentifier.value, model.id);
-        q.notify({ type: "positive", message: t("modelPricing.modelPricingDeleted"), position: "bottom", timeout: 3000 });
-        await fetchModels();
+        toast({
+          variant: "success",
+          message: t("modelPricing.modelPricingDeleted"),
+        });
+        // Drop the row from the cache first so it disappears now, not when the
+        // refetch lands; the forced reload re-persists the corrected list.
+        queryClient.setQueriesData(
+          { queryKey: modelPricingKeys.all(orgIdentifier.value) },
+          (list: any) => (Array.isArray(list) ? list.filter((m: any) => m.id !== model.id) : list),
+        );
+        await fetchModels(true);
       } catch (e: any) {
         notifyError(t("modelPricing.errDelete"), e);
       }
@@ -1027,8 +1044,11 @@ async function refreshBuiltIn() {
   refreshing.value = true;
   try {
     await modelPricingService.refreshBuiltIn(orgIdentifier.value);
-    q.notify({ type: "positive", message: t("modelPricing.builtInRefreshed"), position: "bottom", timeout: 3000 });
-    await fetchModels();
+    toast({
+      variant: "success",
+      message: t("modelPricing.builtInRefreshed"),
+    });
+    await fetchModels(true);
   } catch (e: any) {
     notifyError(t("modelPricing.errRefresh"), e);
   } finally {
@@ -1036,32 +1056,13 @@ async function refreshBuiltIn() {
   }
 }
 
-function exportModel(model: any) {
-  const exportData = {
-    name: model.name,
-    match_pattern: model.match_pattern,
-    enabled: model.enabled,
-    tiers: model.tiers,
-    sort_order: model.sort_order ?? 0,
-    valid_from: model.valid_from ?? null,
-  };
-  const blob = new Blob([JSON.stringify(exportData, null, 2)], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `${model.name}.json`;
-  link.click();
-  URL.revokeObjectURL(url);
-}
-
 function exportSelected() {
-  const selected = allModels.value.filter(
-    (m: any) => selectedIds.value.includes(m.id)
-  );
+  const selected = allModels.value.filter((m: any) => selectedIds.value.includes(m.id));
   if (selected.length === 0) {
-    q.notify({ type: "warning", message: t("modelPricing.noModelsSelected"), position: "bottom", timeout: 3000 });
+    toast({
+      variant: "warning",
+      message: t("modelPricing.noModelsSelected"),
+    });
     return;
   }
   const exportData = selected.map((m: any) => ({
@@ -1090,21 +1091,31 @@ function confirmDeleteSelected() {
     title: t("modelPricing.confirmDeleteSelectedTitle"),
     message: t("modelPricing.confirmDeleteSelectedMessage", { count }),
     onConfirm: async () => {
-      let successCount = 0;
-      for (const id of selectedIds.value) {
-        const modelEntry = allModels.value.find((m: any) => m.id === id);
-        const modelName = modelEntry?.name || id;
-        try {
-          await modelPricingService.delete(orgIdentifier.value, id);
-          successCount++;
-        } catch (e: any) {
-          notifyError(t("modelPricing.errDeleteNamed", { name: modelName }), e);
+      bulkDeleteLoading.value = true;
+      try {
+        let successCount = 0;
+        for (const id of selectedIds.value) {
+          const modelEntry = allModels.value.find((m: any) => m.id === id);
+          const modelName = modelEntry?.name || id;
+          try {
+            await modelPricingService.delete(orgIdentifier.value, id);
+            successCount++;
+          } catch (e: any) {
+            notifyError(t("modelPricing.errDeleteNamed", { name: modelName }), e);
+          }
         }
-      }
-      if (successCount > 0) {
-        q.notify({ type: "positive", message: t("modelPricing.deletedModelsNotif", { count: successCount }), position: "bottom", timeout: 3000 });
-        selectedIds.value = [];
-        await fetchModels();
+        if (successCount > 0) {
+          toast({
+            variant: "success",
+            message: t("modelPricing.deletedModelsNotif", {
+              count: successCount,
+            }),
+          });
+          selectedIds.value = [];
+          await fetchModels(true);
+        }
+      } finally {
+        bulkDeleteLoading.value = false;
       }
     },
   };
@@ -1123,413 +1134,13 @@ onActivated(() => {
     showImportModelPricingPage.value = true;
   }
 });
+
+useShortcuts([
+  {
+    id: "modelPricingRefresh",
+    handler: () => {
+      if (!isInputFocused()) fetchModels(true);
+    },
+  },
+]);
 </script>
-
-<style lang="scss">
-.bottom-btn {
-  display: flex;
-  align-items: center;
-  width: 100%;
-}
-
-.o2-table-cell-content {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  width: 100%;
-  display: block;
-}
-
-.section-header-cell {
-  padding: 10px 16px;
-  background: rgba(0, 0, 0, 0.04);
-  border-bottom: 1px solid var(--o2-border-color);
-
-  .body--dark & {
-    background: rgba(255, 255, 255, 0.06);
-  }
-}
-
-.section-header-title {
-  font-weight: 700;
-  opacity: 0.8;
-}
-
-.section-header-subtitle {
-  opacity: 0.6;
-}
-
-/* Add pattern code block styling */
-.pattern-code {
-  background: rgba(0, 0, 0, 0.04);
-  border: 1px solid var(--o2-border-color);
-  padding: 2px 6px;
-  border-radius: 4px;
-  color: inherit;
-}
-
-body.body--dark .pattern-code {
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.pricing-section-label {
-  font-size: 12px;
-  font-weight: 600;
-  margin-bottom: 6px;
-  color: #555;
-
-  .body--dark & {
-    color: #aaa;
-  }
-}
-
-.pattern-code-panel {
-  display: block;
-  font-size: 13px;
-  padding: 6px 10px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 300px;
-  overflow-y: auto;
-}
-
-/* ── Dimension badges (pricing) ─────────────────────── */
-.dimension-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 400;
-  white-space: nowrap;
-  border: 1px solid #d1d5db;
-  color: inherit;
-}
-
-.badge-more {
-  background: #e5e7eb;
-  color: #6b7280;
-  font-weight: 500;
-  border: none;
-}
-
-body.body--dark .badge-more {
-  background: #4b5563;
-  color: #d1d5db;
-}
-
-
-/* ── Pricing detail side panel ────────────────────── */
-.pricing-dialog-panel {
-  width: 30vw !important;
-  min-width: 320px;
-  max-width: 100vw;
-  height: 100vh;
-  display: flex;
-  flex-direction: column;
-
-  .add-stream-header {
-    min-height: 64px;
-  }
-}
-
-.pricing-dialog-body {
-  flex: 1;
-  overflow-y: auto;
-}
-
-/* ── Pricing panel table (side panel) ──────────────── */
-.pricing-panel-table-wrap {
-  margin-top: 8px;
-  border: 1px solid var(--o2-border-color);
-  border-radius: 8px;
-  overflow: hidden;
-}
-
-.pricing-panel-table {
-  width: 100%;
-  border-collapse: collapse;
-
-  th {
-    font-size: 11px;
-    font-weight: 600;
-    opacity: 0.5;
-    text-align: left;
-    padding: 6px 14px;
-    background: rgba(0, 0, 0, 0.025);
-    border-bottom: 1px solid var(--o2-border-color);
-
-    .body--dark & { background: rgba(255, 255, 255, 0.04); }
-
-    &:last-child { text-align: right; }
-  }
-
-  td {
-    font-size: 13px;
-    padding: 8px 14px;
-    border-bottom: 1px solid var(--o2-border-color);
-
-    &:last-child {
-      text-align: right;
-      font-weight: 600;
-    }
-  }
-
-  tr:last-child td { border-bottom: none; }
-}
-
-/* ── Pricing overflow tooltip ──────────────────────── */
-.pricing-overflow-tooltip {
-  padding: 12px 16px;
-  min-width: 260px;
-}
-
-.pricing-breakdown-tooltip {
-  min-width: 240px;
-}
-
-.pricing-breakdown-title {
-  font-weight: 700;
-  font-size: 13px;
-  margin-bottom: 3px;
-}
-
-.pricing-breakdown-table {
-  width: 100%;
-  border-collapse: collapse;
-
-  th {
-    font-size: 11px;
-    font-weight: 600;
-    opacity: 0.65;
-    text-align: left;
-    padding: 0 16px 4px 0;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.15);
-
-    &:last-child {
-      text-align: right;
-      padding-right: 0;
-    }
-  }
-
-  td {
-    font-size: 12px;
-    padding: 2px 16px 2px 0;
-    border-bottom: none;
-
-    &:last-child {
-      text-align: right;
-      padding-right: 0;
-      font-weight: 500;
-    }
-  }
-
-  tr:last-child td {
-    border-bottom: none;
-  }
-}
-
-body.body--dark {
-  .dimension-badge {
-    color: #ffffff;
-    border-color: #4b5563;
-  }
-}
-
-/* ── Shadow banner row ─────────────────────────────────── */
-.o2-quasar-table .shadow-banner-row td {
-  height: 26px !important;
-}
-
-.shadow-banner-row td {
-  padding: 3px 12px !important;
-  border-top: none !important;
-  text-align: center;
-  font-size: 11px !important;
-  position: relative;
-  background: rgba(245, 158, 11, 0.06);
-  border-bottom: 1px solid rgba(245, 158, 11, 0.15) !important;
-  color: #92400e;
-  line-height: 1.5;
-
-  .body--dark & {
-    background: rgba(245, 158, 11, 0.08);
-    color: #fcd34d;
-    border-bottom-color: rgba(245, 158, 11, 0.2) !important;
-  }
-
-}
-
-.shadow-banner-tree-line {
-  position: absolute;
-  left: 54px;
-  top: 0;
-  bottom: 0;
-  width: 1.5px;
-  background-color: var(--q-primary);
-  opacity: 0.6;
-  z-index: 2;
-  pointer-events: none;
-}
-
-.shadow-banner-icon {
-  color: #f59e0b;
-  margin-right: 5px;
-  vertical-align: middle;
-  flex-shrink: 0;
-}
-
-/* ── Column header info icon ───────────────────────────── */
-.col-header-info-icon {
-  opacity: 0.35;
-  cursor: default;
-  vertical-align: middle;
-  &:hover { opacity: 0.7; }
-}
-
-/* ── Source icons (person / corporate_fare) ────────────── */
-.source-icon {
-  color: #757575;
-
-  .body--dark & {
-    color: #bdbdbd;
-  }
-}
-
-/* ── Shadowed pattern (strikethrough + dim) ────────────── */
-.shadowed-pattern {
-  opacity: 0.5;
-  text-decoration: line-through;
-  text-decoration-color: currentColor;
-}
-
-/* ── Shadowed icon (orange-ish, muted) ─────────────────── */
-.shadowed-icon {
-  color: #f59e0b; // amber-500
-  opacity: 0.85;
-
-  .body--dark & {
-    color: #fbbf24; // amber-400
-  }
-}
-
-/* ── Child (shadowed) rows ─────────────────────────────── */
-.child-pricing-row {
-  background: rgba(0, 0, 0, 0.015);
-
-  body.body--dark & {
-    background: rgba(255, 255, 255, 0.02);
-  }
-
-  td {
-    border-top: none !important;
-  }
-}
-
-/* ── Tree connector lines (SearchJobInspector style) ────── */
-
-// The name-column td — always position:relative so absolute children work
-.tree-name-cell {
-  position: relative;
-}
-
-
-// Expanded parent: draw a line from the chevron centre DOWN to the cell bottom
-.tree-parent-expanded.tree-name-cell::after {
-  content: '';
-  position: absolute;
-  left: 14px;
-  top: calc(50% + 11px);
-  bottom: 0;
-  width: 1.5px;
-  background-color: var(--q-primary);
-  opacity: 0.6;
-  z-index: 1;
-}
-
-// Child rows: vertical line top→bottom, horizontal connector at midpoint
-.tree-child.tree-name-cell {
-  // Vertical line — full height for non-last children
-  &::before {
-    content: '';
-    position: absolute;
-    left: 14px;
-    top: 0;
-    bottom: 0;
-    width: 1.5px;
-    background-color: var(--q-primary);
-    opacity: 0.6;
-    z-index: 1;
-  }
-
-  // Last child: vertical line only runs top→middle (no downward stub)
-  &.tree-last-child::before {
-    bottom: 50%;
-  }
-
-  // Horizontal connector from vertical line to content
-  &::after {
-    content: '';
-    position: absolute;
-    left: 15px;
-    top: 50%;
-    transform: translateY(-50%);
-    width: 18px;
-    height: 1.5px;
-    background-color: var(--q-primary);
-    opacity: 0.6;
-    z-index: 1;
-  }
-}
-
-// Icon wrapper — same fixed width as SearchJobInspector
-.tree-icon-wrapper {
-  width: 20px;
-  height: 20px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  margin-right: 4px;
-}
-
-.tree-expand-icon {
-  flex-shrink: 0;
-}
-
-// Content container — above the connector lines
-.tree-node-content {
-  position: relative;
-  z-index: 2;
-  min-height: 24px;
-}
-
-// Child row: indent the content so tree lines show on the left
-.tree-child-content {
-  padding-left: 44px;
-}
-
-// Junction dot — matches SearchJobInspector exactly
-// (rendered as a real element because ::before and ::after are used for the lines)
-.tree-dot-marker {
-  position: absolute;
-  left: 33px;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 7px;
-  height: 7px;
-  background-color: var(--q-primary);
-  opacity: 0.7;
-  border: 2px solid var(--q-background);
-  border-radius: 0; // square for leaf nodes (no deeper children)
-  z-index: 3;
-  pointer-events: none;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.1);
-}
-
-// Circular dot when the child itself also has children (matches SearchJobInspector's tree-is-parent)
-.tree-dot-marker.tree-dot-parent {
-  border-radius: 50%;
-}
-</style>

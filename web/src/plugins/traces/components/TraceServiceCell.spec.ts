@@ -15,7 +15,7 @@
 
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
+import { createStore } from "vuex";
 
 const mockServiceColors: Record<string, string> = {
   frontend: "#4caf50",
@@ -41,15 +41,13 @@ vi.mock("@/composables/useTraces", () => ({
 }));
 
 vi.mock("@/utils/traces/convertTraceData", () => ({
-  getServiceIconDataUrl: vi
-    .fn()
-    .mockReturnValue("data:image/svg+xml;base64,TEST"),
+  getServiceIconDataUrl: vi.fn().mockReturnValue("data:image/svg+xml;base64,TEST"),
 }));
 
 import TraceServiceCell from "./TraceServiceCell.vue";
 import { getServiceIconDataUrl } from "@/utils/traces/convertTraceData";
 
-installQuasar();
+const store = createStore({ state: { theme: "light" } });
 
 const makeItem = (overrides: Record<string, any> = {}) => ({
   service_name: "frontend",
@@ -68,19 +66,26 @@ describe("TraceServiceCell", () => {
 
   describe("rendering", () => {
     it("mounts without errors", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
       expect(wrapper.exists()).toBe(true);
     });
 
     it("renders the service row container", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
-      expect(wrapper.find('[data-test="trace-row-service"]').exists()).toBe(
-        true,
-      );
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
+      expect(wrapper.find('[data-test="trace-row-service"]').exists()).toBe(true);
     });
 
     it("renders service name", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
       const name = wrapper.find('[data-test="trace-row-service-name"]');
       expect(name.exists()).toBe(true);
       expect(name.text()).toBe("frontend");
@@ -89,7 +94,10 @@ describe("TraceServiceCell", () => {
     // TraceServiceCell only renders service name and icon.
     // Operation name is rendered by a separate column cell — not this component.
     it.skip("renders operation name", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
       const op = wrapper.find('[data-test="trace-row-operation-name"]');
       expect(op.exists()).toBe(true);
       expect(op.text()).toBe("GET /api/v1/users");
@@ -98,20 +106,27 @@ describe("TraceServiceCell", () => {
 
   describe("service icon", () => {
     it("should render the service icon img", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
-      expect(
-        wrapper.find('[data-test="trace-row-service-icon"]').exists(),
-      ).toBe(true);
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
+      expect(wrapper.find('[data-test="trace-row-service-icon"]').exists()).toBe(true);
     });
 
     it("should set the icon src from getServiceIconDataUrl", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
       const img = wrapper.find('[data-test="trace-row-service-icon"]');
       expect(img.attributes("src")).toBe("data:image/svg+xml;base64,TEST");
     });
 
     it("should call getServiceIconDataUrl with service name and color", () => {
-      wrapper = mount(TraceServiceCell, { props: { item: makeItem() } });
+      wrapper = mount(TraceServiceCell, {
+        props: { item: makeItem() },
+        global: { plugins: [store] },
+      });
       expect(vi.mocked(getServiceIconDataUrl)).toHaveBeenCalledWith(
         "frontend",
         expect.any(Boolean),
@@ -119,9 +134,48 @@ describe("TraceServiceCell", () => {
       );
     });
 
+    it("should prefer inferred service system when available", () => {
+      wrapper = mount(TraceServiceCell, {
+        props: {
+          item: makeItem({
+            service_name: "sso",
+            infer_service_system: "mysql",
+            infer_service_type: "database",
+          }),
+        },
+        global: { plugins: [store] },
+      });
+
+      expect(vi.mocked(getServiceIconDataUrl)).toHaveBeenCalledWith(
+        "mysql",
+        expect.any(Boolean),
+        "#9e9e9e",
+      );
+    });
+
+    it("should use inferred service type when system is unavailable", () => {
+      wrapper = mount(TraceServiceCell, {
+        props: {
+          item: makeItem({
+            service_name: "sso",
+            infer_service_type: "database",
+          }),
+        },
+        global: { plugins: [store] },
+      });
+
+      expect(vi.mocked(getServiceIconDataUrl)).toHaveBeenCalledWith(
+        "sso",
+        expect.any(Boolean),
+        "#9e9e9e",
+        "database",
+      );
+    });
+
     it("should use fallback color #9e9e9e for unknown service", () => {
       wrapper = mount(TraceServiceCell, {
         props: { item: makeItem({ service_name: "unknown-svc" }) },
+        global: { plugins: [store] },
       });
       expect(vi.mocked(getServiceIconDataUrl)).toHaveBeenCalledWith(
         "unknown-svc",
@@ -137,10 +191,9 @@ describe("TraceServiceCell", () => {
         props: {
           item: makeItem({ services: { frontend: { duration: 100 } } }),
         },
+        global: { plugins: [store] },
       });
-      expect(
-        wrapper.find('[data-test="trace-row-extra-services"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="trace-row-extra-services"]').exists()).toBe(false);
     });
 
     it("does not count root service as an extra service", () => {
@@ -151,10 +204,9 @@ describe("TraceServiceCell", () => {
             services: { frontend: { duration: 100 } },
           }),
         },
+        global: { plugins: [store] },
       });
-      expect(
-        wrapper.find('[data-test="trace-row-extra-services"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="trace-row-extra-services"]').exists()).toBe(false);
     });
   });
 
@@ -162,22 +214,18 @@ describe("TraceServiceCell", () => {
     it("handles undefined services gracefully", () => {
       wrapper = mount(TraceServiceCell, {
         props: { item: { service_name: "frontend", operation_name: "op" } },
+        global: { plugins: [store] },
       });
-      expect(wrapper.find('[data-test="trace-row-service-name"]').text()).toBe(
-        "frontend",
-      );
-      expect(
-        wrapper.find('[data-test="trace-row-extra-services"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="trace-row-service-name"]').text()).toBe("frontend");
+      expect(wrapper.find('[data-test="trace-row-extra-services"]').exists()).toBe(false);
     });
 
     it("handles empty services object", () => {
       wrapper = mount(TraceServiceCell, {
         props: { item: makeItem({ services: {} }) },
+        global: { plugins: [store] },
       });
-      expect(
-        wrapper.find('[data-test="trace-row-extra-services"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="trace-row-extra-services"]').exists()).toBe(false);
     });
   });
 });

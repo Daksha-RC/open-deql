@@ -17,8 +17,10 @@ import store from "../stores";
 import type { AxiosInstance } from "axios";
 import axios from "axios";
 import config from "../aws-exports";
-import { Notify } from "quasar";
 import { useLocalUserInfo, useLocalCurrentUser } from "@/utils/zincutils";
+import { addUnauthorizedError } from "@/composables/useUnauthorizedErrorGrouper";
+import { usePasswordReset } from "@/composables/usePasswordReset";
+import { isPasswordResetError } from "@/utils/passwordResetErrors";
 
 // Shared refresh state — ensures only one dex_refresh request is in-flight
 // at a time across all axios instances and streaming fetch requests. All
@@ -46,10 +48,7 @@ export const attemptTokenRefresh = (requestUrl: string = ""): Promise<void> => {
     return Promise.reject(new Error("Cloud environment: direct logout"));
   }
 
-  if (
-    config.isEnterprise == "true" &&
-    (store.state as any).zoConfig.sso_enabled
-  ) {
+  if (config.isEnterprise == "true" && (store.state as any).zoConfig.sso_enabled) {
     if (!refreshPromise) {
       const refreshInstance = axios.create({
         withCredentials: true,
@@ -61,6 +60,7 @@ export const attemptTokenRefresh = (requestUrl: string = ""): Promise<void> => {
           if (res.status !== 200) {
             return Promise.reject(new Error("Refresh returned non-200"));
           }
+          return undefined;
         })
         .catch(() => {
           return refreshInstance
@@ -109,23 +109,18 @@ const http = ({ headers } = {} as any) => {
       return response;
     },
     function (error) {
+      // Ahead of the status switch: a reset-required 403 is a policy state, not an authorization failure.
+      if (isPasswordResetError(error)) {
+        usePasswordReset().open(error.response.data.reason);
+        // A blocked page fires many requests behind an undismissable dialog; one toast per rejection would stack.
+        return new Promise(() => {});
+      }
       if (error && error.response && error.response.status) {
         switch (error.response.status) {
           case 400:
-            console.log(
-              JSON.stringify(error.response.data["error"] || "Bad Request"),
-            );
             break;
           case 401:
-            console.log(
-              JSON.stringify(
-                error.response.data["error"] || "Invalid credentials",
-              ),
-            );
-            if (
-              config.isCloud == "true" &&
-              !error.request.responseURL.includes("/auth/login")
-            ) {
+            if (config.isCloud == "true" && !error.request.responseURL.includes("/auth/login")) {
               store.dispatch("logout");
               useLocalCurrentUser("", true);
               useLocalUserInfo("", true);
@@ -135,10 +130,7 @@ const http = ({ headers } = {} as any) => {
             // Delegate to the shared refresh helper — it owns the URL exclusion
             // checks and the logout-on-failure path. Retry the original request
             // once the token is refreshed.
-            else if (
-              config.isEnterprise == "true" &&
-              (store.state as any).zoConfig.sso_enabled
-            ) {
+            else if (config.isEnterprise == "true" && (store.state as any).zoConfig.sso_enabled) {
               return attemptTokenRefresh(error.config.url)
                 .then(() => instance.request(error.config))
                 .catch(() => Promise.reject(error));
@@ -154,100 +146,13 @@ const http = ({ headers } = {} as any) => {
             break;
           case 403:
             if (config.isEnterprise == "true" || config.isCloud == "true") {
-              const backendError = error.response?.data?.["error"];
-              let resourceHint = "";
-              try {
-                const urlPath =
-                  error.request?.responseURL || error.config?.url || "";
-                // Dynamically extract the most specific resource name from the URL.
-                //
-                // URL families handled:
-                //   Standard:  /api/{org}/{resource}/{id}/{sub-resource}/...
-                //   Versioned: /api/v2/{org}/{resource}/{id}/{sub-resource}/...
-                //   Meta:      /api/_meta/{module}/{action}  (no org segment)
-                //
-                // Algorithm:
-                //   1. Skip the leading "api" segment.
-                //   2. Skip an optional version prefix (v1, v2, …).
-                //   3. If the next segment begins with "_", it is a special namespace
-                //      (e.g. _meta) with no org — use the last remaining segment.
-                //   4. Otherwise the next segment is the org identifier — skip it,
-                //      then collect everything that does NOT look like an ID
-                //      (UUID, plain integer, or e-mail address) and use the last one.
-                const segments = new URL(urlPath).pathname
-                  .split("/")
-                  .filter(Boolean);
-                // segments[0] is always "api"
-                let idx = 1;
-
-                // Step 2: skip version prefix
-                if (/^v\d+$/.test(segments[idx] ?? "")) idx++;
-
-                const candidate = segments[idx];
-                if (candidate?.startsWith("_")) {
-                  // Step 3: special namespace (_meta, etc.) — no org segment
-                  const remaining = segments.slice(idx + 1);
-                  if (remaining.length > 0) {
-                    resourceHint = ` on "${remaining[remaining.length - 1]}"`;
-                  }
-                } else if (candidate) {
-                  // Step 4: skip the org identifier
-                  idx++;
-                  const resourcePath = segments.slice(idx);
-                  const uuidRe =
-                    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-                  const isId = (s: string) =>
-                    s.includes("@") || /^\d+$/.test(s) || uuidRe.test(s);
-                  const resourceNames = resourcePath.filter((s) => !isId(s));
-                  if (resourceNames.length > 0) {
-                    // Map known multi-segment paths to friendly names
-                    const joined = resourceNames.join("/");
-                    const friendlyNames: Record<string, string> = {
-                      "llm/models": "LLM Model Pricing",
-                      "llm/models/built-in": "LLM Model Pricing",
-                      "llm/models/refresh-built-in": "LLM Model Pricing",
-                    };
-                    const friendly = friendlyNames[joined];
-                    resourceHint = ` on "${friendly || resourceNames[resourceNames.length - 1]}"`;
-                  }
-                }
-              } catch {
-                // ignore URL parse errors
-              }
-              const notifyMessage = backendError
-                ? `Unauthorized Access: ${backendError}`
-                : `Unauthorized Access: You are not authorized to perform this operation${resourceHint}. Please contact your administrator.`;
-              Notify.create({
-                message: notifyMessage,
-                timeout: 0, // This ensures the notification does not close automatically
-                color: "negative", // Customize color as needed
-                position: "top",
-                actions: [
-                  {
-                    color: "white",
-                    icon: "close",
-                    size: "sm",
-                  },
-                ],
-              });
+              const responseUrl = error.request?.responseURL || error.config?.url || "";
+              addUnauthorizedError(responseUrl);
             }
-            console.log(
-              JSON.stringify(
-                error.response.data["error"] || "Unauthorized Access",
-              ),
-            );
             break;
           case 404:
-            console.log(
-              JSON.stringify(error.response.data["error"] || "Not Found"),
-            );
             break;
           case 500:
-            console.log(
-              JSON.stringify(
-                error.response.data["error"] || "Invalid ServerError",
-              ),
-            );
             break;
           default:
           // noop

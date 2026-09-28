@@ -18,24 +18,35 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 <!-- eslint-disable vue/attribute-hyphenation -->
 <template>
   <div
-    class="card-container"
-    :class="store.state.printMode ? '' : 'tw:h-full tw:overflow-y-auto'"
+    :class="[
+      'bg-surface-base',
+      frame ? 'border-border-default rounded-default border' : '',
+      store.state.printMode ? '' : 'h-full overflow-y-auto',
+    ]"
   >
-    <div class="tw:px-[0.625rem] render-dashboard-charts-container">
+    <div class="px-page-edge render-dashboard-charts-container pt-2">
       <!-- flag to check if dashboardVariablesAndPanelsDataLoaded which is used while print mode-->
       <span
+        class="hidden"
         v-if="isDashboardVariablesAndPanelsDataLoadedDebouncedValue"
         id="dashboardVariablesAndPanelsDataLoaded"
-        style="display: none"
       >
       </span>
 
+      <!-- Tab List -->
+      <TabList
+        v-if="showTabs && selectedTabId !== null"
+        class="mt-2"
+        :dashboardData="dashboardData"
+        :viewOnly="viewOnly"
+        @refresh="refreshDashboard"
+      />
+
+      <!-- Below the tabs: these scope the ACTIVE tab, and above them the strip both read as page chrome and shifted the tab bar as its height changed per tab. -->
       <VariablesValueSelector
-        v-if="
-          globalVariables.length > 0 ||
-          dashboardData?.variables?.showDynamicFilters
-        "
+        v-if="globalVariables.length > 0 || dashboardData?.variables?.showDynamicFilters"
         :scope="'global'"
+        :tabId="selectedTabId"
         :variablesConfig="{ list: globalVariables }"
         :variablesManager="variablesManager"
         :selectedTimeDate="currentTimeObj['__global']"
@@ -44,20 +55,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         data-test="global-variables-selector"
       />
 
-      <!-- Tab List -->
-      <TabList
-        v-if="showTabs && selectedTabId !== null"
-        class="q-mt-sm"
-        :dashboardData="dashboardData"
-        :viewOnly="viewOnly"
-        @refresh="refreshDashboard"
-      />
-
       <!-- Tab-scoped Variables (for active tab, if using manager) -->
       <VariablesValueSelector
-        v-if="
-          variablesManager && currentTabVariables.length > 0 && selectedTabId
-        "
+        v-if="variablesManager && currentTabVariables.length > 0 && selectedTabId"
         :scope="'tabs'"
         :tabId="selectedTabId"
         :variablesConfig="{ list: currentTabVariables }"
@@ -68,33 +68,26 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       />
 
       <slot name="before_panels" />
-      <div class="displayDiv">
+      <div class="displayDiv clear-both mt-2 h-auto min-h-0">
         <div
-          v-if="
-            store.state.printMode &&
-            panels.length === 1 &&
-            panels[0]?.type === 'table'
-          "
-          style="height: 100%; width: 100%"
+          class="h-full w-full"
+          v-if="store.state.printMode && panels.length === 1 && panels[0]?.type === 'table'"
         >
           <!-- Panel-scoped Variables (if any, if using manager) -->
           <VariablesValueSelector
-            v-if="
-              variablesManager && getPanelVariables(panels[0].id).length > 0
-            "
+            v-if="variablesManager && getPanelVariables(panels[0].id).length > 0"
             :scope="'panels'"
             :panelId="panels[0].id"
             :tabId="selectedTabId"
             :variablesConfig="{ list: getPanelVariables(panels[0].id) }"
             :variablesManager="variablesManager"
-            :selectedTimeDate="
-              currentTimeObj?.[panels[0].id] || currentTimeObj['__global'] || {}
-            "
+            :selectedTimeDate="currentTimeObj?.[panels[0].id] || currentTimeObj['__global'] || {}"
             :initialVariableValues="initialVariableValues"
             data-test="panel-variables-selector"
           />
 
           <PanelContainer
+            class="h-full w-full"
             @onDeletePanel="onDeletePanel"
             @onViewPanel="onViewPanel"
             :viewOnly="viewOnly"
@@ -108,9 +101,9 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
               {}
             "
             :shouldRefreshWithoutCache="
-              (panels?.[0]?.id
-                ? shouldRefreshWithoutCacheObj?.[panels?.[0]?.id]
-                : undefined) || false
+              (panels?.[0]?.id ? shouldRefreshWithoutCacheObj?.[panels?.[0]?.id] : undefined) ??
+              shouldRefreshWithoutCacheObj?.__global ??
+              false
             "
             :variablesData="getMergedVariablesForPanel(panels[0]?.id)"
             :currentVariablesData="getLiveVariablesForPanel(panels[0]?.id)"
@@ -118,11 +111,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :searchType="searchType"
             :runId="runId"
             :tabId="selectedTabId"
-            :tabName="
-              dashboardData?.tabs?.find(
-                (tab: any) => tab.tabId === selectedTabId,
-              )?.name
-            "
+            :tabName="dashboardData?.tabs?.find((tab: any) => tab.tabId === selectedTabId)?.name"
             :dashboardName="dashboardName"
             :folderName="folderName"
             :showLegendsButton="showLegendsButton"
@@ -134,10 +123,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             @update:initial-variable-values="updateInitialVariableValues"
             @onEditLayout="openEditLayout"
             @contextmenu="$emit('chart:contextmenu', $event)"
-            style="height: 100%; width: 100%"
+            @send-to-ai-chat="(value, append) => $emit('sendToAiChat', value, append)"
           />
         </div>
-        <div v-else ref="gridStackContainer" class="grid-stack">
+        <div
+          v-else-if="panels.length > 0"
+          ref="gridStackContainer"
+          class="grid-stack m-0.5 bg-transparent"
+          :class="{ 'grid-interacting': isGridInteracting }"
+        >
           <div
             v-for="item in panels"
             :key="item.id + selectedTabId"
@@ -148,12 +142,41 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             :gs-h="getPanelLayout(item, 'h')"
             :gs-min-w="getMinimumWidth(item.type)"
             :gs-min-h="getMinimumHeight(item.type)"
-            class="grid-stack-item gridBackground"
-            :class="store.state.theme == 'dark' ? 'dark' : ''"
+            class="grid-stack-item gridBackground rounded-default border-border-default! bg-transparent!"
+            :class="{ 'panel-section-header': isSectionHeader(item) }"
           >
             <div class="grid-stack-item-content">
+              <!-- A section heading LABELS the panels below it — it is a layout element,
+                   not a panel. Rendering it through PanelContainer gave it the full card
+                   treatment (outer border, title bar with its own bottom rule, and an empty
+                   body where the chart would go), so the heading read as a broken tile.
+                   Emit the bare heading instead; the CSS below strips the grid item's card
+                   border to match. -->
+              <h2
+                v-if="isSectionHeader(item)"
+                class="flex h-full items-end"
+                :title="item.title"
+                :data-test="`dashboard-section-header-${item.id}`"
+              >
+                <!-- truncate has to sit on an inline child: on the flex parent the text
+                     is an anonymous flex item and never picks up the ellipsis. -->
+                <span class="truncate">{{ item.title }}</span>
+              </h2>
+              <!-- Off-screen panels render this lightweight placeholder; the
+                   real panel mounts only when it comes near the viewport.
+                   Mounting everything up front froze large dashboards. -->
+              <div
+                v-else-if="!shouldMountPanel(item.id)"
+                class="drag-cancel flex h-full flex-col p-2"
+                :data-test="`dashboard-panel-placeholder-${item.id}`"
+              >
+                <span class="text-text-secondary truncate text-sm" :title="item.title">
+                  {{ item.title }}
+                </span>
+                <div class="bg-surface-subtle rounded-default mt-2 min-h-0 flex-1"></div>
+              </div>
               <!-- Panel with Panel-Level Variables -->
-              <div class="panel-with-variables">
+              <div v-else class="panel-with-variables flex h-full flex-col">
                 <!-- Original Panel Container -->
 
                 <PanelContainer
@@ -164,13 +187,11 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   :dashboardId="dashboardData.dashboardId"
                   :folderId="folderId"
                   :reportId="reportId"
-                  :selectedTimeDate="
-                    currentTimeObj?.[item?.id] ||
-                    currentTimeObj['__global'] ||
-                    {}
-                  "
+                  :selectedTimeDate="currentTimeObj?.[item?.id] || currentTimeObj['__global'] || {}"
                   :shouldRefreshWithoutCache="
-                    shouldRefreshWithoutCacheObj?.[item?.id] || false
+                    shouldRefreshWithoutCacheObj?.[item?.id] ??
+                    shouldRefreshWithoutCacheObj?.__global ??
+                    false
                   "
                   :variablesData="getMergedVariablesForPanel(item.id)"
                   :currentVariablesData="getLiveVariablesForPanel(item.id)"
@@ -181,9 +202,7 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   :runId="runId"
                   :tabId="selectedTabId"
                   :tabName="
-                    dashboardData?.tabs?.find(
-                      (tab: any) => tab.tabId === selectedTabId,
-                    )?.name
+                    dashboardData?.tabs?.find((tab: any) => tab.tabId === selectedTabId)?.name
                   "
                   :dashboardName="dashboardName"
                   :folderName="folderName"
@@ -198,25 +217,26 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                   @onEditLayout="openEditLayout"
                   @update:runId="updateRunId"
                   @contextmenu="$emit('chart:contextmenu', $event)"
+                  @send-to-ai-chat="(value, append) => $emit('sendToAiChat', value, append)"
                 >
                   <!-- Panel-Level Variables (shown below drag-allow section) -->
                   <template #panel-variables>
                     <div
-                      class="panel-variables-container q-px-xs q-py-xs"
+                      class="panel-variables-container px-1"
                       :data-test="`dashboard-panel-${item.id}-variables`"
                     >
                       <!-- Panel Time Picker (NEW) -->
                       <div
                         v-if="hasPanelTime(item) && panelTimeValues[item.id]"
-                        class="panel-time-picker-wrapper q-mb-sm"
+                        class="panel-time-picker-wrapper mt-1 mb-2"
                         :data-test="`dashboard-panel-${item.id}-time-picker`"
                       >
                         <DateTimePickerDashboard
-                          v-model="panelTimeValues[item.id]"
+                          :modelValue="panelTimeValues[item.id]"
                           :auto-apply-dashboard="false"
                           size="sm"
                           class="panel-time-picker-widget"
-                          @update:modelValue="onPanelTimeApply(item.id)"
+                          @update:modelValue="(val) => onPanelTimeApply(item.id, val)"
                           :data-test="`panel-time-picker-${item.id}`"
                           :ref="
                             (el) => {
@@ -227,22 +247,17 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
                       </div>
 
                       <VariablesValueSelector
-                        v-if="
-                          variablesManager &&
-                          getPanelVariables(item.id).length > 0
-                        "
+                        v-if="variablesManager && getPanelVariables(item.id).length > 0"
                         :scope="'panels'"
                         :panelId="item.id"
                         :tabId="selectedTabId"
                         :variablesConfig="{ list: getPanelVariables(item.id) }"
                         :variablesManager="variablesManager"
                         :selectedTimeDate="
-                          currentTimeObj?.[item.id] ||
-                          currentTimeObj['__global'] ||
-                          {}
+                          currentTimeObj?.[item.id] || currentTimeObj['__global'] || {}
                         "
                         :initialVariableValues="initialVariableValues"
-                        :style="{ marginBottom: '8px' }"
+                        class="panel-variables-margin mb-2"
                         data-test="panel-variables-selector"
                       />
                     </div>
@@ -255,13 +270,18 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
       </div>
 
       <!-- view panel dialog -->
-      <q-dialog
-        v-model="showViewPanel"
-        :no-route-dismiss="true"
-        full-height
-        full-width
+      <ODialog
+        data-test="render-dashboard-charts-view-panel-dialog"
+        v-model:open="showViewPanel"
+        :width="98"
+        :show-close="false"
       >
-        <q-card style="overflow: hidden">
+        <!-- Explicit height wrapper: fills the dialog body's available space
+             (90vh − body padding) so ViewPanel can use height:100% and
+             flex:1 works all the way down without causing a body scrollbar. -->
+        <div
+          class="view-panel-height-wrapper -my-dialog-content-py -mx-dialog-content-px flex h-[calc(90vh-var(--spacing-dialog-content-py)*2)] flex-col overflow-hidden"
+        >
           <ViewPanel
             :folderId="folderId"
             :dashboardId="dashboardData.dashboardId"
@@ -272,11 +292,15 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             @close-panel="() => (showViewPanel = false)"
             @update:initial-variable-values="updateInitialVariableValues"
           />
-        </q-card>
-      </q-dialog>
+        </div>
+      </ODialog>
       <div v-if="!panels.length">
         <!-- if data not available show nodata component -->
-        <NoPanel @update:Panel="addPanelData" :view-only="viewOnly" />
+        <NoPanel
+          @update:Panel="addPanelData"
+          :view-only="viewOnly"
+          :hide-add-action="hideAddPanel"
+        />
       </div>
     </div>
   </div>
@@ -286,7 +310,6 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 // @ts-nocheck
 import {
   computed,
-  defineAsyncComponent,
   defineComponent,
   onActivated,
   onMounted,
@@ -296,40 +319,32 @@ import {
   ref,
   watch,
   nextTick,
+  reactive,
+  inject,
 } from "vue";
 import { useStore } from "vuex";
-import { useI18n } from "vue-i18n";
+import { useI18nTyped } from "@/types/i18n";
 import { useRouter } from "vue-router";
-import { reactive } from "vue";
 import PanelContainer from "../../components/dashboards/PanelContainer.vue";
 import DateTimePickerDashboard from "../../components/DateTimePickerDashboard.vue";
 import { useRoute } from "vue-router";
-import {
-  checkIfVariablesAreLoaded,
-  updateDashboard,
-} from "../../utils/commons";
+import { updateDashboard } from "../../utils/commons";
 import { useCustomDebouncer } from "../../utils/dashboard/useCustomDebouncer";
 import NoPanel from "../../components/shared/grid/NoPanel.vue";
 import VariablesValueSelector from "../../components/dashboards/VariablesValueSelector.vue";
 import TabList from "@/components/dashboards/tabs/TabList.vue";
-import { inject } from "vue";
 import useNotifications from "@/composables/useNotifications";
 import { useVariablesManager } from "@/composables/dashboard/useVariablesManager";
-import type { useVariablesManager as UseVariablesManagerType } from "@/composables/dashboard/useVariablesManager";
 import { useLoading } from "@/composables/useLoading";
 import { GridStack } from "gridstack";
 import {
-  getPanelTimeFromURL,
-  convertPanelTimeRangeToPicker,
   convertTimeObjToPickerFormat,
-  convertGlobalTimeToPickerFormat,
   resolvePanelTimeValue,
 } from "@/utils/dashboard/panelTimeUtils";
 import "gridstack/dist/gridstack.min.css";
-
-const ViewPanel = defineAsyncComponent(() => {
-  return import("@/components/dashboards/viewPanel/ViewPanel.vue");
-});
+import { panelDownloadRegistry, panelCsvRegistry } from "@/utils/panelDownloadRegistry";
+import ODialog from "@/lib/overlay/Dialog/ODialog.vue";
+import ViewPanel from "@/components/dashboards/viewPanel/ViewPanel.vue";
 
 export default defineComponent({
   name: "RenderDashboardCharts",
@@ -345,6 +360,7 @@ export default defineComponent({
     "panelsValues",
     "searchRequestTraceIds",
     "variablesManagerReady",
+    "sendToAiChat",
   ],
   props: {
     viewOnly: {},
@@ -392,6 +408,20 @@ export default defineComponent({
       type: Boolean,
       default: false,
     },
+    /** Hides the "Add panel" quick-start action in the empty state, for
+     *  embeddings where panels are driven by something other than the
+     *  manual panel builder (e.g. dimension selection). */
+    hideAddPanel: {
+      type: Boolean,
+      default: false,
+    },
+    /** Draws the component's own bordered card. Set false when embedded inside
+     *  an already-bordered container (e.g. the dashboard view page card) to
+     *  avoid a double border. */
+    frame: {
+      type: Boolean,
+      default: true,
+    },
   },
 
   components: {
@@ -401,13 +431,16 @@ export default defineComponent({
     VariablesValueSelector,
     ViewPanel,
     TabList,
+    ODialog,
   },
   setup(props: any, { emit }) {
-    const { t } = useI18n();
+    const { t } = useI18nTyped();
     const route = useRoute();
     const router = useRouter();
     const store = useStore();
     const gridStackContainer = ref(null);
+    // True while a panel is being dragged or resized — drives the grid backdrop.
+    const isGridInteracting = ref(false);
 
     // Initialize GridStack instance
     // (not with ref: https://github.com/gridstack/gridstack.js/issues/2115)
@@ -420,19 +453,30 @@ export default defineComponent({
     // Store IntersectionObserver for cleanup
     const panelObserver = ref<IntersectionObserver | null>(null);
 
+    // Panels whose full component tree is mounted; the rest are placeholders.
+    // One-way: scrolling away never unmounts, so queries are never cancelled
+    // by scrolling and scrolling back never refetches.
+    const mountedPanelIds = reactive(new Set<string>());
+
+    // Mounts panels one viewport before they scroll into view.
+    let panelMountObserver: IntersectionObserver | null = null;
+
+    // Print/forceLoad needs every panel; they are fed into mountedPanelIds in
+    // batches (watcher below panels) instead of mounting all in one flush.
+    const mountAllPanels = computed(() => props.forceLoad || store.state.printMode);
+
+    const shouldMountPanel = (panelId: string) => mountedPanelIds.has(panelId);
+
     // inject selected tab, default will be default tab
     const selectedTabId = inject("selectedTabId", ref("default"));
 
     // Helper function to set up panel visibility observers
     const setupPanelObservers = async () => {
-      // Clean up existing observer
-      if (panelObserver.value) {
-        panelObserver.value.disconnect();
-        panelObserver.value = null;
-      }
-
       // Wait for DOM to be ready
       await nextTick();
+
+      // Disconnect right before reassigning; an await in between orphans the old observer.
+      panelObserver.value?.disconnect();
 
       // Create new IntersectionObserver
       const observer = new IntersectionObserver(
@@ -454,24 +498,49 @@ export default defineComponent({
       );
 
       // Observe all current panel elements
-      const panelElements =
-        gridStackContainer.value?.querySelectorAll(".grid-stack-item");
+      const panelElements = gridStackContainer.value?.querySelectorAll(".grid-stack-item");
       panelElements?.forEach((el: Element) => observer.observe(el));
 
       // Store observer for cleanup
       panelObserver.value = observer;
+
+      panelMountObserver?.disconnect();
+      panelMountObserver = new IntersectionObserver(
+        (entries) => {
+          entries.forEach((entry) => {
+            const panelId = entry.target.getAttribute("gs-id");
+            if (panelId && entry.isIntersecting) {
+              mountedPanelIds.add(panelId);
+              // Mounted for good — stop watching this panel.
+              panelMountObserver?.unobserve(entry.target);
+            }
+          });
+        },
+        {
+          // eslint-disable-next-line local/no-hardcoded-px -- IntersectionObserver rootMargin parses px/% only — a rem value throws SyntaxError
+          rootMargin: "100% 0px 100% 0px",
+          threshold: 0,
+        },
+      );
+      panelElements?.forEach((el: Element) => {
+        const panelId = el.getAttribute("gs-id");
+        if (panelId && mountedPanelIds.has(panelId)) return;
+        panelMountObserver?.observe(el);
+      });
     };
 
     // Create our own variables manager instead of injecting from parent
     // This makes RenderDashboardCharts self-contained and reusable
-    const variablesManager = useVariablesManager();
-
-    // Removed committedVersion and getAllVariablesFlat - no longer needed after cleanup
+    const variablesManager = useVariablesManager(t);
 
     // Provide to child components (VariablesValueSelector, etc.)
     provide("variablesManager", variablesManager);
 
     // Computed properties for filtered variables by scope
+    // Per-tab narrowing of a global variable (`curatedTabs`) is applied by
+    // VariablesValueSelector at RENDER time, not here: this list also decides
+    // whether the selector mounts at all, and a variable that is merely off-tab
+    // must still load, because panels on the tabs that do use it read its value.
     const globalVariables = computed(() => {
       return (
         props.dashboardData?.variables?.list?.filter(
@@ -484,8 +553,7 @@ export default defineComponent({
       if (!selectedTabId.value) return [];
       return (
         props.dashboardData?.variables?.list?.filter(
-          (v: any) =>
-            v.scope === "tabs" && v.tabs?.includes(selectedTabId.value),
+          (v: any) => v.scope === "tabs" && v.tabs?.includes(selectedTabId.value),
         ) || []
       );
     });
@@ -529,10 +597,7 @@ export default defineComponent({
     const getLiveVariablesForPanel = (panelId: string) => {
       // Get live variables for the selected tab and panel
       // This allows panel to detect uncommitted changes including panel-scoped ones
-      const liveVars = variablesManager.getVariablesForPanel(
-        panelId,
-        selectedTabId.value,
-      );
+      const liveVars = variablesManager.getVariablesForPanel(panelId, selectedTabId.value);
 
       // Convert to old format for backward compatibility
       return {
@@ -543,10 +608,45 @@ export default defineComponent({
 
     const panels: any = computed(() => {
       return selectedTabId.value !== null
-        ? (props.dashboardData?.tabs?.find(
-            (it: any) => it.tabId === selectedTabId.value,
-          )?.panels ?? [])
+        ? (props.dashboardData?.tabs?.find((it: any) => it.tabId === selectedTabId.value)?.panels ??
+            [])
         : [];
+    });
+
+    // Print/forceLoad: mount remaining panels a batch per tick. Print capture
+    // waits on the all-panels-loaded flag, so this never truncates a report.
+    let mountAllTimer: any = null;
+    const mountRemainingPanelsInBatches = () => {
+      if (mountAllTimer !== null) return;
+      const BATCH_SIZE = 8;
+      const step = () => {
+        mountAllTimer = null;
+        if (!mountAllPanels.value) return;
+        const pending = panels.value
+          .map((p: any) => p.id)
+          .filter((id: string) => id && !mountedPanelIds.has(id));
+        pending.slice(0, BATCH_SIZE).forEach((id: string) => mountedPanelIds.add(id));
+        if (pending.length > BATCH_SIZE) {
+          mountAllTimer = setTimeout(step, 50);
+        }
+      };
+      step();
+    };
+
+    watch(
+      // re-fill when print mode turns on or the panel list changes
+      () => [mountAllPanels.value, panels.value],
+      () => {
+        if (mountAllPanels.value) mountRemainingPanelsInBatches();
+      },
+      { immediate: true },
+    );
+
+    onBeforeUnmount(() => {
+      if (mountAllTimer !== null) {
+        clearTimeout(mountAllTimer);
+        mountAllTimer = null;
+      }
     });
 
     const {
@@ -576,20 +676,13 @@ export default defineComponent({
     });
 
     // provide variablesAndPanelsDataLoadingState to share data between components
-    provide(
-      "variablesAndPanelsDataLoadingState",
-      variablesAndPanelsDataLoadingState,
-    );
+    provide("variablesAndPanelsDataLoadingState", variablesAndPanelsDataLoadingState);
 
     //computed property based on panels and variables loading state
     const isDashboardVariablesAndPanelsDataLoaded = computed(() => {
       // Get values of variablesData and panels
-      const variablesDataValues = Object.values(
-        variablesAndPanelsDataLoadingState.variablesData,
-      );
-      const panelsValues = Object.values(
-        variablesAndPanelsDataLoadingState.panels,
-      );
+      const variablesDataValues = Object.values(variablesAndPanelsDataLoadingState.variablesData);
+      const panelsValues = Object.values(variablesAndPanelsDataLoadingState.panels);
 
       // Check if every value in both variablesData and panels is false
       const isAllVariablesAndPanelsDataLoaded =
@@ -641,9 +734,7 @@ export default defineComponent({
     );
 
     const currentQueryTraceIds = computed(() => {
-      const traceIds = Object.values(
-        variablesAndPanelsDataLoadingState.searchRequestTraceIds,
-      );
+      const traceIds = Object.values(variablesAndPanelsDataLoadingState.searchRequestTraceIds);
 
       if (traceIds.length > 0) {
         return traceIds?.flat();
@@ -704,12 +795,7 @@ export default defineComponent({
       setHoveredSeriesName: function (name: string) {
         hoveredSeriesState.value.hoveredSeriesName = name ?? "";
       },
-      setIndex: function (
-        dataIndex: number,
-        seriesIndex: number,
-        panelId: any,
-        hoveredTime?: any,
-      ) {
+      setIndex: function (dataIndex: number, seriesIndex: number, panelId: any, hoveredTime?: any) {
         hoveredSeriesState.value.dataIndex = dataIndex ?? -1;
         hoveredSeriesState.value.seriesIndex = seriesIndex ?? -1;
         hoveredSeriesState.value.panelId = panelId ?? -1;
@@ -732,23 +818,28 @@ export default defineComponent({
           route.query.folder ?? "default",
         );
 
-        showPositiveNotification("Dashboard updated successfully");
+        showPositiveNotification(t("dashboard.renderDashboardCharts.dashboardUpdatedSuccessfully"));
       } catch (error: any) {
         if (error?.response?.status === 409) {
           showConfictErrorNotificationWithRefreshBtn(
             error?.response?.data?.message ??
               error?.message ??
-              "Dashboard update failed",
+              t("dashboard.renderDashboardCharts.dashboardUpdateFailed"),
+            t,
           );
         } else {
-          showErrorNotification(error?.message ?? "Dashboard update failed", {
-            timeout: 2000,
-          });
+          showErrorNotification(
+            error?.message ?? t("dashboard.renderDashboardCharts.dashboardUpdateFailed"),
+            {
+              timeout: 2000,
+            },
+          );
         }
 
         // refresh dashboard
         refreshDashboard();
       } finally {
+        /* no cleanup needed */
       }
     });
 
@@ -774,29 +865,22 @@ export default defineComponent({
       gridStackInstance = GridStack.init(
         {
           column: 192, // 192-column grid for fine-grained positioning
+          // eslint-disable-next-line local/no-hardcoded-px -- GridStack parses this itself and writes it into its own injected stylesheet, where no document root font-size resolves rem
           cellHeight: "17px", // Base cell height
-          margin: 2, // Minimal margin between panels
+          margin: 4,
           draggable: {
             enable:
-              !props.viewOnly &&
-              !saveDashboardData.isLoading.value &&
-              !props.simplifiedPanelView, // Enable dragging unless view-only or saving
-            handle: ".drag-allow", // Only allow dragging from specific handle
+              !props.viewOnly && !saveDashboardData.isLoading.value && !props.simplifiedPanelView, // Enable dragging unless view-only or saving
+            cancel: ".drag-cancel", // panel body defers to ECharts; only the header starts a grid drag
           },
           resizable: {
             enable:
-              !props.viewOnly &&
-              !saveDashboardData.isLoading.value &&
-              !props.simplifiedPanelView, // Enable resizing unless view-only or saving
+              !props.viewOnly && !saveDashboardData.isLoading.value && !props.simplifiedPanelView, // Enable resizing unless view-only or saving
           },
           disableResize:
-            props.viewOnly ||
-            saveDashboardData.isLoading.value ||
-            props.simplifiedPanelView, // Disable resize in view-only
+            props.viewOnly || saveDashboardData.isLoading.value || props.simplifiedPanelView, // Disable resize in view-only
           disableDrag:
-            props.viewOnly ||
-            saveDashboardData.isLoading.value ||
-            props.simplifiedPanelView, // Disable drag in view-only
+            props.viewOnly || saveDashboardData.isLoading.value || props.simplifiedPanelView, // Disable drag in view-only
           acceptWidgets: false, // Don't accept external widgets
           removable: false, // Don't allow removal by dragging out
           animate: false, // Disable animations for better performance
@@ -827,8 +911,32 @@ export default defineComponent({
         }
       });
 
+      // Full-resolution grid shown while a panel is being dragged or resized — every
+      // one of the 192 columns and every row. The grid is OPERATION-AWARE so its lines
+      // always sit on the panel edge that is actually moving, i.e. the exact position
+      // the panel will save to (every card is inset by the margin):
+      //   • move   → the top/left edges snap to `k*cell + margin`  (phase = +margin)
+      //   • resize → the bottom/right edges snap to `k*cell - margin` (phase = -margin)
+      // One line per cell at that phase means every line is reachable — no skipping.
+      const beginGridInteraction = (phaseSign) => {
+        const host = gridStackContainer.value;
+        if (host && gridStackInstance) {
+          const margin = gridStackInstance.getMargin();
+          host.style.setProperty("--grid-col-w", `${gridStackInstance.cellWidth()}px`);
+          host.style.setProperty("--grid-row-h", `${gridStackInstance.getCellHeight(true)}px`);
+          host.style.setProperty("--grid-phase", `${phaseSign * margin}px`);
+        }
+        isGridInteracting.value = true;
+      };
+      gridStackInstance.on("dragstart", () => beginGridInteraction(1));
+      gridStackInstance.on("resizestart", () => beginGridInteraction(-1));
+      gridStackInstance.on("dragstop", () => {
+        isGridInteracting.value = false;
+      });
+
       // Trigger window resize after panel resize to update charts
-      gridStackInstance.on("resizestop", (event, element) => {
+      gridStackInstance.on("resizestop", () => {
+        isGridInteracting.value = false;
         window.dispatchEvent(new Event("resize"));
       });
     }; // Update panel layout data from GridStack items
@@ -884,9 +992,7 @@ export default defineComponent({
 
       // Explicitly add widgets with correct layout configuration
       for (const panel of panels.value) {
-        const element = gridStackContainer.value.querySelector(
-          `[gs-id="${panel.id}"]`,
-        );
+        const element = gridStackContainer.value.querySelector(`[gs-id="${panel.id}"]`);
 
         if (element) {
           try {
@@ -948,6 +1054,66 @@ export default defineComponent({
       return 0;
     };
 
+    // Print keeps GridStack's exact on-screen grid (no reflow, no resize — so charts, legends and all, render identically); it only pushes a panel that would straddle a page break onto the next page by overriding its top, and sizes the print page to the grid width so the column-width var never changes.
+    let printLayoutPanels: { el: HTMLElement; gsY: number }[] | null = null;
+    const clearPrintLayout = () => {
+      if (printLayoutPanels) {
+        // Restore GridStack's own top formula (it is deterministic in gs-y), so screen layout resumes exactly.
+        printLayoutPanels.forEach(({ el, gsY }) => {
+          if (gsY > 0) el.style.top = `calc(${gsY} * var(--gs-cell-height))`;
+          else el.style.removeProperty("top");
+        });
+        const grid = gridStackContainer.value;
+        if (grid instanceof HTMLElement) grid.style.removeProperty("height");
+        printLayoutPanels = null;
+      }
+      document.getElementById("o2-print-page")?.remove();
+    };
+    const preparePrintLayout = () => {
+      const grid = gridStackContainer.value;
+      if (!(grid instanceof HTMLElement)) return;
+      clearPrintLayout();
+      const cell = parseFloat(getComputedStyle(grid).getPropertyValue("--gs-cell-height")) || 17;
+      const rows = Array.from(grid.querySelectorAll(".grid-stack-item"))
+        .filter((el): el is HTMLElement => el instanceof HTMLElement)
+        .map((el) => {
+          const gsY = Number(el.getAttribute("gs-y")) || 0;
+          return { el, gsY, top: gsY * cell, h: (Number(el.getAttribute("gs-h")) || 18) * cell };
+        })
+        .sort((a, b) => a.top - b.top);
+      if (!rows.length) return;
+      const gridWidth = Math.round(grid.clientWidth);
+      const headerOffset = Math.max(0, Math.round(grid.getBoundingClientRect().top));
+      const pageH = Math.round(gridWidth * (7.7 / 10.2));
+      let extra = 0;
+      let maxBottom = 0;
+      for (const r of rows) {
+        const docTop = headerOffset + r.top + extra;
+        const pageStart = Math.floor(docTop / pageH) * pageH;
+        if (r.h <= pageH && docTop + r.h > pageStart + pageH) {
+          extra += pageStart + pageH - docTop;
+        }
+        const finalTop = r.top + extra;
+        r.el.style.top = `${finalTop}px`;
+        maxBottom = Math.max(maxBottom, finalTop + r.h);
+      }
+      grid.style.height = `${maxBottom}px`;
+      printLayoutPanels = rows.map((r) => ({ el: r.el, gsY: r.gsY }));
+      const margin = 24;
+      const style = document.createElement("style");
+      style.id = "o2-print-page";
+      style.textContent = `@page { size: ${gridWidth + 2 * margin}px ${pageH + 2 * margin}px; margin: ${margin}px; }`;
+      document.head.appendChild(style);
+    };
+
+    /**
+     * True for panels authored as section headings — a full-width label that groups the
+     * panels beneath it (see the `o2SectionHeader` flag in the RUM Performance dashboard
+     * JSON). They carry no query and no content, so they render as a bare heading rather
+     * than as a panel card.
+     */
+    const isSectionHeader = (panelData) => panelData?.o2SectionHeader === true;
+
     // Get minimum height based on panel type for optimal display
     const getMinimumHeight = (type) => {
       switch (type) {
@@ -1002,12 +1168,24 @@ export default defineComponent({
 
     watch(
       () => [selectedTabId.value],
-      async (newPanels, oldPanels) => {
+      async () => {
         // Only refresh if the number of tab changes
         await nextTick();
         await refreshGridStack();
       },
       { deep: true }, // Deep watch to catch layout changes within panels
+    );
+
+    watch(
+      () => panels.value.length,
+      async (newLen, oldLen) => {
+        // When panels are added to a previously-empty tab the grid-stack element
+        // is freshly mounted (v-else-if), so GridStack must be re-initialized.
+        if (newLen > 0 && oldLen === 0) {
+          await nextTick();
+          await refreshGridStack();
+        }
+      },
     );
 
     // Initialize GridStack when component is mounted
@@ -1018,7 +1196,36 @@ export default defineComponent({
 
       // Set up IntersectionObserver for panel visibility (for lazy loading panel-scoped variables)
       await setupPanelObservers();
+
+      window.addEventListener("beforeprint", onBeforePrint);
+      window.addEventListener("afterprint", onAfterPrint);
+
+      if (store.state.printMode) {
+        await nextTick();
+        preparePrintLayout();
+      }
     });
+
+    // Only the dashboard print feature (print mode) reflows the page layout; a plain Ctrl+P elsewhere is left untouched.
+    const onBeforePrint = () => {
+      if (store.state.printMode) preparePrintLayout();
+    };
+    const onAfterPrint = () => {
+      if (!store.state.printMode) clearPrintLayout();
+    };
+
+    // Headless report capture emulates print media without a beforeprint event, so lay out the print pages whenever print mode is on; clear it when print mode turns off.
+    watch(
+      () => [store.state.printMode, panels.value.length, selectedTabId.value],
+      async () => {
+        if (!store.state.printMode) {
+          clearPrintLayout();
+          return;
+        }
+        await nextTick();
+        preparePrintLayout();
+      },
+    );
 
     // Initialize variables manager when dashboard data changes
     watch(
@@ -1086,12 +1293,10 @@ export default defineComponent({
               (cv: any) => cv.name === v.name,
             );
           } else if (v.scope === "tabs" && v.tabId) {
-            const tabVars =
-              variablesManager.committedVariablesData.tabs[v.tabId] || [];
+            const tabVars = variablesManager.committedVariablesData.tabs[v.tabId] || [];
             return tabVars.find((cv: any) => cv.name === v.name);
           } else if (v.scope === "panels" && v.panelId) {
-            const panelVars =
-              variablesManager.committedVariablesData.panels[v.panelId] || [];
+            const panelVars = variablesManager.committedVariablesData.panels[v.panelId] || [];
             return panelVars.find((cv: any) => cv.name === v.name);
           }
           return null;
@@ -1153,15 +1358,23 @@ export default defineComponent({
 
     // Clean up GridStack instance before component unmounts to prevent memory leaks
     onBeforeUnmount(() => {
+      window.removeEventListener("beforeprint", onBeforePrint);
+      window.removeEventListener("afterprint", onAfterPrint);
+
       // Clean up IntersectionObserver
       if (panelObserver.value) {
         panelObserver.value.disconnect();
         panelObserver.value = null;
       }
+      panelMountObserver?.disconnect();
+      panelMountObserver = null;
 
       // Clean up GridStack instance
       if (gridStackInstance) {
         gridStackInstance.off("change");
+        gridStackInstance.off("dragstart");
+        gridStackInstance.off("resizestart");
+        gridStackInstance.off("dragstop");
         gridStackInstance.off("resizestop");
         gridStackInstance.destroy(false);
         gridStackInstance = null;
@@ -1174,6 +1387,11 @@ export default defineComponent({
         gridStackInstance.destroy(false);
         gridStackInstance = null;
       }
+      // Remove console helpers
+      delete (window as any).oo_logAllPanelsJSON;
+      delete (window as any).oo_getAllPanelsCsv;
+      panelDownloadRegistry.clear();
+      panelCsvRegistry.clear();
     });
 
     /**
@@ -1181,13 +1399,12 @@ export default defineComponent({
      * Handles same-dashboard drilldown by pushing new var-* values
      * from the URL into the variables manager and committing them.
      */
-    const updateInitialVariableValues = async (...args: any) => {
+    const updateInitialVariableValues = async () => {
       // if view panel is open then close it
       showViewPanel.value = false;
 
       // Check if this is a same-dashboard drilldown (tab may differ)
-      const isSameDashboard =
-        route.query.dashboard === props.dashboardData?.dashboardId;
+      const isSameDashboard = route.query.dashboard === props.dashboardData?.dashboardId;
 
       if (isSameDashboard) {
         // Same-dashboard drilldown: update variables in-place without reloading dashboard
@@ -1239,7 +1456,9 @@ export default defineComponent({
         const currentDateTime = innerDateTimePicker.getConsumableDateTime();
 
         if (currentDateTime) {
-          panelTimeValues.value[panelId] = currentDateTime;
+          if (!arePickerValuesEqual(panelTimeValues.value[panelId], currentDateTime)) {
+            panelTimeValues.value[panelId] = currentDateTime;
+          }
         }
       } finally {
         // Unmark after a short delay to allow events to settle
@@ -1270,10 +1489,7 @@ export default defineComponent({
       }
     };
 
-    const refreshPanelRequest = async (
-      panelId,
-      shouldRefreshWithoutCache = false,
-    ) => {
+    const refreshPanelRequest = async (panelId, shouldRefreshWithoutCache = false) => {
       // Sync panel datetime picker state before refreshing
       syncPanelDateTimePickerState(panelId);
 
@@ -1291,10 +1507,7 @@ export default defineComponent({
       variablesManager.commitScope("panels", panelId);
 
       // Get merged variables for this panel and store as override
-      const panelVars = variablesManager.getVariablesForPanel(
-        panelId,
-        selectedTabId.value,
-      );
+      const panelVars = variablesManager.getVariablesForPanel(panelId, selectedTabId.value);
       currentVariablesDataRef.value = {
         ...currentVariablesDataRef.value,
         [panelId]: JSON.parse(
@@ -1334,6 +1547,9 @@ export default defineComponent({
     // Store refs to panel datetime picker components using a Map (not reactive)
     const panelDateTimePickerRefs = new Map<string, any>();
 
+    // panelDownloadRegistry is a module-level singleton (see utils/panelDownloadRegistry.ts).
+    // PanelContainer instances register themselves on mount; no provide/inject needed.
+
     // Track panels that are initializing (to prevent spurious change events)
     const panelsInitializing = ref<Set<string>>(new Set());
 
@@ -1360,6 +1576,25 @@ export default defineComponent({
       return props.selectedDateForViewPanel;
     });
 
+    // Semantic equality for picker values — used in both initializePanelTimes and onPanelTimeApply.
+    // DateTimePickerDashboard normalizes values (adds startTime/endTime, may drop "type"),
+    // so we compare semantically: for relative, only compare the period string.
+    const arePickerValuesEqual = (v1: any, v2: any) => {
+      if (!v1 || !v2) return v1 === v2;
+
+      const type1 = v1.valueType || v1.type;
+      const type2 = v2.valueType || v2.type;
+      if (type1 !== type2) return false;
+
+      // For relative: only the period matters (startTime/endTime are computed & change over time)
+      if (type1 === "relative") {
+        return v1.relativeTimePeriod === v2.relativeTimePeriod;
+      }
+
+      // For absolute: compare start and end times
+      return v1.startTime === v2.startTime && v1.endTime === v2.endTime;
+    };
+
     // Initialize panel time values for panels with panel-level time enabled
     const initializePanelTimes = () => {
       panels.value?.forEach((panel: any) => {
@@ -1370,31 +1605,11 @@ export default defineComponent({
           // Mark this panel as initializing to prevent change events
           panelsInitializing.value.add(panelId);
 
-          // Helper to check if two picker values represent the same time
-          // DateTimePickerDashboard normalizes values (adds startTime/endTime, may drop "type"),
-          // so we compare semantically: for relative, only compare the period string
-          const arePickerValuesEqual = (v1: any, v2: any) => {
-            if (!v1 || !v2) return v1 === v2;
-
-            const type1 = v1.valueType || v1.type;
-            const type2 = v2.valueType || v2.type;
-            if (type1 !== type2) return false;
-
-            // For relative: only the period matters (startTime/endTime are computed & change over time)
-            if (type1 === "relative") {
-              return v1.relativeTimePeriod === v2.relativeTimePeriod;
-            }
-
-            // For absolute: compare start and end times
-            return v1.startTime === v2.startTime && v1.endTime === v2.endTime;
-          };
-
           // When panel has no custom time (panel_time_range is null) and no URL panel params,
           // use local convertGlobalTimeToPickerFormat which preserves relative/absolute type
           // from route.query. The imported resolvePanelTimeValue always converts global to absolute.
           const hasUrlPanelTime = !!(
-            route.query[`pt-period.${panelId}`] ||
-            route.query[`pt-from.${panelId}`]
+            route.query[`pt-period.${panelId}`] || route.query[`pt-from.${panelId}`]
           );
           const hasPanelConfigTime = !!panel.config?.panel_time_range;
 
@@ -1402,23 +1617,13 @@ export default defineComponent({
 
           if (hasUrlPanelTime || hasPanelConfigTime) {
             // Panel has its own time (URL or config) → use priority-based resolver
-            pickerValue = resolvePanelTimeValue(
-              panel,
-              panelId,
-              route.query,
-              props.currentTimeObj,
-            );
+            pickerValue = resolvePanelTimeValue(panel, panelId, route.query, props.currentTimeObj);
           } else {
             // Panel uses global time → use local converter that preserves relative type
-            pickerValue = convertGlobalTimeToPickerFormat(
-              props.currentTimeObj?.["__global"],
-            );
+            pickerValue = convertGlobalTimeToPickerFormat(props.currentTimeObj?.["__global"]);
           }
 
-          if (
-            pickerValue &&
-            !arePickerValuesEqual(panelTimeValues.value[panelId], pickerValue)
-          ) {
+          if (pickerValue && !arePickerValuesEqual(panelTimeValues.value[panelId], pickerValue)) {
             panelTimeValues.value[panelId] = pickerValue;
           }
 
@@ -1463,7 +1668,7 @@ export default defineComponent({
     };
 
     // Handle Apply button click on panel time picker
-    const onPanelTimeApply = async (panelId: string) => {
+    const onPanelTimeApply = async (panelId: string, newValue?: any) => {
       // Guard against infinite recursion during state synchronization
       if (panelsSyncingDateTime.value.has(panelId)) {
         return;
@@ -1473,6 +1678,17 @@ export default defineComponent({
       // This prevents null-config panels from creating spurious URL params
       if (panelsInitializing.value.has(panelId)) {
         return;
+      }
+
+      // Skip when DateTime.vue emits its current value on mount (open-picker cascade).
+      // We use :modelValue (not v-model) so panelTimeValues is NOT auto-written before
+      // this handler runs — enabling a true before/after equality check here.
+      if (newValue && arePickerValuesEqual(panelTimeValues.value[panelId], newValue)) {
+        return;
+      }
+
+      if (newValue) {
+        panelTimeValues.value[panelId] = newValue;
       }
 
       // Use the local helper which handles state syncing, URL update and variable freeze for this panel
@@ -1515,7 +1731,7 @@ export default defineComponent({
       // This prevents unnecessary route updates when panel refreshes without time changes
       const hasQueryChanged =
         Object.keys(query).some((key) => query[key] !== route.query[key]) ||
-        Object.keys(route.query).some((key) => !query.hasOwnProperty(key));
+        Object.keys(route.query).some((key) => !Object.prototype.hasOwnProperty.call(query, key));
 
       if (hasQueryChanged) {
         await router.replace({ query });
@@ -1525,6 +1741,39 @@ export default defineComponent({
     // Initialize panel times when component is mounted
     onMounted(() => {
       initializePanelTimes();
+
+      // Console helper — prints each panel's raw data to the console.
+      // Usage:  window.oo_logAllPanelsJSON()
+      (window as any).oo_logAllPanelsJSON = () => {
+        const total = panelDownloadRegistry.size;
+        if (total === 0) {
+          console.warn("[oo] No panels found on the current tab.");
+          return;
+        }
+        panelDownloadRegistry.forEach((fn, id) => {
+          try {
+            fn();
+          } catch (e) {
+            console.warn(`[oo] Error on panel ${id}`, e);
+          }
+        });
+      };
+
+      // Report-server helper — returns { [panelId]: { title, csv } } as a plain
+      // JS object so the report server can capture it via page.evaluate().
+      // Usage:  window.oo_getAllPanelsCsv()
+      (window as any).oo_getAllPanelsCsv = (): Record<string, { title: string; csv: string }> => {
+        const result: Record<string, { title: string; csv: string }> = {};
+        panelCsvRegistry.forEach((fn, id) => {
+          try {
+            const data = fn();
+            if (data) result[id] = data;
+          } catch (e) {
+            console.warn(`[oo] Error getting CSV for panel ${id}`, e);
+          }
+        });
+        return result;
+      };
     });
 
     // Re-initialize panel times when panels change or when global time changes
@@ -1541,8 +1790,10 @@ export default defineComponent({
       addPanelData,
       t,
       getPanelLayout,
+      shouldMountPanel,
       getMinimumHeight,
       getMinimumWidth,
+      isSectionHeader,
       variablesData,
       variablesDataUpdated,
       gridStackContainer,
@@ -1562,6 +1813,7 @@ export default defineComponent({
       currentVariablesDataRef,
       resetGridLayout,
       refreshGridStack,
+      isGridInteracting,
       // New scoped variables properties
       variablesManager,
       globalVariables,
@@ -1594,120 +1846,195 @@ export default defineComponent({
 });
 </script>
 
-<style lang="scss" scoped>
-.q-table {
-  &__top {
-    border-bottom: 1px solid $border-color;
-    justify-content: flex-end;
-  }
+<!--
+  Plain GLOBAL (unscoped) style block.
+  Only rules that target third-party / dynamically-created DOM that this
+  template does NOT render directly are kept here (GridStack-injected classes,
+  legacy component internals, print/page setup). All component-own element styles are
+  expressed as inline  utilities in the template above.
+-->
+<style scoped>
+/* keep(lib-override:gridstack): every selector targets GridStack-injected DOM
+   (.grid-stack*, .ui-resizable-*) that this template does not render, reached via
+   :deep() from the `.displayDiv` grid host this component owns. RenderDashboardCharts
+   is the app's sole GridStack.init, so every grid lives inside a `.displayDiv`
+   (License/embedded dashboards render THIS component). The print / @page setup
+   rides along — at-rules are unaffected by scoping. */
+/* When grid is static (disabled), hide resize handles */
+.displayDiv :deep(.grid-stack.grid-stack-static .ui-resizable-handle) {
+  display: none !important;
 }
 
-.displayDiv {
-  clear: both;
-  min-height: 0;
-  height: auto;
+.displayDiv :deep(.grid-stack-item .grid-stack-item-content) {
+  /* eslint-disable-next-line local/no-hardcoded-px -- hairline: the grid-item border is a 1-device-pixel rule and must not scale with text or it smears at fractional zoom */
+  border: 1px solid var(--color-border-default);
+  border-radius: 0.375rem;
+  overflow: hidden;
+  box-shadow: none;
 }
 
-.gridBackground {
-  background: transparent !important;
-  border-radius: 4px;
-  border-color: #c2c2c27a !important;
+/* Section headings label the panels below them, so they must not carry the card chrome
+   every other grid item gets. Specificity: this selector adds one class over the rule
+   above, so it wins without `!important`. */
+.displayDiv :deep(.grid-stack-item.panel-section-header .grid-stack-item-content) {
+  border: none;
+  border-radius: 0;
 }
 
-.gridBackground.dark {
-  border-color: rgba(204, 204, 220, 0.12) !important;
+/* Full-resolution grid shown while a panel is being dragged or resized — every one of
+   the 192 columns (--grid-col-w) and every row (--grid-row-h), a single hairline per
+   cell. `background-position` shifts the whole grid by --grid-phase (set in JS): to
+   +margin while moving (lines on the top/left snap edges) or -margin while resizing
+   (lines on the bottom/right snap edges), so the moving panel edge always lands on a
+   line, every line is reachable, and the lines sit where panels actually save. */
+.grid-stack.grid-interacting {
+  --grid-line: color-mix(in srgb, var(--color-border-default) 30%, transparent);
+  background-image:
+    repeating-linear-gradient(
+      to right,
+      var(--grid-line) 0,
+      /* eslint-disable-next-line local/no-hardcoded-px -- hairline: 1-device-pixel column rule, must not scale */
+      var(--grid-line) 1px,
+      /* eslint-disable-next-line local/no-hardcoded-px -- hairline: transparent gap resumes one device-pixel past the line */
+      transparent 1px,
+      transparent var(--grid-col-w, 0.45rem)
+    ),
+    repeating-linear-gradient(
+      to bottom,
+      var(--grid-line) 0,
+      /* eslint-disable-next-line local/no-hardcoded-px -- hairline: 1-device-pixel row rule, must not scale */
+      var(--grid-line) 1px,
+      /* eslint-disable-next-line local/no-hardcoded-px -- hairline: transparent gap resumes one device-pixel past the line */
+      transparent 1px,
+      transparent var(--grid-row-h, 1.0625rem)
+    );
+  /* First value = column layer (x offset), second = row layer (y offset). */
+  background-position:
+    var(--grid-phase, 0) 0,
+    0 var(--grid-phase, 0);
+  border-radius: 0.375rem;
 }
 
-/* Optimized GridStack layout styles for better performance and visual feedback */
-.grid-stack {
-  background: transparent;
-  margin: 2px;
-
-  /* When grid is static (disabled), hide resize handles */
-  &.grid-stack-static {
-    .ui-resizable-handle {
-      display: none !important;
-    }
-  }
-}
-
-.grid-stack-item {
-  background: transparent;
-
-  &.dark {
-    border-color: rgba(204, 204, 220, 0.12) !important;
-  }
-  .grid-stack-item-content {
-    border: 1px solid #c2c2c27a;
-    border-radius: 4px;
-    overflow: visible;
-    border-radius: inherit;
-    // height: 100%;
-  }
-}
-
-.panel-with-variables {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
+.grid-stack.grid-interacting
+  :deep(.grid-stack-item:not(.panel-section-header) .grid-stack-item-content) {
+  background-color: var(--color-surface-base);
 }
 
 /* GridStack theme overrides */
-:deep(.grid-stack) {
-  .grid-stack-item {
-    .drag-allow {
-      cursor: move;
-    }
+.displayDiv :deep(.grid-stack .grid-stack-item .drag-allow) {
+  cursor: move;
+}
 
-    &.ui-draggable-dragging {
-      opacity: 0.8;
-      z-index: 1000;
-      transition: transform 0.15s ease;
-    }
-
-    &.ui-resizable-resizing {
-      opacity: 0.9;
-    }
-
-    > .ui-resizable-handle {
-      background: none;
-
-      &.ui-resizable-se {
-        background: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M8 2 L8 8 L2 8' stroke='%23999999' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>")
-          no-repeat center;
-        background-size: 8px 8px;
-        width: 16px;
-        height: 16px;
-        bottom: 2px;
-        right: 2px;
-        cursor: se-resize;
-        transform: rotate(0deg) !important;
-      }
-    }
+/* CSS-only stack: GridStack's oneColumnMode stays off because the change handler would persist it. */
+@media screen and (max-width: 47.99rem) {
+  .displayDiv :deep(.grid-stack) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    height: auto !important;
+  }
+  .displayDiv :deep(.grid-stack > .grid-stack-item) {
+    position: relative !important;
+    inset: auto !important;
+    transform: none !important;
+    width: 100% !important;
+    min-width: 100% !important;
+    height: 20rem !important;
+    min-height: 20rem !important;
+  }
+  .displayDiv :deep(.grid-stack > .grid-stack-item:has([data-panel-type="metric"])),
+  .displayDiv :deep(.grid-stack > .grid-stack-item:has([data-panel-type="gauge"])) {
+    width: calc(50% - 0.25rem) !important;
+    min-width: calc(50% - 0.25rem) !important;
+    height: 8rem !important;
+    min-height: 8rem !important;
+  }
+  .displayDiv :deep(.grid-stack > .grid-stack-item.panel-section-header) {
+    height: 2.5rem !important;
+    min-height: 2.5rem !important;
+  }
+  .displayDiv :deep(.grid-stack > .grid-stack-item > .ui-resizable-handle) {
+    display: none !important;
+  }
+  /* A fixed-height strip host cannot grow, so its panels swipe sideways instead of stacking. */
+  .dashboard-strip .displayDiv :deep(.grid-stack) {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    height: 9.5rem !important;
+    scroll-snap-type: x mandatory;
+  }
+  .dashboard-strip .displayDiv :deep(.grid-stack > .grid-stack-item) {
+    width: 85% !important;
+    min-width: 85% !important;
+    height: 100% !important;
+    min-height: 0 !important;
+    scroll-snap-align: start;
   }
 }
 
+.displayDiv :deep(.grid-stack .grid-stack-item.ui-draggable-dragging) {
+  opacity: 0.8;
+  z-index: 1000;
+  transition:
+    transform 0.15s ease,
+    box-shadow 0.15s ease;
+  box-shadow: var(--shadow-glow-drag-geom) color-mix(in srgb, var(--color-black) 15%, transparent);
+}
+
+.displayDiv :deep(.grid-stack .grid-stack-item.ui-resizable-resizing) {
+  opacity: 0.9;
+}
+
+.displayDiv :deep(.grid-stack .grid-stack-item > .ui-resizable-handle) {
+  background: none;
+}
+
+.displayDiv :deep(.grid-stack .grid-stack-item > .ui-resizable-handle.ui-resizable-se) {
+  /* Drawn as a mask + background-color rather than a coloured SVG: a data: URI
+     cannot resolve var(), so this is the only way the handle takes a token. */
+  -webkit-mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M8 2 L8 8 L2 8' stroke='black' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>")
+    no-repeat center;
+  mask: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'><path d='M8 2 L8 8 L2 8' stroke='black' stroke-width='1.5' fill='none' stroke-linecap='round'/></svg>")
+    no-repeat center;
+  background-color: var(--color-grey-400);
+  -webkit-mask-size: 0.5rem 0.5rem;
+  mask-size: 0.5rem 0.5rem;
+  width: 1rem;
+  height: 1rem;
+  bottom: 0.125rem;
+  right: 0.125rem;
+  cursor: se-resize;
+  transform: rotate(0deg) !important;
+}
+
 /* Ensure proper box-sizing */
-.grid-stack-item,
-.grid-stack-item-content {
+.displayDiv :deep(.grid-stack-item),
+.displayDiv :deep(.grid-stack-item-content) {
   box-sizing: border-box;
 }
 
 @media print {
-  /* Prevent panel content from expanding beyond its allocated grid cell.
-   * Without this, tables with many rows (position:static in print mode)
-   * can grow taller than the cell, pushing the grid container's height up
-   * while other absolutely-positioned panels stay at their original pixel
-   * offsets — causing visible overlap across printed pages. */
-  .grid-stack-item-content {
-    overflow: hidden !important;
+  /* Keep GridStack's exact on-screen grid — preparePrintLayout only shifts panel tops so none straddles a page break, and injects the @page size to match the grid width, so nothing resizes and every chart renders as it does on screen. */
+  .displayDiv :deep(.grid-stack) {
+    overflow: visible !important;
   }
 
-  /* Quasar virtual-scroll inserts padding divs above/below the rendered
-   * rows to simulate the full scroll height. In print mode these become
-   * empty white space. Hide them so no blank gaps appear in table panels. */
-  :deep(.q-virtual-scroll__padding) {
-    display: none !important;
+  .displayDiv :deep(.grid-stack-item-content) {
+    overflow: hidden !important;
   }
+}
+</style>
+
+<style scoped>
+/* keep(lib-override:gridstack): the drop placeholder is DOM that GridStack
+   injects into its own subtree, so it can only be reached through `:deep()`
+   from the `.displayDiv` grid host this component owns. `!important` beats the
+   library's own placeholder background. The tinted fill + dashed outline read
+   as a clear "panel lands here" target against the grid backdrop. */
+.displayDiv :deep(.grid-stack-placeholder > .placeholder-content) {
+  background: color-mix(in srgb, var(--color-dashboard-placeholder-bg) 35%, transparent) !important;
+  /* eslint-disable-next-line local/no-hardcoded-px -- hairline: the placeholder outline is a 1-device-pixel dashed rule and must not scale */
+  border: 1px dashed var(--color-dashboard-placeholder-bg) !important;
+  border-radius: 0.375rem;
 }
 </style>

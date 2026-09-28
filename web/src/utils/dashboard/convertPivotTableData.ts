@@ -13,6 +13,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { gt } from "@/types/i18n";
 import { getDataValue } from "./aliasUtils";
 import {
   PIVOT_TABLE_MAX_COLUMNS,
@@ -34,7 +35,7 @@ import {
  *
  * header_rows = max(1, pivot_count + (y_count > 1 ? 1 : 0))
  *
- * When header_rows === 1 (1 pivot + 1 Y), returns [] to use standard q-table headers.
+ * When header_rows === 1 (1 pivot + 1 Y), returns [] to use standard table headers.
  * Otherwise returns an array of header level objects with cells[] and isLeaf flag.
  */
 function buildPivotHeaderLevels(
@@ -65,10 +66,7 @@ function buildPivotHeaderLevels(
     if (!value) return value;
     const fieldAlias = breakdownFields[levelIndex]?.alias;
     if (!fieldAlias || !timestampFieldAliases.has(fieldAlias)) return value;
-    if (
-      value === PIVOT_TABLE_TOTAL_LABEL ||
-      value === PIVOT_TABLE_OTHERS_LABEL
-    ) {
+    if (value === PIVOT_TABLE_TOTAL_LABEL || value === PIVOT_TABLE_OTHERS_LABEL) {
       return value;
     }
     return parseTimestampValue(value, timezone) || value;
@@ -90,9 +88,7 @@ function buildPivotHeaderLevels(
         parsedKeys[i + span][lvl] === groupValue &&
         parsedKeys[i + span]
           .slice(0, lvl)
-          .every(
-            (v: string, idx: number) => v === parsedKeys[i].slice(0, lvl)[idx],
-          )
+          .every((v: string, idx: number) => v === parsedKeys[i].slice(0, lvl)[idx])
       ) {
         span++;
       }
@@ -130,8 +126,9 @@ function buildPivotHeaderLevels(
     if (lvl === 0 && showRowTotals) {
       topLevelBoundaries.add(leafColPos);
       cells.push({
+        // The constant stays the machine key; only the rendered label is translated.
         key: `${lvl}_${PIVOT_TABLE_TOTAL_LABEL}`,
-        label: PIVOT_TABLE_TOTAL_LABEL,
+        label: gt("dashboard.pivotTotal"),
         colspan: yCount > 1 ? yCount : 1,
         rowspan: pivotCount,
         hasBorder: true,
@@ -229,11 +226,7 @@ export const convertPivotTableData = (
   const yFields = query.fields?.y || [];
   const breakdownFields = query.fields?.breakdown || [];
 
-  if (
-    breakdownFields.length === 0 ||
-    yFields.length === 0 ||
-    xFields.length === 0
-  ) {
+  if (breakdownFields.length === 0 || yFields.length === 0 || xFields.length === 0) {
     return empty;
   }
 
@@ -359,7 +352,8 @@ export const convertPivotTableData = (
   if (showColTotals && pivotedRows.length > 0) {
     const totalRow: any = { __isTotalRow: true };
     for (let i = 0; i < xAliases.length; i++) {
-      totalRow[xAliases[i]] = i === 0 ? PIVOT_TABLE_TOTAL_LABEL : "";
+      // Rendered cell text, not a key — safe to translate.
+      totalRow[xAliases[i]] = i === 0 ? gt("dashboard.pivotTotal") : "";
     }
 
     for (const yAlias of yAliases) {
@@ -384,22 +378,16 @@ export const convertPivotTableData = (
   }
 
   // --- Step 5: Build column definitions ---
-  const { colorConfigMap, unitConfigMap } = parseOverrideConfigs(
-    config.override_config,
-  );
+  const { colorConfigMap, unitConfigMap } = parseOverrideConfigs(config.override_config);
 
   const columns: any[] = [];
   const isSingleValueField = yAliases.length === 1;
-  const needsMultiRowHeader =
-    breakdownAliases.length > 1 || yAliases.length > 1;
+  const needsMultiRowHeader = breakdownAliases.length > 1 || yAliases.length > 1;
 
   // Row field columns (x-axis) — marked with _isRowField for header rendering
   const timezone = store.state.timezone;
   const timestampFieldAliases = detectTimestampFields(xFields, tableRows);
-  const breakdownTimestampAliases = detectTimestampFields(
-    breakdownFields,
-    tableRows,
-  );
+  const breakdownTimestampAliases = detectTimestampFields(breakdownFields, tableRows);
 
   for (const xField of xFields) {
     const col: any = {
@@ -409,6 +397,7 @@ export const convertPivotTableData = (
       align: "left",
       sortable: true,
       _isRowField: true,
+      mono: timestampFieldAliases.has(xField.alias),
     };
     if (timestampFieldAliases.has(xField.alias)) {
       col.format = (val: any) => parseTimestampValue(val, timezone) || val;
@@ -431,11 +420,14 @@ export const convertPivotTableData = (
       // When multi-row headers are used, parent headers provide context,
       // so the leaf column label is just the value field label ("Count").
       // When single-row, use the full label ("GET" or "GET - Count").
-      const formattedPivotKey = breakdownTimestampAliases.has(
-        breakdownFields[0]?.alias,
-      )
-        ? parseTimestampValue(pk, timezone) || pk
-        : pk;
+      // `pk` is a data value ("GET", "POST") except for the synthetic overflow bucket,
+      // which is app-authored and therefore the only one that gets translated.
+      const formattedPivotKey =
+        pk === PIVOT_TABLE_OTHERS_LABEL
+          ? gt("dashboard.pivotOthers")
+          : breakdownTimestampAliases.has(breakdownFields[0]?.alias)
+            ? parseTimestampValue(pk, timezone) || pk
+            : pk;
       const label = needsMultiRowHeader
         ? yField.label
         : isSingleValueField
@@ -444,8 +436,7 @@ export const convertPivotTableData = (
 
       const yAliasLower = yField.alias.toLowerCase();
       const unitToUse = unitConfigMap[yAliasLower]?.unit || config.unit;
-      const customUnitToUse =
-        unitConfigMap[yAliasLower]?.customUnit || config.unit_custom;
+      const customUnitToUse = unitConfigMap[yAliasLower]?.customUnit || config.unit_custom;
       const decimals = config.decimals ?? 2;
 
       columns.push({
@@ -454,10 +445,18 @@ export const convertPivotTableData = (
         label,
         align: "right",
         sortable: true,
+        mono: true,
         _groupStart: isGroupStart,
         sort: (a: any, b: any) => (Number(a) || 0) - (Number(b) || 0),
         format: (val: any) =>
-          formatNumericValue(val, valueMappingCache, unitToUse, customUnitToUse, decimals, missingValue),
+          formatNumericValue(
+            val,
+            valueMappingCache,
+            unitToUse,
+            customUnitToUse,
+            decimals,
+            missingValue,
+          ),
       });
     }
   }
@@ -470,13 +469,15 @@ export const convertPivotTableData = (
       const label = needsMultiRowHeader
         ? yField.label
         : isSingleValueField
-          ? PIVOT_TABLE_TOTAL_LABEL
-          : `${PIVOT_TABLE_TOTAL_LABEL} - ${yField.label}`;
+          ? gt("dashboard.pivotTotal")
+          : gt("dashboard.pivotTotalForField", {
+              total: gt("dashboard.pivotTotal"),
+              field: yField.label,
+            });
 
       const yAliasLower = yField.alias.toLowerCase();
       const unitToUse = unitConfigMap[yAliasLower]?.unit || config.unit;
-      const customUnitToUse =
-        unitConfigMap[yAliasLower]?.customUnit || config.unit_custom;
+      const customUnitToUse = unitConfigMap[yAliasLower]?.customUnit || config.unit_custom;
       const decimals = config.decimals ?? 2;
 
       columns.push({
@@ -485,12 +486,20 @@ export const convertPivotTableData = (
         label,
         align: "right",
         sortable: true,
+        mono: true,
         _groupStart: tIdx === 0,
         _isTotalColumn: true,
         _totalColRightIndex: yFields.length - 1 - tIdx,
         sort: (a: any, b: any) => (Number(a) || 0) - (Number(b) || 0),
         format: (val: any) =>
-          formatNumericValue(val, valueMappingCache, unitToUse, customUnitToUse, decimals, missingValue),
+          formatNumericValue(
+            val,
+            valueMappingCache,
+            unitToUse,
+            customUnitToUse,
+            decimals,
+            missingValue,
+          ),
         headerStyle: "font-weight: bold",
       });
     }

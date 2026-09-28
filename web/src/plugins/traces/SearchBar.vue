@@ -15,80 +15,57 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 -->
 
 <template>
-  <div class="search-bar-component tw:h-full" id="searchBarComponent">
-    <div class="row tw:m-0! tw:p-[0.375rem]">
-      <div class="float-right col flex items-center">
+  <div class="search-bar-component flex h-full flex-col pb-px" id="searchBarComponent">
+    <div
+      class="border-border-default m-0! flex w-full items-center justify-between border-b p-1.5 max-lg:flex-wrap max-lg:gap-y-1"
+    >
+      <div
+        ref="toolbarLeftRef"
+        class="flex min-w-0 flex-1 flex-row items-center gap-1.5 overflow-hidden max-lg:w-full max-lg:flex-none max-lg:flex-wrap max-lg:gap-y-1 max-lg:overflow-visible"
+      >
         <!-- Unified View Toggle: Service Graph / Traces / Spans -->
-        <div
-          class="button-group logs-visualize-toggle element-box-shadow tw:mr-[0.375rem]"
+        <OToggleGroup
+          :model-value="searchObj.meta.searchMode"
+          @update:model-value="$emit('update:searchMode', $event)"
         >
-          <div class="row">
-            <div>
-              <q-btn
-                data-test="traces-search-mode-spans-btn"
-                :class="[
-                  'button button-left tw:w-[5.5rem]! tw:flex tw:justify-center tw:items-center no-border no-outline tw:rounded-r-none! q-px-sm tw:h-[1.94rem]! tw:text-[0.7rem]! tw:tracking-[0.03rem]!',
-                  searchObj.meta.searchMode === 'spans' ? 'selected' : '',
-                ]"
-                @click="$emit('update:searchMode', 'spans')"
-                no-caps
-                size="sm"
-              >
-                Spans
-                <q-tooltip>Spans</q-tooltip>
-              </q-btn>
-            </div>
-            <div>
-              <q-btn
-                data-test="traces-search-mode-traces-btn"
-                :class="[
-                  'button button-center tw:rounded-none! tw:w-[5.5rem]! tw:flex tw:justify-center tw:items-center no-border no-outline q-px-sm tw:h-[1.94rem]! tw:text-[0.7rem]! tw:tracking-[0.03rem]!',
-                  searchObj.meta.searchMode === 'traces' ? 'selected' : '',
-                ]"
-                @click="$emit('update:searchMode', 'traces')"
-                no-caps
-                size="sm"
-              >
-                Traces
-                <q-tooltip>Traces</q-tooltip>
-              </q-btn>
-            </div>
-            <div v-if="config.isEnterprise == 'true'">
-              <q-btn
-                data-test="traces-service-graph-toggle"
-                :class="[
-                  'button button-center tw:rounded-none! tw:w-[6.1rem]! tw:flex tw:justify-center tw:items-center no-border no-outline q-px-sm tw:h-[1.94rem]! tw:text-[0.7rem]! tw:tracking-[0.03rem]!',
-                  searchObj.meta.searchMode === 'service-graph'
-                    ? 'selected'
-                    : '',
-                ]"
-                @click="$emit('update:searchMode', 'service-graph')"
-                no-caps
-                size="sm"
-              >
-                Service Graph
-                <q-tooltip>Service Graph</q-tooltip>
-              </q-btn>
-            </div>
-            <div>
-              <q-btn
-                data-test="traces-search-mode-services-catalog-btn"
-                :class="[
-                  'button button-right tw:w-[7.5rem]! tw:flex tw:justify-center tw:items-center no-border no-outline tw:rounded-l-none! q-px-sm tw:h-[1.94rem]! tw:text-[0.7rem]! tw:tracking-[0.03rem]!',
-                  searchObj.meta.searchMode === 'services-catalog'
-                    ? 'selected'
-                    : '',
-                ]"
-                @click="$emit('update:searchMode', 'services-catalog')"
-                no-caps
-                size="sm"
-              >
-                {{ t("traces.servicesCatalog.tabLabel") }}
-                <q-tooltip>{{ t("traces.servicesCatalog.tabLabel") }}</q-tooltip>
-              </q-btn>
-            </div>
-          </div>
-        </div>
+          <OToggleGroupItem
+            data-test="traces-search-mode-spans-btn"
+            value="spans"
+            size="sm"
+            :tooltip="shouldHideToggleText ? t('traces.spansTab') : undefined"
+          >
+            <template #icon-left><OIcon name="layers" size="sm" class="shrink-0" /></template>
+            <span v-if="!shouldHideToggleText">{{ t("traces.spansTab") }}</span>
+          </OToggleGroupItem>
+          <OToggleGroupItem
+            data-test="traces-search-mode-traces-btn"
+            value="traces"
+            size="sm"
+            :tooltip="shouldHideToggleText ? t('traces.tracesTab') : undefined"
+          >
+            <template #icon-left><OIcon name="account-tree" size="sm" class="shrink-0" /></template>
+            <span v-if="!shouldHideToggleText">{{ t("traces.tracesTab") }}</span>
+          </OToggleGroupItem>
+          <OToggleGroupItem
+            v-if="config.isEnterprise == 'true'"
+            data-test="traces-service-graph-toggle"
+            value="service-graph"
+            size="sm"
+            :tooltip="shouldHideToggleText ? t('traces.serviceGraphTab') : undefined"
+          >
+            <template #icon-left><OIcon name="share" size="sm" class="shrink-0" /></template>
+            <span v-if="!shouldHideToggleText">{{ t("traces.serviceGraphTab") }}</span>
+          </OToggleGroupItem>
+          <OToggleGroupItem
+            data-test="traces-search-mode-services-catalog-btn"
+            value="services-catalog"
+            size="sm"
+            :tooltip="shouldHideToggleText ? t('traces.servicesCatalog.tabLabel') : undefined"
+          >
+            <template #icon-left><OIcon name="menu-book" size="sm" class="shrink-0" /></template>
+            <span v-if="!shouldHideToggleText">{{ t("traces.servicesCatalog.tabLabel") }}</span>
+          </OToggleGroupItem>
+        </OToggleGroup>
 
         <!-- Show search controls only when not on Service Graph or Services Catalog -->
         <template
@@ -97,88 +74,72 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             searchObj.meta.searchMode !== 'services-catalog'
           "
         >
-          <div
-            class="q-pr-xs tw:mr-[0.375rem] tw:flex tw:items-center tw:justify-center tw:border-solid tw:border tw:border-[var(--o2-border-color)] tw:rounded-[0.375rem]"
-          >
-            <q-toggle
-              data-test="traces-search-bar-show-metrics-toggle-btn"
-              v-model="searchObj.meta.showHistogram"
-              class="o2-toggle-button-xs tw:flex tw:items-center tw:justify-center"
-              size="xs"
-              flat
-              :class="
-                store.state.theme === 'dark'
-                  ? 'o2-toggle-button-xs-dark'
-                  : 'o2-toggle-button-xs-light'
-              "
-            >
-            </q-toggle>
-            <img
-              :src="metricsIcon"
-              alt="Metrics"
-              style="width: 20px; height: 20px"
-            />
-            <q-tooltip>
-              {{ t("traces.RedMetrics") }}
-            </q-tooltip>
-          </div>
-          <q-btn
+          <!-- Reset: icon+text at wide widths, icon-only when narrow -->
+          <OButton
             data-test="traces-search-bar-reset-filters-btn"
-            no-caps
-            size="13px"
-            icon="restart_alt"
-            class="tw:flex tw:justify-center tw:items-center tw:w-[2rem] tw:min-h-[2rem]! tw:h-[2rem]! tw:mr-[0.375rem] tw:rounded-[0.375rem] el-border q-mr-sm"
+            variant="outline"
+            size="xs"
             @click="resetFilters"
           >
-            <q-tooltip>
-              {{ t("search.resetFilters") }}
-            </q-tooltip>
-          </q-btn>
-          <!-- Error Only Toggle -->
+            <template #icon-left>
+              <OIcon name="restart-alt" size="sm" class="shrink-0" />
+            </template>
+            <span v-if="!shouldHideResetText">{{ t("common.reset") }}</span>
+          </OButton>
+
           <div
-            class="q-pr-xs tw:mr-[0.375rem] tw:flex tw:items-center tw:justify-center tw:border-solid tw:border tw:border-[var(--o2-border-color)] tw:rounded-[0.375rem]"
+            class="border-button-outline-border rounded-default hover:bg-button-outline-hover-bg flex cursor-pointer items-center justify-center border px-1.5 py-1 transition-all duration-200"
           >
-            <q-toggle
-              data-test="traces-search-bar-error-only-toggle-btn"
-              v-model="searchObj.meta.showErrorOnly"
-              class="o2-toggle-button-xs tw:flex tw:items-center tw:justify-center"
-              size="xs"
-              flat
-              :class="
-                store.state.theme === 'dark'
-                  ? 'o2-toggle-button-xs-dark'
-                  : 'o2-toggle-button-xs-light'
-              "
-              @update:model-value="onErrorOnlyToggle"
-            >
-            </q-toggle>
-            <q-icon
-              name="error"
-              size="1.1rem"
-              class="tw:mx-1 tw:text-red-500"
+            <OSwitch
+              data-test="traces-search-bar-show-metrics-toggle-btn"
+              v-model="searchObj.meta.showHistogram"
+              class="o2-toggle-button-xs flex items-center justify-center pe-1"
+              size="lg"
             />
-            <q-tooltip>
-              {{ t("traces.showErrorOnly") }}
-            </q-tooltip>
+            <OIcon name="bar-chart" size="sm" class="shrink-0" />
+            <OTooltip :content="raw('RED Metrics')" />
           </div>
-          <syntax-guide
-            data-test="logs-search-bar-sql-mode-toggle-btn"
-            :sqlmode="searchObj.meta.sqlMode"
-            class="tw:border! tw:border-[var(--o2-border-color)]! tw:h-[2rem]! tw:w-[2.25rem]!"
-          />
         </template>
+
+        <!-- More menu: Syntax Guide — always last.
+             Sessions + LLM Insights were removed from Traces; they now
+             live as standalone pages under AI Observability. -->
+        <ODropdown side="bottom" align="start">
+          <template #trigger>
+            <OButton
+              data-test="traces-search-bar-more-menu-btn"
+              variant="outline"
+              size="xs"
+              icon-left="more-horiz"
+              class="max-lg:ms-auto"
+            >
+              {{ t("search.menuMore") }}
+            </OButton>
+          </template>
+
+          <SyntaxGuide
+            :sqlmode="searchObj.meta.sqlMode"
+            :menuItem="true"
+            data-test="traces-search-bar-syntax-guide-btn"
+          />
+        </ODropdown>
       </div>
+      <!-- Right toolbar — persistent wrapper so toolbarRightRef is always observable -->
       <div
-        v-if="
-          searchObj.meta.searchMode !== 'service-graph' &&
-          searchObj.meta.searchMode !== 'services-catalog'
-        "
-        class="float-right col-auto"
+        ref="toolbarRightRef"
+        class="flex flex-shrink-0 items-center max-lg:w-full max-lg:justify-end"
       >
-        <div class="float-left tw:mr-[0.375rem]">
-          <date-time
+        <div
+          v-if="
+            searchObj.meta.searchMode !== 'service-graph' &&
+            searchObj.meta.searchMode !== 'services-catalog'
+          "
+          class="flex items-center gap-1.5 max-lg:w-full max-lg:flex-wrap max-lg:justify-end max-lg:gap-y-1"
+        >
+          <DateTime
             ref="dateTimeRef"
             auto-apply
+            menu-align="end"
             :default-type="searchObj.data.datetime.type"
             :default-absolute-time="{
               startTime: searchObj.data.datetime.startTime,
@@ -186,236 +147,185 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
             }"
             :default-relative-time="searchObj.data.datetime.relativeTimePeriod"
             data-test="logs-search-bar-date-time-dropdown"
-            :queryRangeRestrictionInHour="
-              searchObj.data.datetime.queryRangeRestrictionInHour
-            "
-            :queryRangeRestrictionMsg="
-              searchObj.data.datetime.queryRangeRestrictionMsg
-            "
-            class="tw:h-[2rem]"
+            :queryRangeRestrictionInHour="searchObj.data.datetime.queryRangeRestrictionInHour"
+            :queryRangeRestrictionMsg="searchObj.data.datetime.queryRangeRestrictionMsg"
+            class="h-8 max-lg:me-auto"
             @on:date-change="updateDateTime"
             @on:timezone-change="updateTimezone"
           />
-        </div>
-        <div class="search-time tw:mr-[0.375rem] float-left tw:flex">
-          <q-btn
-            v-if="config.isEnterprise == 'true' && isLoading"
-            data-test="traces-search-bar-cancel-btn"
-            dense
-            :title="t('search.cancel')"
-            class="q-pa-none o2-run-query-button o2-color-primary tw:bg-[var(--o2-cancel-query-bg)]! tw:h-[30px] element-box-shadow tw:leading-8!"
-            :class="
-              store.state.zoConfig.auto_query_enabled
-                ? 'search-button-enterprise-border-radius'
-                : ''
-            "
-            @click="cancelQueryData"
-            >{{ t("search.cancel") }}</q-btn
-          >
-          <q-btn
-            v-else
-            data-test="logs-search-bar-refresh-btn"
-            data-cy="search-bar-refresh-button"
-            dense
-            flat
-            :title="t('search.runQuery')"
-            class="q-pa-none o2-run-query-button o2-color-primary tw:h-[30px] element-box-shadow tw:leading-8!"
-            :class="
-              store.state.zoConfig.auto_query_enabled
-                ? 'search-button-enterprise-border-radius'
-                : ''
-            "
-            @click="searchData"
-            :loading="isLoading"
-            :disable="isLoading"
-          >
-            <q-tooltip
-              v-if="
-                searchObj.meta.liveMode &&
-                store.state.zoConfig.auto_query_enabled
-              "
-              >{{ t("search.autoRunEnabled") }}</q-tooltip
-            >
-            <q-icon
-              v-if="
-                searchObj.meta.liveMode &&
-                store.state.zoConfig.auto_query_enabled
-              "
-              name="autorenew"
-              size="14px"
-              class="q-mr-xs"
-            />
-            {{ t("search.runQuery") }}
-          </q-btn>
-          <!-- Dropdown: shown when live mode feature is enabled -->
-          <q-separator
-            v-if="store.state.zoConfig.auto_query_enabled && !isLoading"
-            class="tw:h-[29px] tw:w-[1px]"
-          />
-          <q-btn-dropdown
-            v-if="store.state.zoConfig.auto_query_enabled && !isLoading"
-            flat
-            class="tw:h-[29px] search-button-dropdown o2-color-primary search-button-dropdown-enterprise-border-radius"
-            unelevated
-            dense
-          >
-            <q-list class="tw:min-w-[200px] tw:py-1">
-              <q-item
-                data-test="traces-search-bar-live-mode-toggle-btn"
-                clickable
-                v-close-popup
-                @click="toggleLiveMode"
-                class="tw:text-[12px] tw:rounded-md tw:mx-1"
+          <div>
+            <div class="flex items-center">
+              <OButton
+                v-if="config.isEnterprise == 'true' && isLoading"
+                variant="ghost"
+                data-test="traces-search-bar-cancel-btn"
+                :title="t('search.cancel')"
+                class="bg-cancel-query-bg! text-button-primary-foreground! element-box-shadow h-[1.875rem]! w-[5.875rem]! ![border-radius:0.375rem_0_0_0.375rem] p-0 px-1! py-0! text-center text-xs! leading-4! font-medium! break-words whitespace-normal [transition:box-shadow_0.3s_ease,_opacity_0.2s_ease]"
+                @click="cancelQueryData"
+                >{{ t("search.cancel") }}</OButton
               >
-                <q-item-section avatar class="tw:min-w-0 tw:pr-2">
-                  <q-icon
-                    :name="
-                      searchObj.meta.liveMode ? 'autorenew' : 'sync_disabled'
-                    "
-                    size="16px"
-                    :color="searchObj.meta.liveMode ? 'primary' : ''"
-                  />
-                </q-item-section>
-                <q-item-section>
-                  <q-item-label class="tw:font-medium">
-                    {{
-                      searchObj.meta.liveMode
-                        ? t("search.turnOffLiveMode")
-                        : t("search.turnOnLiveMode")
-                    }}
-                  </q-item-label>
-                  <q-item-label caption class="tw:text-[11px]">
-                    {{ t("search.liveModeTooltip") }}
-                  </q-item-label>
-                </q-item-section>
-              </q-item>
-            </q-list>
-          </q-btn-dropdown>
-        </div>
-        <q-btn
-          class="tw:mr-[0.375rem] float-left download-logs-btn q-pa-sm tw:min-h-[2rem] el-border q-mr-sm"
-          size="sm"
-          :disable="!searchObj.data.queryResults?.hits?.length"
-          icon="download"
-          title="Export Traces"
-          @click="downloadLogs"
-        />
-        <share-button
-          data-test="logs-search-bar-share-link-btn"
-          :url="tracesShareURL"
-          button-class="tw:mr-0 download-logs-btn q-px-sm tw:min-h-[2rem] el-border"
-          button-size="sm"
-        />
-      </div>
-
-      <!-- Service Graph right toolbar: DateTime, Refresh, Tree/Graph tabs, Layout -->
-      <div
-        v-if="searchObj.meta.searchMode === 'service-graph'"
-        class="float-right col-auto o2-input-full"
-      >
-        <div class="tw:flex tw:items-center tw:gap-[0.5rem]">
-          <date-time
-            ref="dateTimeRef"
-            auto-apply
-            :default-type="searchObj.data.datetime.type"
-            :default-absolute-time="{
-              startTime: searchObj.data.datetime.startTime,
-              endTime: searchObj.data.datetime.endTime,
-            }"
-            :default-relative-time="searchObj.data.datetime.relativeTimePeriod"
-            data-test="service-graph-date-time-picker"
-            class="tw:h-[2rem]!"
-            @on:date-change="updateDateTime"
-          />
-          <q-btn
-            data-test="service-graph-refresh-btn"
-            class="tw:mr-[0.375rem] tw:w-[1rem]! tw:min-h-[1.9rem]! tw:h-[1.9rem]! el-border"
-            icon="refresh"
-            @click="$emit('service-graph-refresh')"
-          >
-            <q-tooltip>{{ t("common.refresh") }}</q-tooltip>
-          </q-btn>
-          <div class="button-group logs-visualize-toggle element-box-shadow">
-            <div class="row">
-              <div>
-                <q-btn
-                  data-test="service-graph-tree-view-btn"
-                  :class="[
-                    'button button-left tw:flex tw:justify-center tw:items-center no-border no-outline tw:rounded-r-none! q-px-sm tw:h-[1.875rem]! tw:text-[0.7rem]! tw:tracking-[0.03rem]!',
-                    searchObj.meta.serviceGraphVisualizationType === 'tree'
-                      ? 'selected'
-                      : '',
-                  ]"
-                  @click="onServiceGraphVisualizationChange('tree')"
-                  no-caps
-                  size="sm"
+              <OButton
+                v-else
+                variant="ghost"
+                data-test="logs-search-bar-refresh-btn"
+                data-cy="search-bar-refresh-button"
+                :title="t('search.runQuery')"
+                class="element-box-shadow bg-button-primary! text-button-primary-foreground! hover:ring-button-primary/70 h-[1.875rem]! w-[5.875rem]! p-0 px-1! py-0! text-center text-xs! leading-4! font-medium! break-words whitespace-normal [transition:box-shadow_0.3s_ease,_opacity_0.2s_ease] hover:opacity-90 hover:ring-2"
+                :class="
+                  store.state.zoConfig.auto_query_enabled
+                    ? '![border-radius:0.375rem_0_0_0.375rem]'
+                    : 'rounded-default'
+                "
+                @click="searchData"
+                :loading="isLoading"
+                :disabled="isLoading"
+              >
+                <OTooltip
+                  v-if="searchObj.meta.liveMode && store.state.zoConfig.auto_query_enabled"
+                  :content="t('search.autoRunEnabled')"
+                />
+                <OIcon
+                  v-if="searchObj.meta.liveMode && store.state.zoConfig.auto_query_enabled"
+                  name="autorenew"
+                  size="xs"
+                />
+                {{ t("search.runQuery") }}
+              </OButton>
+              <OSeparator class="h-[1.875rem]! w-px" vertical />
+              <ODropdown v-if="store.state.zoConfig.auto_query_enabled" side="bottom" align="end">
+                <template #trigger>
+                  <OButton
+                    variant="ghost"
+                    size="icon-xs"
+                    :disabled="isLoading"
+                    :class="[
+                      config.isEnterprise == 'true' && isLoading
+                        ? 'bg-cancel-query-bg! text-button-primary-foreground!'
+                        : 'bg-button-primary! text-button-primary-foreground! hover:ring-button-primary/70 hover:opacity-90 hover:ring-2',
+                      '![border-radius:0_0.375rem_0.375rem_0]',
+                    ]"
+                  >
+                    <OIcon name="arrow-drop-down" size="sm" />
+                  </OButton>
+                </template>
+                <ODropdownItem
+                  data-test="traces-search-bar-live-mode-toggle-btn"
+                  @select="toggleLiveMode"
                 >
-                  Tree View
-                  <q-tooltip>Tree View</q-tooltip>
-                </q-btn>
-              </div>
-              <div>
-                <q-btn
-                  data-test="service-graph-graph-view-btn"
-                  :class="[
-                    'button button-right tw:flex tw:justify-center tw:items-center no-border no-outline tw:rounded-l-none! q-px-sm tw:h-[1.875rem]! tw:text-[0.7rem]! tw:tracking-[0.03rem]!',
-                    searchObj.meta.serviceGraphVisualizationType === 'graph'
-                      ? 'selected'
-                      : '',
-                  ]"
-                  @click="onServiceGraphVisualizationChange('graph')"
-                  no-caps
-                  size="sm"
-                >
-                  Graph View
-                  <q-tooltip>Graph View</q-tooltip>
-                </q-btn>
-              </div>
+                  <template #icon-left>
+                    <OIcon
+                      :name="searchObj.meta.liveMode ? 'autorenew' : 'sync-disabled'"
+                      size="sm"
+                      :class="searchObj.meta.liveMode ? 'text-accent' : ''"
+                    />
+                  </template>
+                  <span>
+                    <div class="text-xs font-medium">
+                      {{
+                        searchObj.meta.liveMode
+                          ? t("search.turnOffLiveMode")
+                          : t("search.turnOnLiveMode")
+                      }}
+                    </div>
+                    <div class="text-2xs text-muted-foreground">
+                      {{ t("search.liveModeTooltip") }}
+                    </div>
+                  </span>
+                </ODropdownItem>
+              </ODropdown>
             </div>
           </div>
-          <q-select
-            v-model="searchObj.meta.serviceGraphLayoutType"
-            :options="serviceGraphLayoutOptions"
-            dense
-            borderless
-            class="tw:w-[7.5rem] tw:min-h-[2rem]! tw:h-[2rem]!"
-            emit-value
-            map-options
-            :disable="searchObj.meta.serviceGraphVisualizationType === 'graph'"
-            @update:model-value="onServiceGraphLayoutChange"
-          />
-        </div>
-      </div>
-
-      <!-- Services Catalog right toolbar: DateTime, Refresh -->
-      <div
-        v-if="searchObj.meta.searchMode === 'services-catalog'"
-        class="float-right col-auto o2-input-full"
-      >
-        <div class="tw:flex tw:items-center tw:gap-[0.5rem]">
-          <date-time
-            ref="dateTimeRef"
-            auto-apply
-            :default-type="searchObj.data.datetime.type"
-            :default-absolute-time="{
-              startTime: searchObj.data.datetime.startTime,
-              endTime: searchObj.data.datetime.endTime,
-            }"
-            :default-relative-time="searchObj.data.datetime.relativeTimePeriod"
-            data-test="services-catalog-date-time-picker"
-            class="tw:h-[2rem]!"
-            @on:date-change="updateDateTime"
-          />
-          <q-btn
-            data-test="services-catalog-refresh-btn"
-            class="tw:mr-[0.375rem] tw:w-[1rem]! tw:min-h-[1.9rem]! tw:h-[1.9rem]! el-border"
-            icon="refresh"
-            @click="$emit('services-catalog-refresh')"
+          <OButton
+            variant="outline"
+            size="icon-toolbar"
+            :disabled="!searchObj.data.queryResults?.hits?.length"
+            :title="t('traces.exportTraces')"
+            @click="downloadLogs"
           >
-            <q-tooltip>{{ t("common.refresh") }}</q-tooltip>
-          </q-btn>
+            <OIcon name="download" size="sm" />
+          </OButton>
+          <ShareButton
+            data-test="logs-search-bar-share-link-btn"
+            :url="tracesShareURL"
+            variant="outline"
+            size="icon-toolbar"
+            shortcut-id="tracesCopyUrl"
+          />
+        </div>
+
+        <!-- Service Graph right toolbar: DateTime, Refresh, Tree/Graph tabs, Layout -->
+        <div v-if="searchObj.meta.searchMode === 'service-graph'" class="ms-auto max-lg:ms-0">
+          <div class="flex items-center gap-2 max-lg:w-full max-lg:justify-end max-lg:gap-1.5">
+            <DateTime
+              ref="dateTimeRef"
+              auto-apply
+              :default-type="searchObj.data.datetime.type"
+              :default-absolute-time="{
+                startTime: searchObj.data.datetime.startTime,
+                endTime: searchObj.data.datetime.endTime,
+              }"
+              :default-relative-time="searchObj.data.datetime.relativeTimePeriod"
+              data-test="service-graph-date-time-picker"
+              class="h-8!"
+              @on:date-change="updateDateTime"
+            />
+            <OButton
+              data-test="service-graph-refresh-btn"
+              variant="outline"
+              size="icon-toolbar"
+              class="min-w-[1.875rem]!"
+              @click="$emit('service-graph-refresh')"
+            >
+              <OIcon name="refresh" size="sm" />
+              <OTooltip :content="t('common.refresh')" />
+            </OButton>
+            <OToggleGroup
+              :model-value="searchObj.meta.serviceGraphVisualizationType"
+              @update:model-value="onServiceGraphVisualizationChange($event)"
+            >
+              <OToggleGroupItem data-test="service-graph-tree-view-btn" value="tree" size="sm">
+                <template #icon-left>
+                  <OIcon name="git-branch" size="sm" />
+                </template>
+                <span class="max-lg:hidden">{{ t("traces.treeView") }}</span>
+              </OToggleGroupItem>
+              <OToggleGroupItem data-test="service-graph-graph-view-btn" value="graph" size="sm">
+                <template #icon-left><OIcon name="share" size="sm" class="shrink-0" /></template>
+                <span class="max-lg:hidden">{{ t("traces.graphView") }}</span>
+              </OToggleGroupItem>
+            </OToggleGroup>
+            <OSelect
+              v-model="searchObj.meta.serviceGraphLayoutType"
+              :options="serviceGraphLayoutOptions"
+              :searchable="false"
+              class="h-8! min-h-8! w-[7.5rem] max-lg:w-24!"
+              :disabled="searchObj.meta.serviceGraphVisualizationType === 'graph'"
+              @update:model-value="onServiceGraphLayoutChange"
+            />
+          </div>
+        </div>
+
+        <!-- Services Catalog right toolbar: DateTime, Refresh -->
+        <div v-if="searchObj.meta.searchMode === 'services-catalog'" class="ms-auto">
+          <div class="flex items-center gap-2">
+            <DateTime
+              ref="dateTimeRef"
+              auto-apply
+              menu-align="end"
+              :default-type="searchObj.data.datetime.type"
+              :default-absolute-time="{
+                startTime: searchObj.data.datetime.startTime,
+                endTime: searchObj.data.datetime.endTime,
+              }"
+              :default-relative-time="searchObj.data.datetime.relativeTimePeriod"
+              data-test="services-catalog-date-time-picker"
+              class="me-1.5 h-8!"
+              @on:date-change="updateDateTime"
+            />
+          </div>
         </div>
       </div>
+      <!-- /toolbarRightRef wrapper -->
     </div>
     <div
       v-if="
@@ -423,29 +333,28 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
         searchObj.meta.searchMode !== 'services-catalog' &&
         searchObj.meta.showQuery
       "
-      class="row tw:h-[calc(100%-3.1rem)]!"
+      class="border-border-default flex min-h-0 flex-1 border-b"
     >
-      <div
-        class="col tw:border tw:solid tw:border-[var(--o2-border-color)] tw:mx-[0.375rem] tw:mb-[0.375rem] tw:rounded-[0.375rem] tw:overflow-hidden tw:h-full!"
-      >
-        <code-query-editor
+      <div class="relative flex h-full w-full flex-col overflow-hidden">
+        <CodeQueryEditor
           ref="queryEditorRef"
           editor-id="traces-query-editor"
-          class="monaco-editor tw:px-[0.325rem] tw:py-[0.125rem]"
           v-model:query="searchObj.data.editorValue"
           :keywords="effectiveKeywords"
-          :class="
-            searchObj.data.editorValue == '' &&
-            searchObj.meta.queryEditorPlaceholderFlag
-              ? 'empty-query'
-              : ''
-          "
+          :suggestions="effectiveSuggestions"
+          :field-value-resolver="resolveFieldValues"
           language="sql"
           @update:query="updateQueryValue"
           @run-query="searchData"
-          @focus="searchObj.meta.queryEditorPlaceholderFlag = false"
-          @blur="searchObj.meta.queryEditorPlaceholderFlag = true"
+          @focus="onQueryEditorFocus"
+          @blur="onQueryEditorBlur"
         />
+        <div
+          v-if="searchObj.data.editorValue == '' && searchObj.meta.queryEditorPlaceholderFlag"
+          class="query-editor-placeholder-overlay pointer-events-none absolute top-0 right-0 bottom-0 left-0 z-1 flex items-start [padding:0.1875rem_0.5rem_0_2.15rem] select-none"
+        >
+          <span class="query-editor-placeholder-typewriter">{{ traceEditorPlaceholder }}</span>
+        </div>
       </div>
     </div>
   </div>
@@ -459,42 +368,61 @@ import {
   watch,
   nextTick,
   defineAsyncComponent,
-  onBeforeUnmount,
   onActivated,
   computed,
+  toRef,
 } from "vue";
-import { useI18n } from "vue-i18n";
+import { useQueryPlaceholder } from "@/components/logs/useQueryPlaceholder";
+import { raw, useI18nTyped } from "@/types/i18n";
 import { useRouter } from "vue-router";
-import { useQuasar } from "quasar";
 import { useStore } from "vuex";
 
 import DateTime from "@/components/DateTime.vue";
 import ShareButton from "@/components/common/ShareButton.vue";
-import AppTabs from "@/components/common/AppTabs.vue";
+import OToggleGroup from "@/lib/core/ToggleGroup/OToggleGroup.vue";
+import OToggleGroupItem from "@/lib/core/ToggleGroup/OToggleGroupItem.vue";
+import OButton from "@/lib/core/Button/OButton.vue";
+import OIcon from "@/lib/core/Icon/OIcon.vue";
+import ODropdown from "@/lib/overlay/Dropdown/ODropdown.vue";
+import ODropdownItem from "@/lib/overlay/Dropdown/ODropdownItem.vue";
+import OSwitch from "@/lib/forms/Switch/OSwitch.vue";
+import OSelect from "@/lib/forms/Select/OSelect.vue";
+import OTooltip from "@/lib/overlay/Tooltip/OTooltip.vue";
+import OSeparator from "@/lib/core/Separator/OSeparator.vue";
 import useTraces from "@/composables/useTraces";
+import { useSqlEditorDiagnostics } from "@/composables/useSqlEditorDiagnostics";
 import SyntaxGuide from "./SyntaxGuide.vue";
 
 import { debounce } from "lodash-es";
 import segment from "@/services/segment_analytics";
 import config from "@/aws-exports";
+import { useToolbarResponsive } from "@/composables/useToolbarResponsive";
 import useSqlSuggestions from "@/composables/useSuggestions";
 import useStreams from "@/composables/useStreams";
-import { getImageURL } from "@/utils/zincutils";
 import {
   applyFilterTerm,
   replaceExistingFieldCondition,
   removeFieldCondition,
 } from "@/utils/traces/filterUtils";
+import { isDatetimeChanged } from "./tracesSearchBar.utils";
+import { toast } from "@/lib/feedback/Toast/useToast";
 
 export default defineComponent({
   name: "ComponentSearchSearchBar",
   components: {
+    OSeparator,
     DateTime,
     ShareButton,
-    AppTabs,
-    CodeQueryEditor: defineAsyncComponent(
-      () => import("@/components/CodeQueryEditor.vue"),
-    ),
+    OToggleGroup,
+    OToggleGroupItem,
+    OButton,
+    OIcon,
+    ODropdown,
+    ODropdownItem,
+    OSwitch,
+    OSelect,
+    OTooltip,
+    CodeQueryEditor: defineAsyncComponent(() => import("@/components/CodeQueryEditor.vue")),
     SyntaxGuide,
   },
   emits: [
@@ -533,45 +461,54 @@ export default defineComponent({
   },
   setup(props, { emit }) {
     const router = useRouter();
-    const { t } = useI18n();
-    const $q = useQuasar();
+    const { t } = useI18nTyped();
     const store = useStore();
     const btnRefreshInterval = ref(null);
 
-    const { searchObj, tracesShareURL } = useTraces();
+    const { searchObj, tracesShareURL, tracesParser } = useTraces();
     const queryEditorRef = ref(null);
 
-    let parser: any;
+    const {
+      onFocus: _sqlOnFocus,
+      onBlur: _sqlOnBlur,
+      onQueryChange: _sqlOnQueryChange,
+    } = useSqlEditorDiagnostics({
+      queryEditorRef,
+      sqlMode: computed(() => searchObj.meta.sqlMode),
+      query: computed(() => searchObj.data.editorValue ?? ""),
+      streamName: computed(() => searchObj.data.stream.selectedStream?.value),
+      externalErrors: toRef(searchObj.data, "sqlSyntaxErrorRanges"),
+    });
+
+    const onQueryEditorFocus = () => {
+      searchObj.meta.queryEditorPlaceholderFlag = false;
+      _sqlOnFocus();
+    };
+    const onQueryEditorBlur = async () => {
+      searchObj.meta.queryEditorPlaceholderFlag = true;
+      await _sqlOnBlur();
+    };
+
     let streamName = "";
     const dateTimeRef = ref(null);
 
-    const { getStream } = useStreams();
+    const { getStream } = useStreams(t);
 
     const {
       autoCompleteData,
       autoCompleteKeywords,
       effectiveKeywords,
+      effectiveSuggestions,
       getSuggestions,
       updateFieldKeywords,
       updateStreamKeywords,
+      resolveFieldValues,
     } = useSqlSuggestions();
-
-    const importSqlParser = async () => {
-      const useSqlParser: any = await import("@/composables/useParser");
-      const { sqlParser }: any = useSqlParser.default();
-      parser = await sqlParser();
-    };
-
-    onBeforeUnmount(async () => {
-      await importSqlParser();
-    });
 
     onActivated(async () => {
       await nextTick();
       if (searchObj.data.datetime.type === "relative") {
-        dateTimeRef.value.setRelativeTime(
-          searchObj.data.datetime.relativeTimePeriod,
-        );
+        dateTimeRef.value.setRelativeTime(searchObj.data.datetime.relativeTimePeriod);
 
         dateTimeRef.value.refresh();
       } else {
@@ -609,26 +546,24 @@ export default defineComponent({
 
     const updateAutoComplete = (value) => {
       autoCompleteData.value.query = value;
-      autoCompleteData.value.cursorIndex =
-        queryEditorRef.value.getCursorIndex();
+      autoCompleteData.value.cursorIndex = queryEditorRef.value.getCursorIndex();
       autoCompleteData.value.fieldValues = props.fieldValues;
-      autoCompleteData.value.popup.open =
-        queryEditorRef.value.triggerAutoComplete;
+      autoCompleteData.value.popup.open = queryEditorRef.value.triggerAutoComplete;
       // [NEW] Set stream context so getSuggestions can read stored values from
       // IndexedDB. Traces field expansion already writes to IDB via
       // captureFromValuesApi (useFieldValuesStream) with stream_type="traces",
       // so values are already being captured — this just enables the read side.
       autoCompleteData.value.org = store.state.selectedOrganization.identifier;
       autoCompleteData.value.streamType = "traces";
-      autoCompleteData.value.streamName =
-        searchObj.data.stream.selectedStream.value ?? "";
+      autoCompleteData.value.streamName = searchObj.data.stream.selectedStream.value ?? "";
       getSuggestions();
     };
 
-    const updateQueryValue = async (value: string, event?: any) => {
+    const updateQueryValue = async (value: string) => {
+      _sqlOnQueryChange();
       updateAutoComplete(value);
       if (searchObj.meta.sqlMode == true) {
-        searchObj.data.parsedQuery = parser.astify(value);
+        searchObj.data.parsedQuery = tracesParser.value?.astify(value);
         if (searchObj.data.parsedQuery?.from?.length > 0) {
           if (
             searchObj.data.parsedQuery.from[0].table !==
@@ -637,30 +572,26 @@ export default defineComponent({
           ) {
             let streamFound = false;
             streamName = searchObj.data.parsedQuery.from[0].table;
-            await getStream(streamName, "traces", true).then(
-              (streamResponse) => {
-                streamFound = true;
-                let itemObj = {
-                  label: streamResponse.name,
-                  value: streamResponse.name,
-                };
-                searchObj.data.stream.selectedStream = itemObj;
-                streamResponse.schema.forEach((field) => {
-                  searchObj.data.stream.selectedStreamFields.push({
-                    name: field.name,
-                  });
+            await getStream(streamName, "traces", true).then((streamResponse) => {
+              streamFound = true;
+              let itemObj = {
+                label: streamResponse.name,
+                value: streamResponse.name,
+              };
+              searchObj.data.stream.selectedStream = itemObj;
+              streamResponse.schema.forEach((field) => {
+                searchObj.data.stream.selectedStreamFields.push({
+                  name: field.name,
                 });
-              },
-            );
+              });
+            });
 
             if (streamFound == false) {
               searchObj.data.stream.selectedStream = { label: "", value: "" };
               searchObj.data.stream.selectedStreamFields = [];
-              $q.notify({
-                message: "Stream not found",
-                color: "negative",
-                position: "top",
-                timeout: 2000,
+              toast({
+                message: t("traces.searchBar.streamNotFound"),
+                variant: "warning",
               });
             }
           }
@@ -692,18 +623,15 @@ export default defineComponent({
         value.valueType == "absolute" &&
         searchObj.data.stream.selectedStream.length > 0 &&
         searchObj.data.datetime.queryRangeRestrictionInHour > 0 &&
-        value.hasOwnProperty("selectedDate") &&
-        value.hasOwnProperty("selectedTime") &&
-        value.selectedDate.hasOwnProperty("from") &&
-        value.selectedTime.hasOwnProperty("startTime")
+        Object.prototype.hasOwnProperty.call(value, "selectedDate") &&
+        Object.prototype.hasOwnProperty.call(value, "selectedTime") &&
+        Object.prototype.hasOwnProperty.call(value.selectedDate, "from") &&
+        Object.prototype.hasOwnProperty.call(value.selectedTime, "startTime")
       ) {
         // Convert hours to microseconds
         let newStartTime =
           parseInt(value.endTime) -
-          searchObj.data.datetime.queryRangeRestrictionInHour *
-            60 *
-            60 *
-            1000000;
+          searchObj.data.datetime.queryRangeRestrictionInHour * 60 * 60 * 1000000;
 
         if (parseInt(newStartTime) > parseInt(value.startTime)) {
           value.startTime = newStartTime;
@@ -724,6 +652,11 @@ export default defineComponent({
         }
       }
 
+      // See `tracesSearchBar.utils.ts → isDatetimeChanged` for the
+      // mount-replay filter rationale (relative ranges compare by period,
+      // absolute by raw start/end).
+      const datetimeChanged = isDatetimeChanged(searchObj.data.datetime, value);
+
       searchObj.data.datetime = {
         startTime: value.startTime,
         endTime: value.endTime,
@@ -731,10 +664,8 @@ export default defineComponent({
           ? value.relativeTimePeriod
           : searchObj.data.datetime.relativeTimePeriod,
         type: value.relativeTimePeriod ? "relative" : "absolute",
-        queryRangeRestrictionMsg:
-          searchObj.data.datetime?.queryRangeRestrictionMsg || "",
-        queryRangeRestrictionInHour:
-          searchObj.data.datetime?.queryRangeRestrictionInHour || 0,
+        queryRangeRestrictionMsg: searchObj.data.datetime?.queryRangeRestrictionMsg || "",
+        queryRangeRestrictionInHour: searchObj.data.datetime?.queryRangeRestrictionInHour || 0,
       };
 
       await nextTick();
@@ -744,11 +675,29 @@ export default defineComponent({
 
       if (
         value.valueType === "absolute" &&
-        store.state.zoConfig?.auto_query_enabled
+        searchObj.meta.liveMode &&
+        store.state.zoConfig?.auto_query_enabled &&
+        value.userChangedValue === true &&
+        datetimeChanged
       ) {
         // Debounce query trigger so user can finish typing the full time value
         triggerAbsoluteQueryDebounced(value);
         return;
+      }
+
+      // Live mode: auto-trigger search ONLY on a genuine user-driven time-range
+      // change. `userChangedValue` (stamped by DateTime.vue) is the authoritative
+      // signal — programmatic sets (redirect, metrics brush, mount replay) emit
+      // `false` and must never auto-run, since they are owned by an explicit
+      // trigger elsewhere. `datetimeChanged` additionally filters a user toggling
+      // the type tab without actually changing the range.
+      if (
+        store.state.zoConfig?.auto_query_enabled &&
+        searchObj.meta.liveMode &&
+        value.userChangedValue === true &&
+        datetimeChanged
+      ) {
+        emit("searchdata");
       }
 
       if (config.isCloud == "true" && value.userChangedValue) {
@@ -762,25 +711,11 @@ export default defineComponent({
           page: "Search Logs",
         });
       }
-
-      // Live mode: auto-trigger search on any time range change
-      if (store.state.zoConfig?.auto_query_enabled && searchObj.meta.liveMode) {
-        emit("searchdata");
-      }
     };
 
     const toggleLiveMode = () => {
       searchObj.meta.liveMode = !searchObj.meta.liveMode;
-      localStorage.setItem(
-        "oo_toggle_auto_run",
-        String(searchObj.meta.liveMode),
-      );
-    };
-
-    const updateQuery = () => {
-      // alert(searchObj.data.query);
-      if (queryEditorRef.value?.setValue)
-        queryEditorRef.value.setValue(searchObj.data.query);
+      localStorage.setItem("oo_toggle_auto_run", String(searchObj.meta.liveMode));
     };
 
     // This method is used in parent component using ref
@@ -790,15 +725,15 @@ export default defineComponent({
 
     // Apply multiple filter terms independently (replace-or-append per field).
     // Used by parent (Index.vue) for metrics brush selections and error toggle.
-    const applyFilters = (terms: string[]) => {
+    const applyFilters = (terms: string[], skipSearch = false) => {
       let current = searchObj.data.editorValue;
       for (const term of terms) {
         current = applyFilterTerm(term, current);
       }
       searchObj.data.editorValue = current;
-      if (queryEditorRef.value?.setValue)
-        queryEditorRef.value.setValue(current);
-      if (store.state.zoConfig?.auto_query_enabled && searchObj.meta.liveMode) {
+      if (queryEditorRef.value?.setValue) queryEditorRef.value.setValue(current);
+      // Only trigger search if not explicitly skipped
+      if (!skipSearch && store.state.zoConfig?.auto_query_enabled && searchObj.meta.liveMode) {
         emit("searchdata");
       }
     };
@@ -806,23 +741,16 @@ export default defineComponent({
     // Remove all conditions for a given field from the editor value.
     // Used by parent (Index.vue) to clear the error-only filter on toggle-off.
     const removeFilterByField = (fieldName: string) => {
-      const value = searchObj.data.editorValue;
-      const parts = value.split("|");
-      const target = parts.length > 1 ? 1 : 0;
-      const replaced = replaceExistingFieldCondition(
-        parts[target] as string,
-        fieldName,
-        "",
-      );
-      parts[target] = replaced
+      // The whole editor value is the where clause — never split it on "|", the
+      // split is quote-unaware and would corrupt match_all('text | error').
+      const value = searchObj.data.editorValue as string;
+      const newValue = replaceExistingFieldCondition(value, fieldName, "")
         .replace(/\s*\band\b\s*$/i, "")
         .replace(/^\s*\band\b\s*/i, "")
         .replace(/\s+and\s+and\s+/gi, " and ")
         .trim();
-      const newValue = parts.length > 1 ? parts.join("| ") : parts[0];
-      searchObj.data.editorValue = newValue as string;
-      if (queryEditorRef.value?.setValue)
-        queryEditorRef.value.setValue(newValue);
+      searchObj.data.editorValue = newValue;
+      if (queryEditorRef.value?.setValue) queryEditorRef.value.setValue(newValue);
       if (store.state.zoConfig?.auto_query_enabled && searchObj.meta.liveMode) {
         emit("searchdata");
       }
@@ -903,25 +831,19 @@ export default defineComponent({
       dateTimeRef.value?.setDateType("absolute");
     };
 
-    const metricsIcon = computed(() => {
-      return store.state.theme === "dark"
-        ? getImageURL("images/common/bar_chart_histogram_light.svg")
-        : getImageURL("images/common/bar_chart_histogram.svg");
-    });
-
     // Service Graph toolbar controls
     const serviceGraphVisualizationTabs = [
-      { label: "Tree View", value: "tree" },
-      { label: "Graph View", value: "graph" },
+      { label: t("traces.treeView"), value: "tree" },
+      { label: t("traces.graphView"), value: "graph" },
     ];
 
     const serviceGraphLayoutOptions = computed(() => {
       if (searchObj.meta.serviceGraphVisualizationType === "graph") {
-        return [{ label: "Force Layout", value: "force" }];
+        return [{ label: t("traces.layoutForce"), value: "force" }];
       }
       return [
-        { label: "Horizontal", value: "horizontal" },
-        { label: "Vertical", value: "vertical" },
+        { label: t("traces.layoutHorizontal"), value: "horizontal" },
+        { label: t("traces.layoutVertical"), value: "vertical" },
       ];
     });
 
@@ -938,8 +860,31 @@ export default defineComponent({
       localStorage.setItem("serviceGraph_layoutType", type);
     };
 
+    const _traceStreamFields = computed(() => searchObj.data.stream.selectedStreamFields ?? []);
+    const _traceFieldValues = computed(() => props.fieldValues ?? {});
+    const _traceSqlMode = computed(() => false);
+    const _traceNoStream = computed(() => !searchObj.data.stream.selectedStream?.value);
+    const { placeholder: traceEditorPlaceholder } = useQueryPlaceholder(
+      _traceStreamFields,
+      _traceFieldValues,
+      _traceSqlMode,
+      _traceNoStream,
+      t,
+      { excludeMatchAll: true },
+    );
+
+    // Responsive toolbar — shared composable tracks available left-section width
+    const { toolbarLeftRef, toolbarRightRef, availableLeftWidth } = useToolbarResponsive();
+
+    // Traces-specific breakpoints (actual content widths + 60px buffer to fire before clipping):
+    //   Toggle items with text: ~682px total → hide at 750 (682+68 buffer)
+    //   After toggle icon-only (~459px) + reset text: hide reset text at 540
+    const shouldHideToggleText = computed(() => availableLeftWidth.value < 750);
+    const shouldHideResetText = computed(() => availableLeftWidth.value < 540);
+
     return {
       t,
+      raw,
       router,
       store,
       searchObj,
@@ -947,19 +892,21 @@ export default defineComponent({
       btnRefreshInterval,
       refreshTimes: searchObj.config.refreshTimes,
       refreshTimeChange,
+      onQueryEditorFocus,
+      onQueryEditorBlur,
       updateQueryValue,
       updateDateTime,
-      updateQuery,
       downloadLogs,
       setEditorValue,
       autoCompleteKeywords,
       effectiveKeywords,
+      resolveFieldValues,
+      effectiveSuggestions,
       updateTimezone,
       dateTimeRef,
       resetFilters,
       onErrorOnlyToggle,
       updateNewDateTime,
-      metricsIcon,
       tracesShareURL,
       config,
       applyFilters,
@@ -969,6 +916,11 @@ export default defineComponent({
       onServiceGraphVisualizationChange,
       onServiceGraphLayoutChange,
       toggleLiveMode,
+      traceEditorPlaceholder,
+      toolbarLeftRef,
+      toolbarRightRef,
+      shouldHideToggleText,
+      shouldHideResetText,
     };
   },
   computed: {
@@ -987,32 +939,20 @@ export default defineComponent({
           this.searchObj.data.editorValue,
         );
         this.searchObj.data.editorValue = newValue;
-        this.searchObj.data.query = newValue;
         this.searchObj.data.stream.addToFilter = "";
-        if (this.queryEditorRef?.setValue)
-          this.queryEditorRef.setValue(newValue);
-        if (
-          this.store.state.zoConfig.auto_query_enabled &&
-          this.searchObj.meta.liveMode
-        ) {
+        if (this.queryEditorRef?.setValue) this.queryEditorRef.setValue(newValue);
+        if (this.store.state.zoConfig.auto_query_enabled && this.searchObj.meta.liveMode) {
           this.searchData();
         }
       }
     },
     removeFieldTerm(fieldName: string) {
       if (!fieldName) return;
-      const newValue = removeFieldCondition(
-        this.searchObj.data.editorValue,
-        fieldName,
-      );
+      const newValue = removeFieldCondition(this.searchObj.data.editorValue, fieldName);
       this.searchObj.data.editorValue = newValue;
-      this.searchObj.data.query = newValue;
       this.searchObj.data.stream.removeFilterField = "";
       if (this.queryEditorRef?.setValue) this.queryEditorRef.setValue(newValue);
-      if (
-        this.store.state.zoConfig.auto_query_enabled &&
-        this.searchObj.meta.liveMode
-      ) {
+      if (this.store.state.zoConfig.auto_query_enabled && this.searchObj.meta.liveMode) {
         this.searchData();
       }
     },
@@ -1020,164 +960,3 @@ export default defineComponent({
   },
 });
 </script>
-
-<style lang="scss" scoped>
-.search-bar-component {
-  padding-bottom: 1px;
-
-  .q-toggle__inner {
-    font-size: 30px;
-  }
-
-  .q-toggle__label {
-    font-size: 12px;
-  }
-
-  .casesensitive-btn {
-    padding: 8px;
-    margin-left: -6px;
-    background-color: #d5d5d5;
-    border-radius: 0px 3px 3px 0px;
-  }
-  .search-field .q-field {
-    &__control {
-      border-radius: 3px 0px 0px 3px !important;
-    }
-    &__native {
-      font-weight: 600;
-    }
-  }
-  .search-time {
-    // width: 120px;
-    .q-btn-group {
-      border-radius: 3px;
-
-      .q-btn {
-        min-height: auto;
-      }
-    }
-  }
-  .search-dropdown {
-    padding: 0px;
-    .block {
-      color: $dark-page;
-      font-weight: 600;
-      font-size: 12px;
-    }
-    .q-btn-dropdown__arrow-container {
-      color: $light-text2;
-    }
-  }
-  .refresh-rate-dropdown-container {
-    width: 220px;
-    * .q-btn {
-      font-size: 12px !important;
-      padding-left: 8px;
-      padding-right: 8px;
-    }
-  }
-
-  .flex-start {
-    justify-content: flex-start;
-    align-items: flex-start;
-    display: flex;
-  }
-
-  .resultsOverChart {
-    margin-bottom: 0.75rem;
-    font-size: 0.875rem;
-    color: $dark-page;
-    font-weight: 700;
-  }
-
-  .ddlWrapper {
-    position: relative;
-    z-index: 10;
-
-    .listWrapper {
-      box-shadow: 0px 3px 15px rgba(0, 0, 0, 0.1);
-      transition: height 0.25s ease;
-      height: calc(100vh - 146px);
-      background-color: white;
-      position: absolute;
-      top: 2.75rem;
-      width: 100%;
-      left: 0;
-
-      &:empty {
-        height: 0;
-      }
-
-      &,
-      .q-list {
-        border-radius: 3px;
-      }
-    }
-  }
-  .fields_autocomplete {
-    max-height: 250px;
-  }
-
-  .search-button {
-    min-width: 96px;
-    line-height: 29px;
-    font-weight: bold;
-    text-transform: initial;
-    font-size: 11px;
-    color: white;
-    padding: 0px 5px;
-
-    .q-btn__content {
-      background: $secondary;
-      border-radius: 3px 3px 3px 3px;
-      padding: 0px 5px;
-
-      .q-icon {
-        font-size: 15px;
-        color: #ffffff;
-      }
-    }
-  }
-
-  .download-logs-btn {
-    height: 30px;
-  }
-
-  .app-tabs-container {
-    :deep(.o2-tabs) {
-      height: 100%;
-
-      .o2-tab {
-        height: 100%;
-        padding-top: 0;
-        padding-bottom: 0;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-size: 0.8125rem;
-      }
-    }
-  }
-
-  .reset-filters {
-    width: 30px;
-    height: 30px;
-
-    .q-icon {
-      margin-right: 0;
-    }
-  }
-}
-
-.search-button-enterprise-border-radius {
-  border-radius: 0.375rem 0px 0px 0.375rem !important;
-}
-
-.search-button-dropdown-enterprise-border-radius {
-  border-radius: 0px 0.375rem 0.375rem 0px !important;
-}
-
-.o2-run-query-button {
-  width: 94px !important;
-}
-</style>

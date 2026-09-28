@@ -20,9 +20,8 @@ use bytes::Bytes;
 use config::utils::time::BASE_TIME;
 use futures::{StreamExt, stream::BoxStream};
 use object_store::{
-    Error, GetOptions, GetResult, ListResult, MultipartUpload, OBJECT_STORE_COALESCE_DEFAULT,
-    ObjectMeta, PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, coalesce_ranges,
-    path::Path,
+    Error, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    PutMultipartOptions, PutOptions, PutPayload, PutResult, Result, path::Path,
 };
 
 use crate::{
@@ -54,8 +53,12 @@ impl CacheFS {
 
 #[async_trait]
 impl ObjectStoreExt for CacheFS {
-    fn get_account(&self, file: &str) -> Option<String> {
-        storage::get_account(file)
+    fn get_account(&self, org_id: &str, file: &str) -> Option<String> {
+        storage::get_account(org_id, file)
+    }
+
+    async fn add_account(&self, key: String, acc: Box<dyn ObjectStore>) {
+        storage::add_account(&key, acc).await;
     }
 
     async fn put(
@@ -150,12 +153,7 @@ impl ObjectStoreExt for CacheFS {
         location: &Path,
         ranges: &[Range<u64>],
     ) -> Result<Vec<Bytes>> {
-        coalesce_ranges(
-            ranges,
-            |range| self.get_range(account, location, range),
-            OBJECT_STORE_COALESCE_DEFAULT,
-        )
-        .await
+        file_data::get_ranges_opts(account, location.as_ref(), ranges, true).await
     }
 
     async fn head(&self, account: &str, location: &Path) -> Result<ObjectMeta> {
@@ -169,7 +167,7 @@ impl ObjectStoreExt for CacheFS {
                 version: None,
             });
         }
-        // default
+        // default to storage
         storage::head(account, &path).await
     }
 
@@ -180,18 +178,15 @@ impl ObjectStoreExt for CacheFS {
         })
     }
 
-    fn delete_stream(
+    async fn delete_stream(
         &self,
         _account: &str,
         _locations: BoxStream<'static, Result<Path>>,
-    ) -> BoxStream<'static, Result<Path>> {
-        futures::stream::once(async {
-            Err(Error::NotImplemented {
-                operation: "delete_stream".to_string(),
-                implementer: Self::name().to_string(),
-            })
+    ) -> Result<Vec<Path>> {
+        Err(Error::NotImplemented {
+            operation: "delete_stream".to_string(),
+            implementer: Self::name().to_string(),
         })
-        .boxed()
     }
 
     fn list(
@@ -390,7 +385,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::Generic { .. }));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_cache_fs_get_ranges() {
         let cache_fs = CacheFS {};
         let location = Path::from("test/file.txt");
@@ -428,10 +423,7 @@ mod tests {
         let cache_fs = CacheFS {};
         let locations = futures::stream::once(async { Ok(Path::from("test/file.txt")) }).boxed();
 
-        let mut result_stream = cache_fs.delete_stream("default", locations);
-        let result = result_stream.next().await;
-        assert!(result.is_some());
-        let result = result.unwrap();
+        let result = cache_fs.delete_stream("default", locations).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::NotImplemented { .. }));
     }

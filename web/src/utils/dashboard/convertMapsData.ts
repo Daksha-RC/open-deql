@@ -13,6 +13,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import { gt } from "@/types/i18n";
+
 import { getDataValue } from "./aliasUtils";
 import { getCountryName } from "./countryMappings";
 
@@ -24,14 +26,14 @@ import { getCountryName } from "./countryMappings";
  * @return {Object} - the option object for rendering the map chart
  */
 import { formatUnitValue, getUnitValue } from "./convertDataIntoUnitValue";
+import { escapeHtml } from "@/utils/html";
 
 export const convertMapsData = (panelSchema: any, mapData: any) => {
   //if no name and value than return it
-  if (
-    !panelSchema.queries[0]?.fields?.name ||
-    !panelSchema.queries[0]?.fields?.value_for_maps ||
-    !mapData
-  ) {
+  const hasValidQuery = panelSchema.queries?.some(
+    (query: any) => query.fields?.name && query.fields?.value_for_maps,
+  );
+  if (!hasValidQuery || !mapData) {
     return { options: null };
   }
 
@@ -57,7 +59,7 @@ export const convertMapsData = (panelSchema: any, mapData: any) => {
         );
       }
 
-      return `${params.name}: ${formattedValue}`;
+      return `${escapeHtml(params.name)}: ${escapeHtml(formattedValue)}`;
     },
   };
 
@@ -78,7 +80,7 @@ export const convertMapsData = (panelSchema: any, mapData: any) => {
         "#a50026",
       ] as const,
     },
-    text: ["High", "Low"],
+    text: [gt("dashboard.utils.visualMapHigh"), gt("dashboard.utils.visualMapLow")],
     calculable: true,
   };
 
@@ -90,6 +92,9 @@ export const convertMapsData = (panelSchema: any, mapData: any) => {
   options.xAxis = [];
   options.yAxis = [];
   options.series = panelSchema.queries.map((query: any, index: any) => {
+    if (!query.fields?.name || !query.fields?.value_for_maps) {
+      return { type: "map", data: [] };
+    }
     return {
       type: "map",
       map: panelSchema.config?.map_type.type || "world",
@@ -99,9 +104,7 @@ export const convertMapsData = (panelSchema: any, mapData: any) => {
         },
       },
       data: mapData[index]?.map((item: any) => {
-        const countryName = getCountryName(
-          getDataValue(item, query.fields.name.alias),
-        ); // Map to full country name
+        const countryName = getCountryName(getDataValue(item, query.fields.name.alias)); // Map to full country name
         const value = getDataValue(item, query.fields.value_for_maps.alias);
 
         if (query.customQuery) {
@@ -126,13 +129,9 @@ export const convertMapsData = (panelSchema: any, mapData: any) => {
   if (seriesData.length > 0) {
     const numericValues = seriesData
       .map((item: any) => item.value)
-      .filter(
-        (value: any): value is number =>
-          typeof value === "number" && !Number.isNaN(value),
-      );
+      .filter((value: any): value is number => typeof value === "number" && !Number.isNaN(value));
 
-    const minValue =
-      numericValues.length === 1 ? 0 : Math.min(...numericValues); 
+    const minValue = numericValues.length === 1 ? 0 : Math.min(...numericValues);
     const maxValue = Math.max(...numericValues);
 
     options.visualMap.min = minValue;

@@ -15,11 +15,8 @@
 
 import { describe, expect, it, afterEach } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 import QueryPlanNode from "./QueryPlanNode.vue";
 import type { OperatorNode } from "@/utils/queryPlanParser";
-
-installQuasar();
 
 function makeNode(overrides: Partial<OperatorNode> = {}): OperatorNode {
   return {
@@ -33,10 +30,7 @@ function makeNode(overrides: Partial<OperatorNode> = {}): OperatorNode {
   };
 }
 
-function mountNode(
-  node: OperatorNode,
-  props: Record<string, unknown> = {},
-) {
+function mountNode(node: OperatorNode, props: Record<string, unknown> = {}) {
   return mount(QueryPlanNode, {
     props: {
       node,
@@ -63,17 +57,13 @@ describe("QueryPlanNode", () => {
 
     it("should render the operator name", () => {
       wrapper = mountNode(makeNode({ name: "SortExec" }));
-      expect(wrapper.find(".operator-name").text()).toBe("SortExec");
+      expect(wrapper.find('[data-test="query-plan-node-operator-name"]').text()).toBe("SortExec");
     });
 
     it("should render inline details when colon present in fullText", () => {
-      wrapper = mountNode(
-        makeNode({ fullText: "FilterExec: expression=[x > 0]" }),
-      );
+      wrapper = mountNode(makeNode({ fullText: "FilterExec: expression=[x > 0]" }));
       expect(wrapper.find(".inline-details").exists()).toBe(true);
-      expect(wrapper.find(".inline-details").text()).toContain(
-        "expression=[x > 0]",
-      );
+      expect(wrapper.find(".inline-details").text()).toContain("expression=[x > 0]");
     });
 
     it("should not render inline details when no colon in fullText", () => {
@@ -85,26 +75,27 @@ describe("QueryPlanNode", () => {
   describe("tree connector", () => {
     it("should show └─ connector when isLast is true", () => {
       wrapper = mountNode(makeNode(), { isLast: true });
-      expect(wrapper.find(".tree-connector").text()).toBe("└─");
+      expect(wrapper.find('[data-test="query-plan-node-tree-connector"]').text()).toBe("└─");
     });
 
     it("should show ├─ connector when isLast is false", () => {
       wrapper = mountNode(makeNode(), { isLast: false });
-      expect(wrapper.find(".tree-connector").text()).toBe("├─");
+      expect(wrapper.find('[data-test="query-plan-node-tree-connector"]').text()).toBe("├─");
     });
   });
 
   describe("parent prefix indentation", () => {
     it("should render parentPrefix as tree-indent when provided", () => {
       wrapper = mountNode(makeNode(), { parentPrefix: "│ " });
-      expect(wrapper.find(".tree-indent").exists()).toBe(true);
+      const indent = wrapper.find('[data-test="query-plan-node-tree-indent"]');
+      expect(indent.exists()).toBe(true);
       // .text() trims whitespace, so check the raw innerHTML instead
-      expect(wrapper.find(".tree-indent").element.textContent).toContain("│");
+      expect(indent.element.textContent).toContain("│");
     });
 
     it("should not render tree-indent when parentPrefix is empty", () => {
       wrapper = mountNode(makeNode(), { parentPrefix: "" });
-      expect(wrapper.find(".tree-indent").exists()).toBe(false);
+      expect(wrapper.find('[data-test="query-plan-node-tree-indent"]').exists()).toBe(false);
     });
   });
 
@@ -122,7 +113,7 @@ describe("QueryPlanNode", () => {
 
     it("should show spacer instead of expand icon for leaf nodes", () => {
       wrapper = mountNode(makeNode());
-      expect(wrapper.find(".expand-icon-spacer").exists()).toBe(true);
+      expect(wrapper.find('[data-test="query-plan-node-expand-icon-spacer"]').exists()).toBe(true);
       expect(wrapper.find(".expand-icon").exists()).toBe(false);
     });
 
@@ -162,23 +153,23 @@ describe("QueryPlanNode", () => {
     it("should mark details as truncated and clickable when details exceed 80 chars", () => {
       wrapper = mountNode(nodeWithLongDetails);
       expect(wrapper.find(".inline-details.truncated").exists()).toBe(true);
-      expect(wrapper.find(".inline-details.clickable").exists()).toBe(true);
+      expect(wrapper.find(".inline-details.cursor-pointer").exists()).toBe(true);
     });
 
     it("should expand details on click when details are long", async () => {
       wrapper = mountNode(nodeWithLongDetails);
       await wrapper.find(".inline-details").trigger("click");
-      expect(wrapper.find(".node-details").exists()).toBe(true);
+      expect(wrapper.find('[data-test="query-plan-node-details"]').exists()).toBe(true);
     });
 
     it("should not show node-details section before clicking when details are long", () => {
       wrapper = mountNode(nodeWithLongDetails);
-      expect(wrapper.find(".node-details").exists()).toBe(false);
+      expect(wrapper.find('[data-test="query-plan-node-details"]').exists()).toBe(false);
     });
 
     it("should not make details clickable when details are short", () => {
       wrapper = mountNode(makeNode({ fullText: "SomeExec: short detail" }));
-      expect(wrapper.find(".inline-details.clickable").exists()).toBe(false);
+      expect(wrapper.find(".inline-details.cursor-pointer").exists()).toBe(false);
     });
   });
 
@@ -192,40 +183,39 @@ describe("QueryPlanNode", () => {
 
     it("should show metrics section when isAnalyze is true and metrics present", () => {
       wrapper = mountNode(nodeWithMetrics, { isAnalyze: true });
-      expect(wrapper.find(".metrics-inline").exists()).toBe(true);
+      expect(wrapper.find('[data-test="query-plan-node-metrics-inline"]').exists()).toBe(true);
     });
 
     it("should not show metrics section when isAnalyze is false", () => {
       wrapper = mountNode(nodeWithMetrics, { isAnalyze: false });
-      expect(wrapper.find(".metrics-inline").exists()).toBe(false);
+      expect(wrapper.find('[data-test="query-plan-node-metrics-inline"]').exists()).toBe(false);
     });
 
     it("should display output_rows badge", () => {
       wrapper = mountNode(nodeWithMetrics, { isAnalyze: true });
-      const badges = wrapper.findAll(".metric-badge");
+      const badges = wrapper.findAll('[data-test="query-plan-node-metric-badge"]');
       expect(badges.some((b) => b.text().includes("1,234"))).toBe(true);
     });
 
     it("should display elapsed_compute badge", () => {
       wrapper = mountNode(nodeWithMetrics, { isAnalyze: true });
-      const badges = wrapper.findAll(".metric-badge");
+      const badges = wrapper.findAll('[data-test="query-plan-node-metric-badge"]');
       expect(badges.some((b) => b.text().includes("5.67ms"))).toBe(true);
     });
 
     it("should show separator between details and metrics when both present", () => {
       wrapper = mountNode(nodeWithMetrics, { isAnalyze: true });
-      expect(wrapper.find(".separator").exists()).toBe(true);
+      expect(wrapper.find('[data-test="query-plan-node-separator"]').exists()).toBe(true);
     });
 
     it("should not show metrics section when node has no metrics", () => {
       wrapper = mountNode(makeNode({ metrics: {} }), { isAnalyze: true });
-      expect(wrapper.find(".metrics-inline").exists()).toBe(false);
+      expect(wrapper.find('[data-test="query-plan-node-metrics-inline"]').exists()).toBe(false);
     });
 
     it("should strip metrics section from inline details in analyze mode", () => {
       const nodeWithMetricsInText = makeNode({
-        fullText:
-          "FilterExec: expression=[x > 0], metrics=[elapsed_compute=5ms, output_rows=100]",
+        fullText: "FilterExec: expression=[x > 0], metrics=[elapsed_compute=5ms, output_rows=100]",
         metrics: { elapsed_compute: "5ms", output_rows: 100 },
       });
       wrapper = mountNode(nodeWithMetricsInText, { isAnalyze: true });
@@ -241,7 +231,7 @@ describe("QueryPlanNode", () => {
         }),
         { isAnalyze: true },
       );
-      const badges = wrapper.findAll(".metric-badge");
+      const badges = wrapper.findAll('[data-test="query-plan-node-metric-badge"]');
       expect(badges.some((b) => b.text().includes("1,000,000"))).toBe(true);
     });
   });
@@ -266,7 +256,9 @@ describe("QueryPlanNode", () => {
       const child2 = makeNode({ name: "B", fullText: "B" });
       const parent = makeNode({ children: [child1, child2] });
       wrapper = mountNode(parent);
-      const connectors = wrapper.find(".children").findAll(".tree-connector");
+      const connectors = wrapper
+        .find(".children")
+        .findAll('[data-test="query-plan-node-tree-connector"]');
       // first child → ├─, last child → └─
       expect(connectors[0].text()).toBe("├─");
       expect(connectors[1].text()).toBe("└─");

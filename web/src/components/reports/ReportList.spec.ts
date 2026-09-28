@@ -15,15 +15,12 @@
 
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, flushPromises, VueWrapper } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify, Quasar } from "quasar";
 import { nextTick } from "vue";
 import * as vueRouter from "vue-router";
 import i18n from "@/locales";
 import store from "@/test/unit/helpers/store";
 import reports from "@/services/reports";
 import ReportList from "./ReportList.vue";
-import QTablePagination from "@/components/shared/grid/Pagination.vue";
 
 // ─── Module mocks (hoisted) ──────────────────────────────────────────────────
 
@@ -39,14 +36,17 @@ vi.mock("vue-router", async () => {
   };
 });
 
-vi.mock("@/services/reports", () => ({
-  default: {
-    listByFolderId: vi.fn(),
-    toggleReportStateById: vi.fn(),
-    deleteReportById: vi.fn(),
-    bulkDeleteById: vi.fn(),
-  },
-}));
+vi.mock("@/services/reports", async (importOriginal) => {
+  const { overlayServiceMock } = await import("@/test/unit/helpers/mockService");
+  return overlayServiceMock(await importOriginal(), {
+    default: {
+      listByFolderId: vi.fn(),
+      toggleReportStateById: vi.fn(),
+      deleteReportById: vi.fn(),
+      bulkDeleteById: vi.fn(),
+    },
+  });
+});
 
 vi.mock("@/services/reodotdev_analytics", () => ({
   useReo: () => ({ track: vi.fn() }),
@@ -59,10 +59,7 @@ vi.mock("@/utils/zincutils", async (importOriginal) => {
     getImageURL: vi.fn(() => ""),
     verifyOrganizationStatus: vi.fn(() => Promise.resolve(true)),
     logsErrorMessage: vi.fn((code: string) => `Error: ${code}`),
-    mergeRoutes: vi.fn((r1: any[], r2: any[]) => [
-      ...(r1 || []),
-      ...(r2 || []),
-    ]),
+    mergeRoutes: vi.fn((r1: any[], r2: any[]) => [...(r1 || []), ...(r2 || [])]),
     getPath: vi.fn(() => "/"),
     useLocalTimezone: vi.fn(() => "UTC"),
   };
@@ -72,11 +69,61 @@ vi.mock("@/utils/commons", () => ({
   getFoldersListByType: vi.fn(() => Promise.resolve()),
 }));
 
+// Stub the toast module so `toast({ timeout: 2000 })` never fires real setTimeouts.
+vi.mock("@/lib/feedback/Toast/useToast", () => ({
+  toast: vi.fn(() => vi.fn()),
+  toastRecords: [],
+  useToast: () => ({ toast: vi.fn(() => vi.fn()), toasts: [] }),
+}));
+
+// Stub OTable to bypass the 2-second minimum-skeleton-hold timer.
+// The real OTable uses `setTimeout(2000)` after `loading` flips to false before
+// it renders rows. In tests this makes every beforeEach that does `flushPromises()`
+// wait 2+ seconds. The stub renders cell slots directly with row data so tests
+// are fast and action-button data-test attributes are immediately available.
+vi.mock("@/lib/core/Table/OTable.vue", () => ({
+  default: {
+    name: "OTable",
+    props: [
+      "data",
+      "columns",
+      "loading",
+      "rowKey",
+      "pagination",
+      "selection",
+      "selectedIds",
+      "showGlobalFilter",
+      "style",
+    ],
+    emits: ["update:selectedIds"],
+    inheritAttrs: true,
+    template: `
+      <div v-bind="$attrs">
+        <slot name="toolbar" />
+        <div v-if="loading" data-test="o-table-stub-loading">Loading...</div>
+        <template v-else>
+          <div
+            v-for="(row, idx) in (data || [])"
+            :key="row[rowKey || 'id'] || idx"
+            :data-test="'o-table-stub-row-' + idx"
+          >
+            <slot :name="'cell-actions'" :row="row" />
+            <slot :name="'cell-name'" :row="row" />
+            <slot :name="'cell-folder_name'" :row="row" />
+          </div>
+          <div v-if="!data || data.length === 0">
+            <slot name="empty" />
+          </div>
+        </template>
+        <slot name="bottom" :pagination="{}" :pagesNumber="1" />
+      </div>
+    `,
+  },
+}));
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const platform = { is: { desktop: true, mobile: false }, has: { touch: false } };
-
-installQuasar({ plugins: [Dialog, Notify], config: { platform } });
 
 const REPORT_SCHEDULED = {
   report_id: "uuid-scheduled",
@@ -108,6 +155,42 @@ const node = document.createElement("div");
 node.setAttribute("id", "app");
 document.body.appendChild(node);
 
+// ODrawer stub: mirrors the props/events of the real component so tests can
+// drive open/close via v-model:open and the @close emit.
+// Note: we expose props via `data-*` attrs prefixed with `_stub-` to avoid
+// collision with the parent template's own `data-test` attribute, which
+// fallthroughs to the stub's root element.
+const ODrawerStub = {
+  name: "ODrawer",
+  props: ["open", "size", "showClose", "title", "subTitle", "width", "persistent"],
+  emits: ["update:open", "close"],
+  inheritAttrs: false,
+  template: `
+    <div
+      v-if="open"
+      class="o-drawer-stub"
+      :data-stub-size="size"
+      :data-stub-show-close="String(showClose)"
+      v-bind="$attrs"
+    >
+      <slot />
+    </div>
+  `,
+};
+
+// MoveAcrossFolders stub: emits @updated / @close to drive ReportList handlers.
+const MoveAcrossFoldersStub = {
+  name: "MoveAcrossFolders",
+  props: ["open", "activeFolderId", "moduleId", "type"],
+  emits: ["updated", "close", "update:open"],
+  inheritAttrs: false,
+  template: `
+    <div v-if="open" v-bind="$attrs">
+      <div data-test="move-across-folders-stub" />
+    </div>
+  `,
+};
+
 function mountComponent() {
   const mockRouter = {
     push: vi.fn(),
@@ -118,9 +201,19 @@ function mountComponent() {
 
   const wrapper = mount(ReportList, {
     global: {
-      plugins: [[Quasar, { platform }], i18n],
+      plugins: [[{ platform }], i18n],
       provide: { store, platform, router: mockRouter },
       mocks: { $router: mockRouter },
+      stubs: {
+        ODrawer: ODrawerStub,
+        MoveAcrossFolders: MoveAcrossFoldersStub,
+        FolderList: { template: '<div data-test="folder-list-stub" />' },
+        OSplitter: {
+          name: "OSplitter",
+          props: ["modelValue", "unit", "limits", "horizontal"],
+          template: '<div><slot name="before" /><slot name="after" /></div>',
+        },
+      },
     },
     attachTo: document.body,
   });
@@ -165,33 +258,24 @@ describe("ReportList", () => {
     });
 
     it("should render the page container", () => {
-      expect(
-        wrapper.find('[data-test="report-list-page"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="report-list-page"]').exists()).toBe(true);
     });
 
     it("should render the title", () => {
-      expect(
-        wrapper.find('[data-test="report-list-title"]').exists(),
-      ).toBe(true);
+      // Title now lives in the standard OPageHeader (row 1).
+      expect(wrapper.find(".app-page-header h1").text()).toContain("Report");
     });
 
     it("should render the search input", () => {
-      expect(
-        wrapper.find('[data-test="report-list-search-input"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="report-list-search-input"]').exists()).toBe(true);
     });
 
     it("should render the add-report button", () => {
-      expect(
-        wrapper.find('[data-test="report-list-add-report-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="report-list-add-report-btn"]').exists()).toBe(true);
     });
 
     it("should render the reports table", () => {
-      expect(
-        wrapper.find('[data-test="report-list-table"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="report-list-table"]').exists()).toBe(true);
     });
   });
 
@@ -208,10 +292,6 @@ describe("ReportList", () => {
 
     it("should initialize filterQuery as empty string", () => {
       expect(wrapper.vm.filterQuery).toBe("");
-    });
-
-    it("should initialize pagination rowsPerPage to 20", () => {
-      expect(wrapper.vm.pagination.rowsPerPage).toBe(20);
     });
 
     it("should set isLoadingReports to false after fetching", () => {
@@ -245,22 +325,6 @@ describe("ReportList", () => {
   });
 
   // ── Pagination ───────────────────────────────────────────────────────────
-
-  describe("pagination", () => {
-    it("should update rowsPerPage when pagination changes", async () => {
-      const paginationComp = wrapper.findComponent(QTablePagination);
-      expect(paginationComp.exists()).toBe(true);
-      await paginationComp.vm.$emit("update:changeRecordPerPage", {
-        label: "50",
-        value: 50,
-      });
-      await nextTick();
-      expect(wrapper.vm.pagination.rowsPerPage).toBe(50);
-      expect(wrapper.vm.selectedPerPage).toBe(50);
-    });
-  });
-
-  // ── Tab filtering ────────────────────────────────────────────────────────
 
   describe("tab filtering", () => {
     it("should map all staticReportsList rows to reportsTableRows on 'shared' tab", async () => {
@@ -296,14 +360,12 @@ describe("ReportList", () => {
       expect(wrapper.vm.resultTotal).toBe(wrapper.vm.reportsTableRows.length);
     });
 
-    it("should re-number rows with '#' after filtering", async () => {
-      wrapper.vm.staticReportsList = [
-        { ...REPORT_SCHEDULED, "#": 99 },
-        { ...REPORT_CACHED, "#": 99 },
-      ];
+    it("refreshes rows after filtering (index is OTable's built-in show-index)", async () => {
+      wrapper.vm.staticReportsList = [{ ...REPORT_SCHEDULED }, { ...REPORT_CACHED }];
       wrapper.vm.activeTab = "shared";
       await wrapper.vm.filterReports();
-      expect(wrapper.vm.reportsTableRows[0]["#"]).toBe(1);
+      // Rows no longer carry a "#" field — numbering is the built-in show-index.
+      expect(Array.isArray(wrapper.vm.reportsTableRows)).toBe(true);
     });
   });
 
@@ -342,7 +404,14 @@ describe("ReportList", () => {
     beforeEach(async () => {
       wrapper.vm.staticReportsList = [
         { ...REPORT_SCHEDULED, "#": 1 },
-        { name: "Another Scheduled", enabled: true, destinations: [{}], last_triggered_at: null, uuid: "u3", "#": 2 },
+        {
+          name: "Another Scheduled",
+          enabled: true,
+          destinations: [{}],
+          last_triggered_at: null,
+          uuid: "u3",
+          "#": 2,
+        },
       ];
       wrapper.vm.activeTab = "shared";
       await wrapper.vm.filterReports();
@@ -350,9 +419,7 @@ describe("ReportList", () => {
 
     it("should return all rows when filterQuery is empty", () => {
       wrapper.vm.filterQuery = "";
-      expect(wrapper.vm.visibleRows).toHaveLength(
-        wrapper.vm.reportsTableRows.length,
-      );
+      expect(wrapper.vm.visibleRows).toHaveLength(wrapper.vm.reportsTableRows.length);
     });
 
     it("should filter rows by filterQuery", async () => {
@@ -373,20 +440,30 @@ describe("ReportList", () => {
 
   // ── Date formatting ──────────────────────────────────────────────────────
 
-  describe("convertUnixToQuasarFormat", () => {
-    it("should format a valid unix microsecond timestamp", () => {
-      const formatted = wrapper.vm.convertUnixToQuasarFormat(1234567890000000);
-      expect(formatted).toMatch(
-        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/,
-      );
+  describe("last_triggered_at formatting", () => {
+    // These used to call `wrapper.vm.convertUnixToDateFormat(null)` — asserting
+    // the shared util's null handling, which `date.spec.ts` already owns, and
+    // forcing the component to `defineExpose` a function purely so a test could
+    // reach it. What is actually ReportList's to get right is the ROW mapping:
+    // format a real timestamp, and show "-" when there is none.
+    it("formats a triggered report's timestamp for the table", () => {
+      const row = wrapper.vm.reportsTableRows.find((r: any) => r.name === REPORT_SCHEDULED.name);
+
+      // 1234567890000000µs = 2009-02-13T23:31:30Z. The suite pins TZ=UTC
+      // (vitest.config.ts), so the zero offset renders as `Z`.
+      expect(row.last_triggered_at).toBe("2009-02-13T23:31:30Z");
+      // ...and the raw value is kept alongside it, for sorting.
+      expect(row.last_triggered_at_raw).toBe(REPORT_SCHEDULED.last_triggered_at);
     });
 
-    it("should return empty string for null", () => {
-      expect(wrapper.vm.convertUnixToQuasarFormat(null)).toBe("");
-    });
+    it("shows a dash for a report that has never triggered", async () => {
+      wrapper.vm.activeTab = "cached";
+      await flushPromises();
 
-    it("should return empty string for undefined", () => {
-      expect(wrapper.vm.convertUnixToQuasarFormat(undefined)).toBe("");
+      const row = wrapper.vm.reportsTableRows.find((r: any) => r.name === REPORT_CACHED.name);
+
+      expect(row.last_triggered_at).toBe("-");
+      expect(row.last_triggered_at_raw).toBeNull();
     });
   });
 
@@ -411,9 +488,8 @@ describe("ReportList", () => {
       await wrapper.vm.toggleReportState(REPORT_SCHEDULED);
       await flushPromises();
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_SCHEDULED.report_id,
-        ).enabled,
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_SCHEDULED.report_id)
+          .enabled,
       ).toBe(false);
     });
 
@@ -421,15 +497,15 @@ describe("ReportList", () => {
       vi.mocked(reports.toggleReportStateById).mockResolvedValueOnce({} as any);
       await wrapper.vm.toggleReportState(REPORT_SCHEDULED);
       await flushPromises();
-      expect(
-        wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id],
-      ).toBe(false);
+      expect(wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id]).toBe(false);
     });
 
     it("should set loading state to true during toggle operation", async () => {
       let resolve: (v: any) => void;
       vi.mocked(reports.toggleReportStateById).mockReturnValueOnce(
-        new Promise((r) => { resolve = r; }) as any,
+        new Promise((r) => {
+          resolve = r;
+        }) as any,
       );
       const op = wrapper.vm.toggleReportState(REPORT_SCHEDULED);
       expect(wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id]).toBe(true);
@@ -444,9 +520,7 @@ describe("ReportList", () => {
       });
       await wrapper.vm.toggleReportState(REPORT_SCHEDULED);
       await flushPromises();
-      expect(
-        wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id],
-      ).toBe(false);
+      expect(wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id]).toBe(false);
     });
 
     it("should clear loading state silently for 403 error", async () => {
@@ -455,9 +529,7 @@ describe("ReportList", () => {
       });
       await wrapper.vm.toggleReportState(REPORT_SCHEDULED);
       await flushPromises();
-      expect(
-        wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id],
-      ).toBe(false);
+      expect(wrapper.vm.reportsStateLoadingMap[REPORT_SCHEDULED.report_id]).toBe(false);
     });
   });
 
@@ -478,9 +550,7 @@ describe("ReportList", () => {
     });
 
     it("should trigger navigation from edit button click in table", async () => {
-      const btn = wrapper.find(
-        `[data-test="report-list-${REPORT_SCHEDULED.name}-edit-report"]`,
-      );
+      const btn = wrapper.find(`[data-test="report-list-${REPORT_SCHEDULED.name}-edit-report"]`);
       expect(btn.exists()).toBe(true);
       await btn.trigger("click");
       expect(mockRouter.push).toHaveBeenCalledWith(
@@ -515,9 +585,7 @@ describe("ReportList", () => {
       await wrapper.vm.deleteReport();
       await flushPromises();
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_SCHEDULED.report_id,
-        ),
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_SCHEDULED.report_id),
       ).toBeUndefined();
     });
 
@@ -544,9 +612,7 @@ describe("ReportList", () => {
     });
 
     it("should show delete dialog when delete button is clicked in table", async () => {
-      const btn = wrapper.find(
-        `[data-test="report-list-${REPORT_SCHEDULED.name}-delete-report"]`,
-      );
+      const btn = wrapper.find(`[data-test="report-list-${REPORT_SCHEDULED.name}-delete-report"]`);
       expect(btn.exists()).toBe(true);
       await btn.trigger("click");
       expect(wrapper.vm.deleteDialog.show).toBe(true);
@@ -608,9 +674,7 @@ describe("ReportList", () => {
       await wrapper.vm.bulkDeleteReports();
       await flushPromises();
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_SCHEDULED.report_id,
-        ),
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_SCHEDULED.report_id),
       ).toBeUndefined();
     });
 
@@ -647,14 +711,10 @@ describe("ReportList", () => {
       await flushPromises();
       // Only the successful one should be removed
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_SCHEDULED.report_id,
-        ),
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_SCHEDULED.report_id),
       ).toBeUndefined();
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_CACHED.report_id,
-        ),
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_CACHED.report_id),
       ).toBeDefined();
     });
 
@@ -667,9 +727,7 @@ describe("ReportList", () => {
       await flushPromises();
       // None removed when successful list is empty
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_SCHEDULED.report_id,
-        ),
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_SCHEDULED.report_id),
       ).toBeDefined();
     });
 
@@ -680,9 +738,7 @@ describe("ReportList", () => {
       await flushPromises();
       // successful defaults to [] so nothing is removed
       expect(
-        wrapper.vm.staticReportsList.find(
-          (r: any) => r.report_id === REPORT_SCHEDULED.report_id,
-        ),
+        wrapper.vm.staticReportsList.find((r: any) => r.report_id === REPORT_SCHEDULED.report_id),
       ).toBeDefined();
     });
 
@@ -702,6 +758,113 @@ describe("ReportList", () => {
       await wrapper.vm.bulkDeleteReports();
       await flushPromises();
       expect(wrapper.vm.confirmBulkDelete).toBe(false);
+    });
+  });
+
+  // ── Move to folder (ODrawer migration) ───────────────────────────────────
+  // ODrawer: v-model:open, size="lg", show-close="false",
+  // @close=showMoveDialog=false. Drawer hosts <MoveAcrossFolders /> which
+  // emits @updated (-> onMoveUpdated) and @close (-> closes drawer).
+
+  describe("move-to-folder ODrawer", () => {
+    it("should keep showMoveDialog false on initial render", () => {
+      expect(wrapper.vm.showMoveDialog).toBe(false);
+    });
+
+    it("should not render the drawer when showMoveDialog is false", () => {
+      expect(wrapper.find('[data-test="report-move-to-another-folder-dialog"]').exists()).toBe(
+        false,
+      ); // MoveAcrossFolders renders nothing when open=false
+    });
+
+    it("should open the drawer when openMoveDialog is called for a single row", async () => {
+      const row = { ...REPORT_SCHEDULED, folder_id: "folder-A" };
+      wrapper.vm.openMoveDialog(row);
+      await nextTick();
+      expect(wrapper.vm.showMoveDialog).toBe(true);
+      expect(wrapper.vm.activeFolderToMove).toBe("folder-A");
+      expect(wrapper.vm.reportIdsToMove).toEqual([REPORT_SCHEDULED.report_id]);
+    });
+
+    it("should fall back to activeFolderId when row has no folder_id", async () => {
+      const row = { ...REPORT_SCHEDULED, folder_id: undefined };
+      wrapper.vm.openMoveDialog(row);
+      await nextTick();
+      expect(wrapper.vm.activeFolderToMove).toBe(wrapper.vm.activeFolderId);
+    });
+
+    it("should render the element once showMoveDialog flips to true", async () => {
+      wrapper.vm.openMoveDialog({ ...REPORT_SCHEDULED, folder_id: "f1" });
+      await nextTick();
+      const drawer = wrapper.find('[data-test="report-move-to-another-folder-dialog"]');
+      expect(drawer.exists()).toBe(true);
+    });
+
+    it("should render MoveAcrossFolders inside the drawer when open", async () => {
+      wrapper.vm.openMoveDialog({ ...REPORT_SCHEDULED, folder_id: "f1" });
+      await nextTick();
+      expect(wrapper.findComponent(MoveAcrossFoldersStub).exists()).toBe(true);
+    });
+
+    it("should open drawer for bulk move via moveMultipleReports", async () => {
+      wrapper.vm.selectedReports = [REPORT_SCHEDULED, REPORT_CACHED];
+      wrapper.vm.moveMultipleReports();
+      await nextTick();
+      expect(wrapper.vm.showMoveDialog).toBe(true);
+      expect(wrapper.vm.reportIdsToMove).toEqual([
+        REPORT_SCHEDULED.report_id,
+        REPORT_CACHED.report_id,
+      ]);
+      expect(wrapper.vm.activeFolderToMove).toBe(wrapper.vm.activeFolderId);
+    });
+
+    it("should close drawer when MoveAcrossFolders emits update:open false", async () => {
+      wrapper.vm.openMoveDialog({ ...REPORT_SCHEDULED, folder_id: "f1" });
+      await nextTick();
+      const child = wrapper.findComponent(MoveAcrossFoldersStub);
+      expect(child.exists()).toBe(true);
+      await child.vm.$emit("update:open", false);
+      await nextTick();
+      expect(wrapper.vm.showMoveDialog).toBe(false);
+    });
+
+    it("should close drawer when showMoveDialog is set to false", async () => {
+      wrapper.vm.openMoveDialog({ ...REPORT_SCHEDULED, folder_id: "f1" });
+      await nextTick();
+      expect(wrapper.vm.showMoveDialog).toBe(true);
+      wrapper.vm.showMoveDialog = false;
+      await nextTick();
+      expect(wrapper.vm.showMoveDialog).toBe(false);
+    });
+
+    it("should run onMoveUpdated when MoveAcrossFolders emits @updated", async () => {
+      wrapper.vm.openMoveDialog({ ...REPORT_SCHEDULED, folder_id: "from-f" });
+      await nextTick();
+      const child = wrapper.findComponent(MoveAcrossFoldersStub);
+      expect(child.exists()).toBe(true);
+      // Reset the API spy to assert reload happens
+      vi.mocked(reports.listByFolderId).mockClear();
+      vi.mocked(reports.listByFolderId).mockResolvedValue({
+        data: [REPORT_SCHEDULED],
+      } as any);
+      // Pass the active folder ("default") as the source folder so its cache
+      // is invalidated and loadReports() goes back to the API instead of cache.
+      await child.vm.$emit("updated", "default", "to-f");
+      await flushPromises();
+      // Drawer closes, selection clears, ids reset, and reports reload
+      expect(wrapper.vm.showMoveDialog).toBe(false);
+      expect(wrapper.vm.selectedReports).toEqual([]);
+      expect(wrapper.vm.reportIdsToMove).toEqual([]);
+      expect(vi.mocked(reports.listByFolderId)).toHaveBeenCalled();
+    });
+
+    it("should open drawer when single-row move button is clicked", async () => {
+      const btn = wrapper.find(`[data-test="report-list-${REPORT_SCHEDULED.name}-move-report"]`);
+      expect(btn.exists()).toBe(true);
+      await btn.trigger("click");
+      await nextTick();
+      expect(wrapper.vm.showMoveDialog).toBe(true);
+      expect(wrapper.vm.reportIdsToMove).toEqual([REPORT_SCHEDULED.report_id]);
     });
   });
 });

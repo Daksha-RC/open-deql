@@ -36,6 +36,9 @@ impl Destination {
     pub fn is_alert_destinations(&self) -> bool {
         matches!(&self.module, Module::Alert { .. })
     }
+    pub fn is_pipeline_destination(&self) -> bool {
+        matches!(&self.module, Module::Pipeline { .. })
+    }
 }
 
 impl MemorySize for Destination {
@@ -112,8 +115,6 @@ pub struct Endpoint {
     pub skip_tls_verify: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub action_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_format: Option<HTTPOutputFormat>,
     /// Destination type (e.g., "openobserve", "splunk", "elasticsearch", "custom")
@@ -242,6 +243,8 @@ pub struct Template {
     #[serde(rename = "type")]
     pub template_type: TemplateType,
     pub body: String,
+    #[serde(default)]
+    pub kind: TemplateKind,
 }
 
 impl MemorySize for Template {
@@ -254,7 +257,7 @@ impl MemorySize for Template {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, Default, ToSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TemplateType {
     #[default]
@@ -275,6 +278,38 @@ impl fmt::Display for TemplateType {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TemplateKind {
+    #[default]
+    Custom,
+    Content,
+}
+
+impl TemplateKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TemplateKind::Custom => "custom",
+            TemplateKind::Content => "content",
+        }
+    }
+}
+
+impl std::fmt::Display for TemplateKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for TemplateKind {
+    fn from(s: &str) -> Self {
+        match s {
+            "content" => TemplateKind::Content,
+            _ => TemplateKind::Custom,
+        }
+    }
+}
+
 impl Destination {
     /// Get prebuilt destination configurations for common services
     ///
@@ -291,6 +326,23 @@ mod tests {
     use svix_ksuid::KsuidLike;
 
     use super::*;
+
+    #[test]
+    fn test_template_kind_serde_roundtrip_and_default() {
+        // Old-shape JSON (no kind) must deserialize to Custom — mixed-version rule.
+        let old: Template =
+            serde_json::from_str(r#"{"org_id":"o","name":"t","body":"b","type":"http"}"#).unwrap();
+        assert_eq!(old.kind, TemplateKind::Custom);
+
+        let content: Template = serde_json::from_str(
+            r#"{"org_id":"o","name":"t","body":"{}","type":"http","kind":"content"}"#,
+        )
+        .unwrap();
+        assert_eq!(content.kind, TemplateKind::Content);
+
+        let back = serde_json::to_string(&content).unwrap();
+        assert!(back.contains(r#""kind":"content""#));
+    }
 
     #[test]
     fn test_destination_is_alert_destinations() {
@@ -362,7 +414,6 @@ mod tests {
             method: HTTPType::POST,
             skip_tls_verify: false,
             headers: Some(headers.clone()),
-            action_id: Some("action_123".to_string()),
             output_format: Some(HTTPOutputFormat::JSON),
             destination_type: Some("custom".to_string()),
             metadata: HashMap::new(),
@@ -372,7 +423,6 @@ mod tests {
         assert_eq!(endpoint.method, HTTPType::POST);
         assert!(!endpoint.skip_tls_verify);
         assert_eq!(endpoint.headers, Some(headers));
-        assert_eq!(endpoint.action_id, Some("action_123".to_string()));
         assert_eq!(endpoint.output_format, Some(HTTPOutputFormat::JSON));
         assert_eq!(endpoint.destination_type, Some("custom".to_string()));
     }
@@ -389,6 +439,7 @@ mod tests {
                 title: "Test Email".to_string(),
             },
             body: "Hello {{name}}!".to_string(),
+            kind: TemplateKind::default(),
         };
 
         assert_eq!(template.id, Some(id));
@@ -441,7 +492,6 @@ mod tests {
             method: HTTPType::POST,
             skip_tls_verify: true,
             headers: None,
-            action_id: None,
             output_format: None,
             destination_type: Some("openobserve".to_string()),
             metadata: HashMap::new(),
@@ -501,7 +551,6 @@ mod tests {
             method: HTTPType::PUT,
             skip_tls_verify: false,
             headers: None,
-            action_id: None,
             output_format: None,
             destination_type: Some("splunk".to_string()),
             metadata: HashMap::new(),
@@ -747,7 +796,6 @@ mod tests {
             method: HTTPType::POST,
             skip_tls_verify: false,
             headers: None,
-            action_id: None,
             output_format: None,
             destination_type: None,
             metadata: HashMap::new(),
@@ -755,7 +803,6 @@ mod tests {
         let json = serde_json::to_value(&ep).unwrap();
         let obj = json.as_object().unwrap();
         assert!(!obj.contains_key("headers"));
-        assert!(!obj.contains_key("action_id"));
         assert!(!obj.contains_key("output_format"));
         assert!(!obj.contains_key("destination_type"));
     }
@@ -769,7 +816,6 @@ mod tests {
             method: HTTPType::GET,
             skip_tls_verify: false,
             headers: Some(headers),
-            action_id: Some("act1".to_string()),
             output_format: Some(HTTPOutputFormat::JSON),
             destination_type: Some("custom".to_string()),
             metadata: HashMap::new(),
@@ -777,7 +823,6 @@ mod tests {
         let json = serde_json::to_value(&ep).unwrap();
         let obj = json.as_object().unwrap();
         assert!(obj.contains_key("headers"));
-        assert!(obj.contains_key("action_id"));
         assert!(obj.contains_key("output_format"));
         assert!(obj.contains_key("destination_type"));
     }

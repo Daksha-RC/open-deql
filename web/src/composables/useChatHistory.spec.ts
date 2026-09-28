@@ -17,6 +17,7 @@
 /* global BufferSource, Event, IDBCursorWithValue, IDBObjectStore, IDBRequest, IDBVersionChangeEvent, queueMicrotask, setTimeout, crypto, TextEncoder */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { gt } from "@/types/i18n";
 import type { ChatMessage } from "@/ts/interfaces/chat";
 
 // ---------------------------------------------------------------------------
@@ -26,19 +27,17 @@ import type { ChatMessage } from "@/ts/interfaces/chat";
 // ---------------------------------------------------------------------------
 vi.stubGlobal("crypto", {
   subtle: {
-    digest: vi
-      .fn()
-      .mockImplementation(async (_algo: string, data: BufferSource) => {
-        const bytes =
-          data instanceof ArrayBuffer
-            ? new Uint8Array(data)
-            : new Uint8Array((data as ArrayBufferView).buffer);
-        const buf = new Uint8Array(32);
-        for (let i = 0; i < bytes.length && i < 32; i++) {
-          buf[i] = bytes[i];
-        }
-        return buf.buffer;
-      }),
+    digest: vi.fn().mockImplementation(async (_algo: string, data: BufferSource) => {
+      const bytes =
+        data instanceof ArrayBuffer
+          ? new Uint8Array(data)
+          : new Uint8Array((data as ArrayBufferView).buffer);
+      const buf = new Uint8Array(32);
+      for (let i = 0; i < bytes.length && i < 32; i++) {
+        buf[i] = bytes[i];
+      }
+      return buf.buffer;
+    }),
   },
 });
 
@@ -56,7 +55,6 @@ vi.stubGlobal("crypto", {
 
 type RecordMap = Map<number, Record<string, unknown>>;
 
-/* eslint-disable no-unused-vars */
 interface MockIndex {
   name: string;
   keyPath: string;
@@ -100,7 +98,6 @@ interface MockDB {
   transaction(storeName: string, mode: string): MockTransaction;
   _stores: Map<string, MockObjectStore>;
 }
-/* eslint-enable no-unused-vars */
 
 // In-memory database registry — persists across transactions within a test
 // Also tracks the version at which each DB was last upgraded so we don't
@@ -121,11 +118,7 @@ function makeRequest(initialResult: unknown = undefined): MockRequest {
   };
 }
 
-function makeIndex(
-  store: MockObjectStore,
-  indexName: string,
-  keyPath: string,
-): MockIndex {
+function makeIndex(store: MockObjectStore, indexName: string, keyPath: string): MockIndex {
   return {
     name: indexName,
     keyPath,
@@ -172,10 +165,7 @@ function makeIndex(
               queueMicrotask(() => {
                 // Re-check after potential deletions
                 // rebuild matching keys from current store state
-                while (
-                  idx < matchingKeys.length &&
-                  !store.records.has(matchingKeys[idx])
-                ) {
+                while (idx < matchingKeys.length && !store.records.has(matchingKeys[idx])) {
                   idx++;
                 }
                 advanceCursor();
@@ -222,8 +212,7 @@ function makeObjectStore(name: string): MockObjectStore {
     },
     index(indexName: string) {
       const idx = indexes.get(indexName);
-      if (!idx)
-        throw new Error(`Index '${indexName}' not found on store '${name}'`);
+      if (!idx) throw new Error(`Index '${indexName}' not found on store '${name}'`);
       return idx;
     },
     put(record: Record<string, unknown>) {
@@ -273,7 +262,7 @@ function makeObjectStore(name: string): MockObjectStore {
   return store;
 }
 
-function makeTransaction(db: MockDB, _storeName: string): MockTransaction {
+function makeTransaction(db: MockDB): MockTransaction {
   let _oncomplete: (() => void) | null = null;
   let _onerror: (() => void) | null = null;
 
@@ -323,20 +312,21 @@ function makeDB(): MockDB {
         return stores.has(name);
       },
     },
-    createObjectStore(
-      name: string,
-      _opts: { keyPath: string; autoIncrement: boolean },
-    ) {
+    createObjectStore(name: string) {
       const store = makeObjectStore(name);
       stores.set(name, store);
       return store;
     },
-    transaction(storeName: string, _mode: string) {
-      return makeTransaction(db, storeName);
+    transaction() {
+      return makeTransaction(db);
     },
   };
   return db;
 }
+
+// Last DB handed to the composable — lets beforeEach fire onclose so
+// useChatHistory.ts drops its memoised connection between tests.
+let _lastOpenedDb: MockDB | null = null;
 
 // Replace global indexedDB with the in-memory mock
 const mockIndexedDB = {
@@ -378,6 +368,7 @@ const mockIndexedDB = {
       }
 
       req.result = db;
+      if (name === "o2ChatDB") _lastOpenedDb = db;
       if (req.onsuccess) req.onsuccess({ target: req } as unknown as Event);
     });
 
@@ -411,10 +402,7 @@ function makeMessages(count = 1): ChatMessage[] {
 /** Resolve the userOrgKey for a given email+org the same way the composable does. */
 async function resolveKey(email: string, org: string): Promise<string> {
   const raw = `${email}:${org}`;
-  const buf = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(raw),
-  );
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
   return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
@@ -436,6 +424,10 @@ describe("useChatHistory", () => {
     // each test creates new instances, so no key cache leaks between tests.
     dbRegistry.clear();
     _autoIdCounter = 1;
+    // Fire onclose so useChatHistory.ts drops its memoised connection to the
+    // now-cleared registry's database and reopens fresh.
+    (_lastOpenedDb as { onclose?: () => void } | null)?.onclose?.();
+    _lastOpenedDb = null;
   });
 
   afterEach(() => {
@@ -460,25 +452,33 @@ describe("useChatHistory", () => {
   // -------------------------------------------------------------------------
   describe("saveToHistory", () => {
     it("should return null when messages array is empty", async () => {
-      const { saveToHistory } = useChatHistory(() => USER1, () => ORG1);
+      const { saveToHistory } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const result = await saveToHistory([], "session-001");
       expect(result).toBeNull();
     });
 
     it("should return a numeric chat ID when messages are provided", async () => {
-      const { saveToHistory } = useChatHistory(() => USER1, () => ORG1);
+      const { saveToHistory } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const result = await saveToHistory(makeMessages(2), "session-001");
       expect(typeof result).toBe("number");
       expect(result).toBeGreaterThan(0);
     });
 
     it("should use the provided title when one is given", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
-      const chatId = await saveToHistory(
-        makeMessages(1),
-        "session-001",
-        "My Custom Title",
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const chatId = await saveToHistory(makeMessages(1), "session-001", "My Custom Title");
       expect(chatId).not.toBeNull();
       const entry = await loadChat(chatId!);
       expect(entry).not.toBeNull();
@@ -486,7 +486,11 @@ describe("useChatHistory", () => {
     });
 
     it("should use the first user message as title when no title is provided", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const messages: ChatMessage[] = [
         { role: "user", content: "Hello, world!" },
         { role: "assistant", content: "Hi there!" },
@@ -499,7 +503,11 @@ describe("useChatHistory", () => {
     });
 
     it("should truncate the auto-generated title at 40 characters with ellipsis", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const longContent = "A".repeat(50);
       const messages: ChatMessage[] = [{ role: "user", content: longContent }];
       const chatId = await saveToHistory(messages, "session-003");
@@ -511,7 +519,11 @@ describe("useChatHistory", () => {
     });
 
     it("should not truncate title when first user message is exactly 40 characters", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const exactContent = "B".repeat(40);
       const messages: ChatMessage[] = [{ role: "user", content: exactContent }];
       const chatId = await saveToHistory(messages, "session-004");
@@ -521,7 +533,11 @@ describe("useChatHistory", () => {
     });
 
     it("should store the userOrgKey on the saved record", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const expectedKey = await resolveKey(USER1, ORG1);
       const chatId = await saveToHistory(makeMessages(1), "session-005");
       expect(chatId).not.toBeNull();
@@ -531,20 +547,15 @@ describe("useChatHistory", () => {
     });
 
     it("should update an existing chat when existingChatId is provided", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
-      const chatId = await saveToHistory(
-        makeMessages(1),
-        "session-006",
-        "Original Title",
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const chatId = await saveToHistory(makeMessages(1), "session-006", "Original Title");
       expect(chatId).not.toBeNull();
 
-      const updated = await saveToHistory(
-        makeMessages(2),
-        "session-006",
-        "Updated Title",
-        chatId,
-      );
+      const updated = await saveToHistory(makeMessages(2), "session-006", "Updated Title", chatId);
       expect(updated).toBe(chatId);
 
       const entry = await loadChat(chatId!);
@@ -554,10 +565,12 @@ describe("useChatHistory", () => {
     });
 
     it("should use 'New Chat' as title when no user message exists", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
-      const messages: ChatMessage[] = [
-        { role: "assistant", content: "I am ready to help." },
-      ];
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const messages: ChatMessage[] = [{ role: "assistant", content: "I am ready to help." }];
       const chatId = await saveToHistory(messages, "session-007");
       expect(chatId).not.toBeNull();
       const entry = await loadChat(chatId!);
@@ -569,14 +582,26 @@ describe("useChatHistory", () => {
   // -------------------------------------------------------------------------
   describe("loadHistory", () => {
     it("should return an empty array when no history exists", async () => {
-      const { loadHistory } = useChatHistory(() => USER1, () => ORG1);
+      const { loadHistory } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const history = await loadHistory();
       expect(history).toEqual([]);
     });
 
     it("should return only the entries belonging to the current user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
 
       await saveUnique(h1, makeMessages(1), "s1", "Chat A");
       await saveUnique(h2, makeMessages(1), "s2", "Chat B");
@@ -587,7 +612,11 @@ describe("useChatHistory", () => {
     });
 
     it("should sort results by timestamp descending (newest first)", async () => {
-      const composable = useChatHistory(() => USER1, () => ORG1);
+      const composable = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const { loadHistory } = composable;
 
       // Each saveUnique advances the fake clock by 1 ms, giving distinct IDs
@@ -611,17 +640,16 @@ describe("useChatHistory", () => {
     });
 
     it("should prune entries beyond 100 items for the current user+org only", async () => {
-      const composable = useChatHistory(() => USER1, () => ORG1);
+      const composable = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const { loadHistory } = composable;
 
       // Save 105 chats for user1; saveUnique advances the clock each call
       for (let i = 0; i < 105; i++) {
-        await saveUnique(
-          composable,
-          makeMessages(1),
-          `session-${i}`,
-          `Chat ${i}`,
-        );
+        await saveUnique(composable, makeMessages(1), `session-${i}`, `Chat ${i}`);
       }
 
       const history = await loadHistory();
@@ -629,8 +657,16 @@ describe("useChatHistory", () => {
     });
 
     it("should not prune entries belonging to other users when current user exceeds 100", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
 
       // 105 for user1; saveUnique ensures unique IDs
       for (let i = 0; i < 105; i++) {
@@ -652,13 +688,13 @@ describe("useChatHistory", () => {
   // -------------------------------------------------------------------------
   describe("loadChat", () => {
     it("should return the chat entry when ID and ownership match", async () => {
-      const { saveToHistory, loadChat } = useChatHistory(() => USER1, () => ORG1);
-      const messages = makeMessages(2);
-      const chatId = await saveToHistory(
-        messages,
-        "session-load-1",
-        "Load Test",
+      const { saveToHistory, loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const messages = makeMessages(2);
+      const chatId = await saveToHistory(messages, "session-load-1", "Load Test");
       expect(chatId).not.toBeNull();
 
       const entry = await loadChat(chatId!);
@@ -669,20 +705,28 @@ describe("useChatHistory", () => {
     });
 
     it("should return null when the chatId does not exist", async () => {
-      const { loadChat } = useChatHistory(() => USER1, () => ORG1);
+      const { loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const entry = await loadChat(99999);
       expect(entry).toBeNull();
     });
 
     it("should return null when the record belongs to a different user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
-
-      const chatId = await h1.saveToHistory(
-        makeMessages(1),
-        "s-cross",
-        "User1 Chat",
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
+
+      const chatId = await h1.saveToHistory(makeMessages(1), "s-cross", "User1 Chat");
       expect(chatId).not.toBeNull();
 
       // user2 must not be able to read user1's chat
@@ -692,15 +736,21 @@ describe("useChatHistory", () => {
 
     it("should return a legacy record (no userOrgKey) for the same user context", async () => {
       // Legacy records have no userOrgKey — the composable allows them through
-      const { loadChat } = useChatHistory(() => USER1, () => ORG1);
+      const { loadChat } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
 
       // First: ensure DB is initialised by doing a read
-      await useChatHistory(() => USER1, () => ORG1).loadHistory();
+      await useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      ).loadHistory();
 
       const legacyId = 777;
-      const storeRecords = dbRegistry
-        .get("o2ChatDB")!
-        .db._stores.get("chatHistory")!.records;
+      const storeRecords = dbRegistry.get("o2ChatDB")!.db._stores.get("chatHistory")!.records;
       storeRecords.set(legacyId, {
         id: legacyId,
         timestamp: "2023-01-01T00:00:00.000Z",
@@ -722,12 +772,9 @@ describe("useChatHistory", () => {
       const { saveToHistory, deleteChatById, loadChat } = useChatHistory(
         () => USER1,
         () => ORG1,
+        gt,
       );
-      const chatId = await saveToHistory(
-        makeMessages(1),
-        "s-del-1",
-        "To Delete",
-      );
+      const chatId = await saveToHistory(makeMessages(1), "s-del-1", "To Delete");
       expect(chatId).not.toBeNull();
 
       const deleted = await deleteChatById(chatId!);
@@ -738,22 +785,34 @@ describe("useChatHistory", () => {
     });
 
     it("should return false when the chatId does not exist", async () => {
-      const { deleteChatById } = useChatHistory(() => USER1, () => ORG1);
+      const { deleteChatById } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       // Initialise DB first
-      await useChatHistory(() => USER1, () => ORG1).loadHistory();
+      await useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      ).loadHistory();
       const result = await deleteChatById(99999);
       expect(result).toBe(false);
     });
 
     it("should return false when the record belongs to a different user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
-
-      const chatId = await h1.saveToHistory(
-        makeMessages(1),
-        "s-del-cross",
-        "User1 Chat",
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
+
+      const chatId = await h1.saveToHistory(makeMessages(1), "s-del-cross", "User1 Chat");
       expect(chatId).not.toBeNull();
 
       const result = await h2.deleteChatById(chatId!);
@@ -768,7 +827,11 @@ describe("useChatHistory", () => {
   // -------------------------------------------------------------------------
   describe("clearAllHistory", () => {
     it("should return true and remove all records for the current user+org", async () => {
-      const composable = useChatHistory(() => USER1, () => ORG1);
+      const composable = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       const { clearAllHistory, loadHistory } = composable;
 
       await saveUnique(composable, makeMessages(1), "s1", "Chat 1");
@@ -782,16 +845,32 @@ describe("useChatHistory", () => {
     });
 
     it("should return true even when there is no history to clear", async () => {
-      const { clearAllHistory } = useChatHistory(() => USER1, () => ORG1);
+      const { clearAllHistory } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       // Initialise DB
-      await useChatHistory(() => USER1, () => ORG1).loadHistory();
+      await useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      ).loadHistory();
       const result = await clearAllHistory();
       expect(result).toBe(true);
     });
 
     it("should only delete records for the current user+org, leaving others intact", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
 
       await saveUnique(h1, makeMessages(1), "s1", "User1 Chat 1");
       await saveUnique(h1, makeMessages(1), "s2", "User1 Chat 2");
@@ -815,12 +894,9 @@ describe("useChatHistory", () => {
       const { saveToHistory, updateChatTitle, loadChat } = useChatHistory(
         () => USER1,
         () => ORG1,
+        gt,
       );
-      const chatId = await saveToHistory(
-        makeMessages(1),
-        "s-upd-1",
-        "Old Title",
-      );
+      const chatId = await saveToHistory(makeMessages(1), "s-upd-1", "Old Title");
       expect(chatId).not.toBeNull();
 
       const result = await updateChatTitle(chatId!, "New Title");
@@ -832,22 +908,34 @@ describe("useChatHistory", () => {
     });
 
     it("should return false when the chatId does not exist", async () => {
-      const { updateChatTitle } = useChatHistory(() => USER1, () => ORG1);
+      const { updateChatTitle } = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
       // Initialise DB
-      await useChatHistory(() => USER1, () => ORG1).loadHistory();
+      await useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      ).loadHistory();
       const result = await updateChatTitle(99999, "Any Title");
       expect(result).toBe(false);
     });
 
     it("should return false when the record belongs to a different user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
-
-      const chatId = await h1.saveToHistory(
-        makeMessages(1),
-        "s-upd-cross",
-        "Original",
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
+
+      const chatId = await h1.saveToHistory(makeMessages(1), "s-upd-cross", "Original");
       expect(chatId).not.toBeNull();
 
       const result = await h2.updateChatTitle(chatId!, "Hijacked Title");
@@ -878,8 +966,16 @@ describe("useChatHistory", () => {
     });
 
     it("should not return another user's chats via loadHistory", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
 
       for (let i = 0; i < 3; i++) {
         await saveUnique(h1, makeMessages(1), `s1-${i}`, `User1 Chat ${i}`);
@@ -899,14 +995,18 @@ describe("useChatHistory", () => {
     });
 
     it("should not allow loadChat to return a record owned by another user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
-
-      const chatId = await h1.saveToHistory(
-        makeMessages(2),
-        "s-iso-load",
-        "Isolated Chat",
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
+
+      const chatId = await h1.saveToHistory(makeMessages(2), "s-iso-load", "Isolated Chat");
       expect(chatId).not.toBeNull();
 
       expect(await h2.loadChat(chatId!)).toBeNull();
@@ -914,14 +1014,18 @@ describe("useChatHistory", () => {
     });
 
     it("should not allow deleteChatById to delete a record owned by another user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
-
-      const chatId = await h1.saveToHistory(
-        makeMessages(1),
-        "s-iso-del",
-        "Should Stay",
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
+
+      const chatId = await h1.saveToHistory(makeMessages(1), "s-iso-del", "Should Stay");
       expect(chatId).not.toBeNull();
 
       expect(await h2.deleteChatById(chatId!)).toBe(false);
@@ -929,8 +1033,16 @@ describe("useChatHistory", () => {
     });
 
     it("should not allow clearAllHistory to delete records owned by another user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
 
       await saveUnique(h1, makeMessages(1), "s-clear-1", "User1 A");
       await saveUnique(h1, makeMessages(1), "s-clear-2", "User1 B");
@@ -943,14 +1055,18 @@ describe("useChatHistory", () => {
     });
 
     it("should not allow updateChatTitle to modify a record owned by another user+org", async () => {
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
-
-      const chatId = await h1.saveToHistory(
-        makeMessages(1),
-        "s-iso-upd",
-        "Protected Title",
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
       );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
+
+      const chatId = await h1.saveToHistory(makeMessages(1), "s-iso-upd", "Protected Title");
       expect(chatId).not.toBeNull();
 
       expect(await h2.updateChatTitle(chatId!, "Tampered")).toBe(false);
@@ -962,21 +1078,19 @@ describe("useChatHistory", () => {
 
     it("should scope the userOrgKey cache per composable instance", async () => {
       // Two instances for different user+org pairs created from the same factory call
-      const h1 = useChatHistory(() => USER1, () => ORG1);
-      const h2 = useChatHistory(() => USER2, () => ORG2);
+      const h1 = useChatHistory(
+        () => USER1,
+        () => ORG1,
+        gt,
+      );
+      const h2 = useChatHistory(
+        () => USER2,
+        () => ORG2,
+        gt,
+      );
 
-      const id1 = await saveUnique(
-        h1,
-        makeMessages(1),
-        "key-cache-1",
-        "H1 Chat",
-      );
-      const id2 = await saveUnique(
-        h2,
-        makeMessages(1),
-        "key-cache-2",
-        "H2 Chat",
-      );
+      const id1 = await saveUnique(h1, makeMessages(1), "key-cache-1", "H1 Chat");
+      const id2 = await saveUnique(h2, makeMessages(1), "key-cache-2", "H2 Chat");
 
       expect(id1).not.toBeNull();
       expect(id2).not.toBeNull();
@@ -989,25 +1103,21 @@ describe("useChatHistory", () => {
     it("should recompute the hash when the org getter returns a new value", async () => {
       // Simulate an org switch by using a mutable variable as the getter source
       let currentOrg = ORG1;
-      const composable = useChatHistory(() => USER1, () => currentOrg);
+      const composable = useChatHistory(
+        () => USER1,
+        () => currentOrg,
+        gt,
+      );
 
       // Save a chat while in ORG1
-      const chatIdOrg1 = await composable.saveToHistory(
-        makeMessages(1),
-        "s-switch-1",
-        "Org1 Chat",
-      );
+      const chatIdOrg1 = await composable.saveToHistory(makeMessages(1), "s-switch-1", "Org1 Chat");
       expect(chatIdOrg1).not.toBeNull();
 
       // Switch to ORG2 — the getter now returns ORG2
       currentOrg = ORG2;
 
       // Save a chat while in ORG2
-      const chatIdOrg2 = await composable.saveToHistory(
-        makeMessages(1),
-        "s-switch-2",
-        "Org2 Chat",
-      );
+      const chatIdOrg2 = await composable.saveToHistory(makeMessages(1), "s-switch-2", "Org2 Chat");
       expect(chatIdOrg2).not.toBeNull();
 
       // History after the switch should only show ORG2's chat

@@ -21,38 +21,67 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "vortex")]
-use arrow::{array::StructArray, datatypes::DataType};
-use arrow::{error::ArrowError, record_batch::RecordBatch};
+use arrow::{
+    array::StructArray,
+    datatypes::{DataType, Field},
+    error::ArrowError,
+    record_batch::RecordBatch,
+};
 use arrow_schema::Schema;
-#[cfg(feature = "vortex")]
-use futures::StreamExt;
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt, TryStreamExt};
 use parquet::{
     arrow::{
-        AsyncArrowWriter, ParquetRecordBatchStreamBuilder,
-        arrow_reader::ArrowReaderMetadata,
-        async_reader::{AsyncFileReader, ParquetRecordBatchStream},
+        AsyncArrowWriter, ParquetRecordBatchStreamBuilder, arrow_reader::ArrowReaderMetadata,
+        async_writer::AsyncFileWriter,
     },
     basic::{Compression, Encoding},
     file::{metadata::KeyValue, properties::WriterProperties},
 };
-#[cfg(feature = "vortex")]
+use serde::{Deserialize, Serialize};
 use vortex::{
-    VortexSessionDefault, array::arrow::IntoArrowArray, buffer::Buffer,
-    file::OpenOptionsSessionExt, io::session::RuntimeSessionExt, session::VortexSession,
+    VortexSessionDefault,
+    array::{ArrayRef, VortexSessionExecute},
+    arrow::ArrowSessionExt,
+    buffer::Buffer,
+    file::OpenOptionsSessionExt,
+    io::session::RuntimeSessionExt,
+    session::VortexSession,
 };
 
-use crate::{FileFormat, config::*, ider, meta::stream::FileMeta};
+use crate::{FileFormat, config::*, ider, meta::stream::FileMeta, utils::json};
 
-pub fn new_parquet_writer<'a>(
-    buf: &'a mut Vec<u8>,
-    schema: &'a Arc<Schema>,
-    bloom_filter_fields: &'a [String],
-    metadata: &'a FileMeta,
+/// Key of the vortex metadata segment carrying the o2 [`FileMeta`].
+pub const VORTEX_FILE_META_KEY: &str = "o2_file_meta";
+
+/// Same four fields [`new_parquet_writer`] writes into the parquet footer.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+struct VortexFileMeta {
+    min_ts: i64,
+    max_ts: i64,
+    records: i64,
+    original_size: i64,
+}
+
+/// Encode `metadata` for the [`VORTEX_FILE_META_KEY`] segment.
+pub fn encode_vortex_file_meta(metadata: &FileMeta) -> Vec<u8> {
+    json::to_vec(&VortexFileMeta {
+        min_ts: metadata.min_ts,
+        max_ts: metadata.max_ts,
+        records: metadata.records,
+        original_size: metadata.original_size,
+    })
+    .expect("file meta is always serializable")
+}
+
+pub fn new_parquet_writer<W: AsyncFileWriter>(
+    buf: W,
+    schema: &Arc<Schema>,
+    bloom_filter_fields: &[String],
+    metadata: &FileMeta,
     write_metadata: bool,
     compression: Option<&str>,
-) -> AsyncArrowWriter<&'a mut Vec<u8>> {
+) -> AsyncArrowWriter<W> {
     let cfg = get_config();
     let compression = compression.unwrap_or(&cfg.common.parquet_compression);
     let mut writer_props = WriterProperties::builder()
@@ -82,23 +111,23 @@ pub fn new_parquet_writer<'a>(
             ),
         ]));
     }
+
     // Bloom filter stored by row_group, set NDV to reduce the memory usage.
     // In this link, it says that the optimal number of NDV is 1000, here we use rg_size / NDV_RATIO
     // refer: https://www.influxdata.com/blog/using-parquets-bloom-filters/
     let mut bf_ndv = min(metadata.records as u64, PARQUET_MAX_ROW_GROUP_SIZE as u64);
     if bf_ndv > 1000 {
-        bf_ndv = max(1000, bf_ndv / cfg.common.bloom_filter_ndv_ratio);
+        bf_ndv = max(1000, bf_ndv / 100);
     }
-    if cfg.common.bloom_filter_enabled {
+    if cfg.common.bloom_filter_parquet_enabled {
         let mut fields = bloom_filter_fields.to_vec();
-        fields.extend(BLOOM_FILTER_DEFAULT_FIELDS.clone());
         fields.sort();
         fields.dedup();
         for field in fields {
             writer_props = writer_props
                 .set_column_bloom_filter_enabled(field.as_str().into(), true)
                 .set_column_bloom_filter_fpp(field.as_str().into(), DEFAULT_BLOOM_FILTER_FPP)
-                .set_column_bloom_filter_ndv(field.into(), bf_ndv); // take the field ownership
+                .set_column_bloom_filter_max_ndv(field.into(), bf_ndv); // take the field ownership
         }
     }
     let writer_props = writer_props.build();
@@ -141,64 +170,55 @@ pub fn parse_file_key_columns(key: &str) -> Result<(String, String, String), any
 /// Unified stream type that supports both Vortex and Parquet formats
 pub type RecordBatchStream = Pin<Box<dyn Stream<Item = Result<RecordBatch, ArrowError>> + Send>>;
 
-/// A generic wrapper for getting a record batch stream from a reader.
-/// It can be used for both bytes and file.
-async fn get_recordbatch_reader<T>(
-    reader: T,
-) -> Result<(Arc<Schema>, ParquetRecordBatchStream<T>), anyhow::Error>
-where
-    T: AsyncFileReader + Send + 'static,
-{
-    let arrow_reader = ParquetRecordBatchStreamBuilder::new(reader).await?;
-    let schema = arrow_reader.schema().clone();
-    let reader = arrow_reader.with_batch_size(get_batch_size()).build()?;
-    Ok((schema, reader))
+/// Convert a single vortex [`ArrayRef`] to an Arrow [`RecordBatch`].
+pub fn vortex_array_to_record_batch(
+    session: &VortexSession,
+    array: ArrayRef,
+    data_type: &DataType,
+) -> Result<RecordBatch, ArrowError> {
+    let mut ctx = session.create_execution_ctx();
+    let target = Field::new("", data_type.clone(), array.dtype().is_nullable());
+    let array = session
+        .arrow()
+        .execute_arrow(array, Some(&target), &mut ctx)
+        .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
+    let struct_array = array
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .ok_or_else(|| {
+            ArrowError::InvalidArgumentError("Expected struct array from vortex".to_string())
+        })?;
+    Ok(RecordBatch::from(struct_array))
 }
 
 pub async fn get_recordbatch_reader_from_bytes(
     file_format: FileFormat,
-    data: &bytes::Bytes,
+    data: bytes::Bytes,
 ) -> Result<(Arc<Schema>, RecordBatchStream), anyhow::Error> {
     match file_format {
         FileFormat::Parquet => {
-            let schema_reader = Cursor::new(data.clone());
-            let (schema, reader) = get_recordbatch_reader(schema_reader).await?;
+            let arrow_reader = ParquetRecordBatchStreamBuilder::new(Cursor::new(data)).await?;
+            let schema = arrow_reader.schema().clone();
+            let reader = arrow_reader.with_batch_size(get_batch_size()).build()?;
             let stream: RecordBatchStream = Box::pin(reader.map_err(ArrowError::from));
             Ok((schema, stream))
         }
-        #[cfg(feature = "vortex")]
         FileFormat::Vortex => {
             // Read vortex file from bytes and convert to record batches
             let session = VortexSession::default().with_tokio();
             let buf = Buffer::from(data.to_vec());
             let vxf = session.open_options().open_buffer(buf)?;
-            let schema = Arc::new(vxf.dtype().to_arrow_schema()?);
-
-            // Create a stream that converts vortex arrays to record batches
+            let schema = Arc::new(session.arrow().to_arrow_schema(vxf.dtype())?);
             let arrow_data_type = DataType::Struct(schema.fields().clone());
             let vortex_stream = vxf.scan()?.into_array_stream()?;
 
             let stream = vortex_stream.then(move |result| {
                 let arrow_data_type = arrow_data_type.clone();
+                let session = session.clone();
                 async move {
                     match result {
-                        Ok(vortex_array) => {
-                            // Convert vortex array to arrow array
-                            let arrow_array = vortex_array
-                                .into_arrow(&arrow_data_type)
-                                .map_err(|e| ArrowError::ExternalError(Box::new(e)))?;
-
-                            // Convert to struct array and then to record batch
-                            let struct_array = arrow_array
-                                .as_any()
-                                .downcast_ref::<StructArray>()
-                                .ok_or_else(|| {
-                                ArrowError::InvalidArgumentError(
-                                    "Expected struct array from vortex".to_string(),
-                                )
-                            })?;
-
-                            Ok(RecordBatch::from(struct_array))
+                        Ok(array) => {
+                            vortex_array_to_record_batch(&session, array, &arrow_data_type)
                         }
                         Err(e) => Err(ArrowError::ExternalError(Box::new(e))),
                     }
@@ -208,17 +228,13 @@ pub async fn get_recordbatch_reader_from_bytes(
             let stream: RecordBatchStream = Box::pin(stream);
             Ok((schema, stream))
         }
-        #[cfg(not(feature = "vortex"))]
-        FileFormat::Vortex => Err(anyhow::anyhow!(
-            "Vortex file format requires the vortex feature"
-        )),
     }
 }
 
 // should not have such function in the config
 pub async fn read_recordbatch_from_bytes(
     file_format: FileFormat,
-    data: &bytes::Bytes,
+    data: bytes::Bytes,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), anyhow::Error> {
     let (schema, reader) = get_recordbatch_reader_from_bytes(file_format, data).await?;
     let batches = reader.try_collect().await?;
@@ -231,12 +247,11 @@ pub async fn read_schema_from_file(path: &PathBuf) -> Result<Arc<Schema>, anyhow
     let format = FileFormat::from_extension(path_str);
 
     match format {
-        #[cfg(feature = "vortex")]
         Some(FileFormat::Vortex) => {
             // Read vortex file
             let session = VortexSession::default().with_tokio();
             let vxf = session.open_options().open_path(path.clone()).await?;
-            let schema = Arc::new(vxf.dtype().to_arrow_schema()?);
+            let schema = Arc::new(session.arrow().to_arrow_schema(vxf.dtype())?);
             Ok(schema)
         }
         _ => {
@@ -259,17 +274,12 @@ pub async fn read_schema_from_bytes(
             let arrow_reader = ParquetRecordBatchStreamBuilder::new(schema_reader).await?;
             Ok(arrow_reader.schema().clone())
         }
-        #[cfg(feature = "vortex")]
         FileFormat::Vortex => {
             let session = VortexSession::default().with_tokio();
             let buf = Buffer::from(data.to_vec());
             let vxf = session.open_options().open_buffer(buf)?;
-            let schema = Arc::new(vxf.dtype().to_arrow_schema()?);
+            let schema = Arc::new(session.arrow().to_arrow_schema(vxf.dtype())?);
             Ok(schema)
-        }
-        #[cfg(not(feature = "vortex"))]
-        FileFormat::Vortex => {
-            anyhow::bail!("Vortex file format requires the vortex feature to be enabled")
         }
     }
 }
@@ -474,7 +484,7 @@ mod tests {
 
         // Read back
         let (read_schema, read_batches) =
-            read_recordbatch_from_bytes(FileFormat::Parquet, &bytes::Bytes::from(data))
+            read_recordbatch_from_bytes(FileFormat::Parquet, bytes::Bytes::from(data))
                 .await
                 .unwrap();
 
@@ -512,6 +522,32 @@ mod tests {
         assert_eq!(read_metadata.max_ts, metadata.max_ts);
         assert_eq!(read_metadata.records, metadata.records);
         assert_eq!(read_metadata.original_size, metadata.original_size);
+    }
+
+    #[test]
+    fn test_encode_decode_vortex_file_meta() {
+        let metadata = FileMeta {
+            min_ts: -1,
+            max_ts: i64::MAX,
+            records: 7,
+            original_size: 8,
+            compressed_size: 9,
+            index_size: 10,
+            mindex_size: 0,
+            bloom_ver: 11,
+            flattened: true,
+        };
+        let decoded: VortexFileMeta =
+            json::from_slice(&encode_vortex_file_meta(&metadata)).unwrap();
+        assert_eq!(decoded.min_ts, metadata.min_ts);
+        assert_eq!(decoded.max_ts, metadata.max_ts);
+        assert_eq!(decoded.records, metadata.records);
+        assert_eq!(decoded.original_size, metadata.original_size);
+
+        // unknown and missing keys are tolerated
+        let decoded: VortexFileMeta = json::from_slice(br#"{"min_ts":5,"future":true}"#).unwrap();
+        assert_eq!(decoded.min_ts, 5);
+        assert_eq!(decoded.max_ts, 0);
     }
 
     #[test]

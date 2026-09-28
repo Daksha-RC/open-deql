@@ -16,15 +16,12 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { mount, VueWrapper } from "@vue/test-utils";
 import { h } from "vue";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
 
 vi.mock("@/utils/zincutils", () => ({
   getImageURL: (path: string) => `https://cdn.example.com/${path}`,
 }));
 
 import AttributeValueCell from "./AttributeValueCell.vue";
-
-installQuasar();
 
 describe("AttributeValueCell", () => {
   let wrapper: VueWrapper;
@@ -62,9 +59,7 @@ describe("AttributeValueCell", () => {
     });
 
     it("should NOT render the dropdown button", () => {
-      expect(
-        wrapper.find('[data-test="attribute-value-cell-dropdown-btn"]').exists(),
-      ).toBe(false);
+      expect(wrapper.find('[data-test="attribute-value-cell-dropdown-btn"]').exists()).toBe(false);
     });
   });
 
@@ -79,9 +74,7 @@ describe("AttributeValueCell", () => {
     });
 
     it("should render the dropdown button", () => {
-      expect(
-        wrapper.find('[data-test="attribute-value-cell-dropdown-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="attribute-value-cell-dropdown-btn"]').exists()).toBe(true);
     });
 
     it("should pass field and value as slot props to the dropdown slot", () => {
@@ -90,14 +83,14 @@ describe("AttributeValueCell", () => {
       let capturedField: string | undefined;
       let capturedValue: string | undefined;
 
-      // Stub q-btn-dropdown so its content slot renders immediately (not lazily in a teleport).
+      // Stub ODropdown so its content slot renders immediately (not lazily in a teleport).
       // This lets us verify the scoped slot bindings without needing to open the dropdown.
       wrapper = mount(AttributeValueCell, {
         props: { field: "service", value: "frontend" },
         global: {
           stubs: {
-            "q-btn-dropdown": {
-              template: `<div><slot /></div>`,
+            ODropdown: {
+              template: `<div><slot name="trigger" /><slot /></div>`,
             },
           },
         },

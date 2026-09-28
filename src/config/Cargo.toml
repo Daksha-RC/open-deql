@@ -8,7 +8,6 @@ license.workspace = true
 default = ["gxhash"]
 enterprise = []
 gxhash = ["dep:gxhash"]
-vortex = ["dep:vortex"]
 
 [dependencies]
 aes-siv.workspace = true
@@ -26,9 +25,7 @@ aws-sdk-sns.workspace = true
 axum.workspace = true
 axum-client-ip.workspace = true
 base64.workspace = true
-bitvec.workspace = true
 bytes.workspace = true
-byteorder.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 cityhasher.workspace = true
@@ -38,6 +35,7 @@ datafusion.workspace = true
 dashmap.workspace = true
 dotenv_config.workspace = true
 dotenvy.workspace = true
+fastdivide.workspace = true
 faststr.workspace = true
 futures.workspace = true
 local-ip-address.workspace = true
@@ -66,7 +64,7 @@ rand.workspace = true
 sea-orm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-segment.workspace = true
+serde_with = { version = "3", features = ["macros", "json"] }
 sha256.workspace = true
 sqlparser.workspace = true
 sqlx.workspace = true
@@ -78,27 +76,21 @@ tantivy-fst.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-tokio-util.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-log.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
 urlencoding.workspace = true
 utoipa.workspace = true
 uuid.workspace = true
 vrl.workspace = true
-roaring.workspace = true
-tonic.workspace = true
-tonic-prost.workspace = true
-tracing-opentelemetry.workspace = true
-vortex = { git = "https://github.com/openobserve/vortex", rev = "13423ca204f81dc1b20ca040da2aeb386220a312", features = [
-    "tokio",
-], optional = true }
+vortex = { workspace = true }
 
 [dev-dependencies]
 expect-test.workspace = true
-float-cmp = "0.10"
+float-cmp.workspace = true
 
 [build-dependencies]
 chrono.workspace = true

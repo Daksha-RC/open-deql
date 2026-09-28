@@ -14,15 +14,70 @@
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
-import { mount } from "@vue/test-utils";
-import { installQuasar } from "@/test/unit/helpers/install-quasar-plugin";
-import { Dialog, Notify } from "quasar";
+import { mount, flushPromises } from "@vue/test-utils";
 import DrilldownPopUp from "@/components/dashboards/addPanel/DrilldownPopUp.vue";
 import i18n from "@/locales";
 
-installQuasar({
-  plugins: [Dialog, Notify],
-});
+// Stub ODialog so tests are deterministic (no Portal/Teleport) and so we can
+// drive primary/secondary button clicks via the emits the component listens to.
+const ODialogStub = {
+  name: "ODialog",
+  props: [
+    "open",
+    "size",
+    "title",
+    "subTitle",
+    "persistent",
+    "showClose",
+    "width",
+    "primaryButtonLabel",
+    "secondaryButtonLabel",
+    "neutralButtonLabel",
+    "primaryButtonVariant",
+    "secondaryButtonVariant",
+    "neutralButtonVariant",
+    "primaryButtonDisabled",
+    "secondaryButtonDisabled",
+    "neutralButtonDisabled",
+    "primaryButtonLoading",
+    "secondaryButtonLoading",
+    "neutralButtonLoading",
+  ],
+  emits: ["update:open", "click:primary", "click:secondary", "click:neutral"],
+  template: `
+    <div
+      data-test="o-dialog-stub"
+      :data-open="String(open)"
+      :data-size="size"
+      :data-title="title"
+      :data-primary-label="primaryButtonLabel"
+      :data-secondary-label="secondaryButtonLabel"
+      :data-primary-disabled="String(primaryButtonDisabled)"
+    >
+      <span data-test="o-dialog-stub-title">{{ title }}</span>
+      <slot name="header-right" />
+      <slot />
+      <slot name="footer" />
+      <button
+        data-test="o-dialog-stub-primary"
+        :disabled="primaryButtonDisabled"
+        @click="$emit('click:primary')"
+      >{{ primaryButtonLabel }}</button>
+      <button
+        data-test="o-dialog-stub-secondary"
+        @click="$emit('click:secondary')"
+      >{{ secondaryButtonLabel }}</button>
+      <button
+        data-test="o-dialog-stub-close"
+        @click="$emit('update:open', false)"
+      >close</button>
+    </div>
+  `,
+};
+
+const node = document.createElement("div");
+node.setAttribute("id", "app");
+document.body.appendChild(node);
 
 const mockStore = {
   state: {
@@ -106,6 +161,7 @@ describe("DrilldownPopUp", () => {
   let wrapper: any;
 
   const defaultProps = {
+    open: true,
     isEditMode: false,
     drilldownDataIndex: -1,
     variablesData: {
@@ -115,6 +171,22 @@ describe("DrilldownPopUp", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // restore mockStore folders that some edge-case tests mutate
+    mockStore.state.organizationData.folders = [
+      { name: "test-folder", folderId: "folder-1" },
+      { name: "demo-folder", folderId: "folder-2" },
+    ];
+    // restore mockDashboardPanelData fields some tests mutate
+    mockDashboardPanelData.data.type = "table";
+    mockDashboardPanelData.data.queries = [
+      {
+        fields: {
+          x: [{ label: "timestamp", alias: "timestamp" }],
+          y: [{ label: "value", alias: "value" }],
+          z: [],
+        },
+      },
+    ];
   });
 
   afterEach(() => {
@@ -125,6 +197,7 @@ describe("DrilldownPopUp", () => {
 
   const createWrapper = (props = {}) => {
     return mount(DrilldownPopUp, {
+      attachTo: "#app",
       props: {
         ...defaultProps,
         ...props,
@@ -135,6 +208,7 @@ describe("DrilldownPopUp", () => {
           dashboardPanelDataPageKey: "dashboard",
         },
         stubs: {
+          ODialog: ODialogStub,
           DrilldownUserGuide: true,
           CommonAutoComplete: {
             template: '<div><input v-model="modelValue" /></div>',
@@ -154,62 +228,98 @@ describe("DrilldownPopUp", () => {
     });
   };
 
+  // Set a form-owned field on the REAL OForm (the validation source). The
+  // entangled `drilldownData` mirror is synced via v-model in the live app; in
+  // tests we drive the form directly.
+  const setField = (w: any, name: string, val: unknown) => w.vm.form.setFieldValue(name, val);
+
+  // Drive the form's own submit so the schema runs + the handler is awaited
+  // deterministically.
+  const submitForm = async (w: any) => {
+    await w.vm.form.handleSubmit();
+    await flushPromises();
+  };
+
+  it("clears validation state on close so a reopen starts clean (no lingering errors)", async () => {
+    wrapper = createWrapper();
+    // A failed submit (empty name) populates submit-state + errors on the
+    // persistent useOForm form (the component is :open-toggled, not v-if'd).
+    await submitForm(wrapper);
+    expect(wrapper.vm.form.state.submissionAttempts).toBeGreaterThan(0);
+    expect(wrapper.vm.form.state.isValid).toBe(false);
+
+    // Closing the dialog must reset the persistent form so the next open is clean.
+    await wrapper.setProps({ open: false });
+    await flushPromises();
+    expect(wrapper.vm.form.state.submissionAttempts).toBe(0);
+  });
+
   describe("Component Rendering", () => {
     it("should render drilldown popup container", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.find('[data-test="dashboard-drilldown-popup"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-popup"]').exists()).toBe(true);
     });
 
-    it("should render create drilldown title by default", () => {
+    it("should render ODialog wrapper", () => {
       wrapper = createWrapper();
 
-      const title = wrapper.find('[data-test="dashboard-drilldown-title"]');
-      expect(title.exists()).toBe(true);
-      expect(title.text()).toBe("Create Drilldown");
+      // The parent-supplied data-test fallthrough overrides the stub's own
+      // data-test on the root, so assert via findComponent instead.
+      expect(wrapper.findComponent(ODialogStub).exists()).toBe(true);
     });
 
-    it("should render edit drilldown title in edit mode", () => {
+    it("should forward create-drilldown title to ODialog by default", () => {
+      wrapper = createWrapper();
+
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("title")).toBe("Create Drilldown");
+    });
+
+    it("should forward edit-drilldown title to ODialog in edit mode", () => {
       wrapper = createWrapper({ isEditMode: true, drilldownDataIndex: 0 });
 
-      const title = wrapper.find('[data-test="dashboard-drilldown-title"]');
-      expect(title.exists()).toBe(true);
-      expect(title.text()).toBe("Edit Drilldown");
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("title")).toBe("Edit Drilldown");
+    });
+
+    it("should forward md size to ODialog", () => {
+      wrapper = createWrapper();
+
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("size")).toBe("md");
+    });
+
+    it("should forward open prop to ODialog", () => {
+      wrapper = createWrapper({ open: true });
+
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("open")).toBe(true);
     });
 
     it("should render drilldown name input", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper
-          .find('[data-test="dashboard-config-panel-drilldown-name"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-config-panel-drilldown-name"]').exists()).toBe(
+        true,
+      );
     });
 
     it("should render drilldown type buttons", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-by-dashboard-btn"]')
-          .exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="dashboard-drilldown-by-url-btn"]').exists(),
-      ).toBe(true);
-      expect(
-        wrapper.find('[data-test="dashboard-drilldown-by-logs-btn"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-by-dashboard-btn"]').exists()).toBe(
+        true,
+      );
+      expect(wrapper.find('[data-test="dashboard-drilldown-by-url-btn"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-by-logs-btn"]').exists()).toBe(true);
     });
 
-    it("should render action buttons", () => {
+    it("should render primary and secondary action buttons via ODialog", () => {
       wrapper = createWrapper();
 
-      expect(wrapper.find('[data-test="cancel-button"]').exists()).toBe(true);
-      expect(wrapper.find('[data-test="confirm-button"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="o-dialog-stub-primary"]').exists()).toBe(true);
+      expect(wrapper.find('[data-test="o-dialog-stub-secondary"]').exists()).toBe(true);
     });
   });
 
@@ -239,6 +349,12 @@ describe("DrilldownPopUp", () => {
 
       expect(wrapper.props("variablesData")).toEqual({});
     });
+
+    it("should default open prop to false when omitted", () => {
+      wrapper = createWrapper({ open: undefined });
+
+      expect(wrapper.props("open")).toBe(false);
+    });
   });
 
   describe("Component Structure", () => {
@@ -251,17 +367,17 @@ describe("DrilldownPopUp", () => {
     it("should have all required methods", () => {
       wrapper = createWrapper();
 
-      expect(typeof wrapper.vm.saveDrilldown).toBe("function");
-      expect(typeof wrapper.vm.changeTypeOfDrilldown).toBe("function");
       expect(typeof wrapper.vm.updateQueryValue).toBe("function");
+      expect(typeof wrapper.vm.addVariableRow).toBe("function");
+      expect(typeof wrapper.vm.removeVariableRow).toBe("function");
     });
 
-    it("should have all required computed properties", () => {
+    it("should own the form (useOForm owner pattern, schema-driven)", () => {
       wrapper = createWrapper();
 
       expect(wrapper.vm.folderList).toBeDefined();
-      expect(wrapper.vm.isFormValid).toBeDefined();
-      expect(wrapper.vm.isFormURLValid).toBeDefined();
+      expect(wrapper.vm.form).toBeDefined();
+      expect(typeof wrapper.vm.form.handleSubmit).toBe("function");
     });
 
     it("should initialize with default drilldown data", () => {
@@ -279,19 +395,16 @@ describe("DrilldownPopUp", () => {
       wrapper = createWrapper();
 
       expect(wrapper.vm.drilldownData.type).toBe("byDashboard");
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-by-dashboard-btn"]')
-          .classes(),
-      ).toContain("selected");
     });
 
     it("should change to byUrl type when clicked", async () => {
       wrapper = createWrapper();
 
-      await wrapper
-        .find('[data-test="dashboard-drilldown-by-url-btn"]')
-        .trigger("click");
+      // OToggleGroup uses reka-ui under the hood — emit update:model-value on the
+      // first OToggleGroup (the type selector) to simulate a user click.
+      const typeToggleGroup = wrapper.findAllComponents({ name: "OToggleGroup" }).at(0);
+      await typeToggleGroup!.vm.$emit("update:modelValue", "byUrl");
+      await wrapper.vm.$nextTick();
 
       expect(wrapper.vm.drilldownData.type).toBe("byUrl");
     });
@@ -299,17 +412,18 @@ describe("DrilldownPopUp", () => {
     it("should change to logs type when clicked", async () => {
       wrapper = createWrapper();
 
-      await wrapper
-        .find('[data-test="dashboard-drilldown-by-logs-btn"]')
-        .trigger("click");
+      const typeToggleGroup = wrapper.findAllComponents({ name: "OToggleGroup" }).at(0);
+      await typeToggleGroup!.vm.$emit("update:modelValue", "logs");
+      await wrapper.vm.$nextTick();
 
       expect(wrapper.vm.drilldownData.type).toBe("logs");
     });
 
-    it("should call changeTypeOfDrilldown method", () => {
+    it("should call changeTypeOfDrilldown method", async () => {
       wrapper = createWrapper();
 
-      wrapper.vm.changeTypeOfDrilldown("byUrl");
+      wrapper.vm.form.setFieldValue("type", "byUrl");
+      await flushPromises();
 
       expect(wrapper.vm.drilldownData.type).toBe("byUrl");
     });
@@ -318,56 +432,47 @@ describe("DrilldownPopUp", () => {
   describe("URL Drilldown Mode", () => {
     beforeEach(async () => {
       wrapper = createWrapper();
-      wrapper.vm.changeTypeOfDrilldown("byUrl");
+      wrapper.vm.form.setFieldValue("type", "byUrl");
       await wrapper.vm.$nextTick();
     });
 
     it("should show URL textarea for byUrl type", () => {
-      expect(
-        wrapper.find('[data-test="dashboard-drilldown-url-textarea"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-url-textarea"]').exists()).toBe(true);
     });
 
-    it("should validate URL format", () => {
-      wrapper.vm.drilldownData.data.url = "https://example.com";
-      expect(wrapper.vm.isFormURLValid).toBe(true);
+    it("validates URL format via the schema (protocol required)", async () => {
+      // type=byUrl bridged into the form by changeTypeOfDrilldown (beforeEach).
+      setField(wrapper, "name", "d1");
+      setField(wrapper, "data.url", "https://example.com");
+      await submitForm(wrapper);
+      expect(wrapper.vm.form.state.isValid).toBe(true);
 
-      wrapper.vm.drilldownData.data.url = "invalid-url";
-      expect(wrapper.vm.isFormURLValid).toBe(false);
+      setField(wrapper, "data.url", "invalid-url");
+      await submitForm(wrapper);
+      expect(wrapper.vm.form.state.isValid).toBe(false);
     });
 
-    it("should show error message for invalid URL", async () => {
-      wrapper.vm.drilldownData.data.url = "invalid-url";
-      await wrapper.vm.$nextTick();
+    it("shows the invalid-URL error after submit (replaces the inline div)", async () => {
+      setField(wrapper, "name", "d1");
+      setField(wrapper, "data.url", "invalid-url");
+      await submitForm(wrapper);
 
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-url-error-message"]')
-          .exists(),
-      ).toBe(true);
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-url-error-message"]')
-          .text(),
-      ).toBe("Invalid URL");
+      expect(wrapper.text()).toContain("Invalid URL");
     });
 
-    it("should not show error for empty URL", async () => {
-      wrapper.vm.drilldownData.data.url = "";
-      await wrapper.vm.$nextTick();
+    it("requires a URL for byUrl (empty URL blocks submit)", async () => {
+      setField(wrapper, "name", "d1");
+      setField(wrapper, "data.url", "");
+      await submitForm(wrapper);
 
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-url-error-message"]')
-          .exists(),
-      ).toBe(false);
+      expect(wrapper.vm.form.state.isValid).toBe(false);
     });
   });
 
   describe("Logs Drilldown Mode", () => {
     beforeEach(async () => {
       wrapper = createWrapper();
-      wrapper.vm.changeTypeOfDrilldown("logs");
+      wrapper.vm.form.setFieldValue("type", "logs");
       await wrapper.vm.$nextTick();
     });
 
@@ -380,105 +485,98 @@ describe("DrilldownPopUp", () => {
     });
 
     it("should switch to custom logs mode", async () => {
-      const customBtn = wrapper
-        .findAll(".q-btn")
-        .find((btn) => btn.text() === "Custom");
-      await customBtn.trigger("click");
+      // OToggleGroup uses reka-ui — emit update:model-value on the logsMode toggle
+      // (second OToggleGroup in the component) to simulate a user selecting "custom".
+      const logsModeToggleGroup = wrapper.findAllComponents({ name: "OToggleGroup" }).at(1);
+      expect(logsModeToggleGroup).toBeTruthy();
+      await logsModeToggleGroup!.vm.$emit("update:modelValue", "custom");
+      await wrapper.vm.$nextTick();
 
       expect(wrapper.vm.drilldownData.data.logsMode).toBe("custom");
     });
 
     it("should show query editor in custom mode", async () => {
-      wrapper.vm.drilldownData.data.logsMode = "custom";
-      await wrapper.vm.$nextTick();
+      wrapper.vm.form.setFieldValue("data.logsMode", "custom");
+      await flushPromises();
 
-      expect(wrapper.text()).toContain("Enter Custom Query:");
+      expect(wrapper.text()).toContain("Custom SQL Query");
     });
 
-    it("should update query value", () => {
+    it("should update query value", async () => {
       wrapper.vm.updateQueryValue("SELECT * FROM logs");
+      await flushPromises();
 
-      expect(wrapper.vm.drilldownData.data.logsQuery).toBe(
-        "SELECT * FROM logs",
-      );
+      expect(wrapper.vm.drilldownData.data.logsQuery).toBe("SELECT * FROM logs");
     });
   });
 
   describe("Dashboard Drilldown Mode", () => {
     beforeEach(async () => {
       wrapper = createWrapper();
-      wrapper.vm.changeTypeOfDrilldown("byDashboard");
+      wrapper.vm.form.setFieldValue("type", "byDashboard");
       await wrapper.vm.$nextTick();
     });
 
     it("should render folder selection", () => {
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-folder-select"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-folder-select"]').exists()).toBe(true);
     });
 
     it("should render dashboard selection when folder is selected", async () => {
-      wrapper.vm.drilldownData.data.folder = "test-folder";
-      await wrapper.vm.$nextTick();
+      setField(wrapper, "data.folder", "test-folder");
+      await flushPromises();
 
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-dashboard-select"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-dashboard-select"]').exists()).toBe(
+        true,
+      );
     });
 
     it("should render tab selection when dashboard is selected", async () => {
-      wrapper.vm.drilldownData.data.folder = "test-folder";
-      wrapper.vm.drilldownData.data.dashboard = "Dashboard 1";
-      await wrapper.vm.$nextTick();
+      setField(wrapper, "data.folder", "test-folder");
+      setField(wrapper, "data.dashboard", "Dashboard 1");
+      await flushPromises();
 
-      expect(
-        wrapper.find('[data-test="dashboard-drilldown-tab-select"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-tab-select"]').exists()).toBe(true);
     });
 
     it("should populate folder list from store", () => {
-      expect(wrapper.vm.folderList).toEqual([
+      expect(wrapper.vm.folderList).toMatchObject([
         { label: "test-folder", value: "test-folder" },
         { label: "demo-folder", value: "demo-folder" },
       ]);
     });
 
+    it("carries an icon component on every folder option, like the other folder pickers", () => {
+      // Folders with no chosen icon still get one — FolderIcon falls back to
+      // the folder glyph rather than leaving a gap.
+      for (const option of wrapper.vm.folderList) {
+        expect(option.iconComponent).toBeTruthy();
+      }
+    });
+
     it("should render pass all variables toggle", () => {
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-pass-all-variables"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-pass-all-variables"]').exists()).toBe(
+        true,
+      );
     });
   });
 
   describe("Variables Management", () => {
     beforeEach(async () => {
       wrapper = createWrapper();
-      wrapper.vm.changeTypeOfDrilldown("byDashboard");
+      wrapper.vm.form.setFieldValue("type", "byDashboard");
       await wrapper.vm.$nextTick();
     });
 
     it("should render add variable button", () => {
-      expect(
-        wrapper.find('[data-test="dashboard-drilldown-add-variable"]').exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-add-variable"]').exists()).toBe(true);
     });
 
     it("should add new variable when add button clicked", async () => {
       const initialLength = wrapper.vm.drilldownData.data.variables.length;
 
-      await wrapper
-        .find('[data-test="dashboard-drilldown-add-variable"]')
-        .trigger("click");
+      await wrapper.find('[data-test="dashboard-drilldown-add-variable"]').trigger("click");
 
-      expect(wrapper.vm.drilldownData.data.variables.length).toBe(
-        initialLength + 1,
-      );
+      expect(wrapper.vm.drilldownData.data.variables.length).toBe(initialLength + 1);
     });
 
     it("should initialize with default variable", () => {
@@ -490,11 +588,9 @@ describe("DrilldownPopUp", () => {
     });
 
     it("should render remove variable buttons", () => {
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-variable-remove-0"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-variable-remove-0"]').exists()).toBe(
+        true,
+      );
     });
 
     it("should remove variable when remove button clicked", async () => {
@@ -506,13 +602,9 @@ describe("DrilldownPopUp", () => {
       await wrapper.vm.$nextTick();
 
       const initialLength = wrapper.vm.drilldownData.data.variables.length;
-      await wrapper
-        .find('[data-test="dashboard-drilldown-variable-remove-0"]')
-        .trigger("click");
+      await wrapper.find('[data-test="dashboard-drilldown-variable-remove-0"]').trigger("click");
 
-      expect(wrapper.vm.drilldownData.data.variables.length).toBe(
-        initialLength - 1,
-      );
+      expect(wrapper.vm.drilldownData.data.variables.length).toBe(initialLength - 1);
     });
   });
 
@@ -522,9 +614,7 @@ describe("DrilldownPopUp", () => {
       wrapper = createWrapper();
 
       const selectedValues = wrapper.vm.options.selectedValue;
-      expect(
-        selectedValues.some((val: any) => val.value.includes("row.field")),
-      ).toBe(true);
+      expect(selectedValues.some((val: any) => val.value.includes("row.field"))).toBe(true);
     });
 
     it("should generate correct values for sankey type", () => {
@@ -532,14 +622,8 @@ describe("DrilldownPopUp", () => {
       wrapper = createWrapper();
 
       const selectedValues = wrapper.vm.options.selectedValue;
-      expect(
-        selectedValues.some((val: any) =>
-          val.value.includes("${edge.__source}"),
-        ),
-      ).toBe(true);
-      expect(
-        selectedValues.some((val: any) => val.value.includes("${node.__name}")),
-      ).toBe(true);
+      expect(selectedValues.some((val: any) => val.value.includes("${edge.__source}"))).toBe(true);
+      expect(selectedValues.some((val: any) => val.value.includes("${node.__name}"))).toBe(true);
     });
 
     it("should generate correct values for pie chart type", () => {
@@ -547,12 +631,8 @@ describe("DrilldownPopUp", () => {
       wrapper = createWrapper();
 
       const selectedValues = wrapper.vm.options.selectedValue;
-      expect(
-        selectedValues.some((val: any) => val.value === "${series.__name}"),
-      ).toBe(true);
-      expect(
-        selectedValues.some((val: any) => val.value === "${series.__value}"),
-      ).toBe(true);
+      expect(selectedValues.some((val: any) => val.value === "${series.__name}")).toBe(true);
+      expect(selectedValues.some((val: any) => val.value === "${series.__value}")).toBe(true);
     });
 
     it("should generate correct values for metric type", () => {
@@ -560,9 +640,7 @@ describe("DrilldownPopUp", () => {
       wrapper = createWrapper();
 
       const selectedValues = wrapper.vm.options.selectedValue;
-      expect(
-        selectedValues.some((val: any) => val.value === "${series.__value}"),
-      ).toBe(true);
+      expect(selectedValues.some((val: any) => val.value === "${series.__value}")).toBe(true);
     });
 
     it("should generate correct values for line chart type", () => {
@@ -570,68 +648,134 @@ describe("DrilldownPopUp", () => {
       wrapper = createWrapper();
 
       const selectedValues = wrapper.vm.options.selectedValue;
-      expect(
-        selectedValues.some(
-          (val: any) => val.value === "${series.__axisValue}",
-        ),
-      ).toBe(true);
+      expect(selectedValues.some((val: any) => val.value === "${series.__axisValue}")).toBe(true);
     });
   });
 
-  describe("Form Validation", () => {
-    it("should be invalid when name is empty", () => {
+  // Validation is now schema-driven through the REAL OForm (playbook §5). Each
+  // case sets the relevant form fields, drives a submit, and asserts the
+  // schema's verdict (form.state.isValid). This is the type-conditional
+  // superRefine that replaced the old isFormValid/isFormURLValid/nameError gate.
+  describe("Form Validation (schema)", () => {
+    it("is invalid when the name is empty", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "";
+      await flushPromises();
+      setField(wrapper, "name", "");
+      await submitForm(wrapper);
 
-      expect(wrapper.vm.isFormValid).toBe(true); // true means invalid/disabled
+      expect(wrapper.vm.form.state.isValid).toBe(false);
     });
 
-    it("should be invalid for URL type with invalid URL", () => {
+    it("is invalid for byUrl with an invalid URL", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "Test Drilldown";
-      wrapper.vm.drilldownData.type = "byUrl";
-      wrapper.vm.drilldownData.data.url = "invalid-url";
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "byUrl");
+      setField(wrapper, "data.url", "invalid-url");
+      await submitForm(wrapper);
 
-      expect(wrapper.vm.isFormValid).toBe(true); // true means invalid/disabled
+      expect(wrapper.vm.form.state.isValid).toBe(false);
     });
 
-    it("should be valid for URL type with valid URL", () => {
+    it("is valid for byUrl with a valid URL", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "Test Drilldown";
-      wrapper.vm.drilldownData.type = "byUrl";
-      wrapper.vm.drilldownData.data.url = "https://example.com";
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "byUrl");
+      setField(wrapper, "data.url", "https://example.com");
+      await submitForm(wrapper);
 
-      expect(wrapper.vm.isFormValid).toBe(false); // false means valid/enabled
+      expect(wrapper.vm.form.state.isValid).toBe(true);
     });
 
-    it("should be valid for logs type with auto mode", () => {
+    it("is valid for logs type in auto mode", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "Test Drilldown";
-      wrapper.vm.drilldownData.type = "logs";
-      wrapper.vm.drilldownData.data.logsMode = "auto";
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "auto");
+      await submitForm(wrapper);
 
-      expect(wrapper.vm.isFormValid).toBe(false); // false means valid/enabled
+      expect(wrapper.vm.form.state.isValid).toBe(true);
     });
 
-    it("should be invalid for logs type with custom mode and empty query", () => {
+    it("is invalid for logs custom mode with an empty query", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "Test Drilldown";
-      wrapper.vm.drilldownData.type = "logs";
-      wrapper.vm.drilldownData.data.logsMode = "custom";
-      wrapper.vm.drilldownData.data.logsQuery = "";
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "custom");
+      setField(wrapper, "data.logsQuery", "");
+      await submitForm(wrapper);
 
-      expect(wrapper.vm.isFormValid).toBe(true); // true means invalid/disabled
+      expect(wrapper.vm.form.state.isValid).toBe(false);
     });
 
-    it("should be valid for dashboard type with all selections", () => {
+    it("surfaces an inline required error for an empty custom query after submit", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "Test Drilldown";
-      wrapper.vm.drilldownData.type = "byDashboard";
-      wrapper.vm.drilldownData.data.folder = "test-folder";
-      wrapper.vm.drilldownData.data.dashboard = "Dashboard 1";
-      wrapper.vm.drilldownData.data.tab = "Tab 1";
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "custom");
+      setField(wrapper, "data.logsQuery", "");
+      await flushPromises();
 
-      expect(wrapper.vm.isFormValid).toBe(false); // false means valid/enabled
+      // submit-then-change timing: nothing shows before the first submit attempt.
+      expect(wrapper.find('[data-test="dashboard-drilldown-logs-query-error"]').exists()).toBe(
+        false,
+      );
+
+      await submitForm(wrapper);
+
+      // The Monaco editor is a manual widget bridged into the form; the error is
+      // rendered from its mapped field meta next to the editor.
+      expect(wrapper.find('[data-test="dashboard-drilldown-logs-query-error"]').exists()).toBe(
+        true,
+      );
+    });
+
+    it("clears the inline custom-query error once a query is entered", async () => {
+      wrapper = createWrapper();
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "custom");
+      setField(wrapper, "data.logsQuery", "");
+      await submitForm(wrapper);
+      expect(wrapper.find('[data-test="dashboard-drilldown-logs-query-error"]').exists()).toBe(
+        true,
+      );
+
+      // Re-validation on change (submit-then-change) drops the error.
+      setField(wrapper, "data.logsQuery", "SELECT * FROM logs");
+      await flushPromises();
+      expect(wrapper.find('[data-test="dashboard-drilldown-logs-query-error"]').exists()).toBe(
+        false,
+      );
+    });
+
+    it("is valid for byDashboard with all selections", async () => {
+      wrapper = createWrapper();
+      await flushPromises();
+      setField(wrapper, "name", "Test Drilldown");
+      setField(wrapper, "type", "byDashboard");
+      setField(wrapper, "data.folder", "test-folder");
+      setField(wrapper, "data.dashboard", "Dashboard 1");
+      setField(wrapper, "data.tab", "Tab 1");
+      await submitForm(wrapper);
+
+      expect(wrapper.vm.form.state.isValid).toBe(true);
+    });
+
+    it("keeps the Save button enabled (R3) and wires form-id (R4)", async () => {
+      wrapper = createWrapper();
+      await flushPromises();
+
+      const dialog = wrapper.findComponent(ODialogStub);
+      // Save is never disabled by validity now — the schema gates the submit.
+      expect(dialog.props("primaryButtonDisabled")).toBeFalsy();
+      // form-id (container) === OForm id makes Enter / footer Save submit.
+      expect(wrapper.find("#drilldown-popup-form").exists()).toBe(true);
     });
   });
 
@@ -639,11 +783,7 @@ describe("DrilldownPopUp", () => {
     it("should render open in new tab toggle", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper
-          .find('[data-test="dashboard-drilldown-open-in-new-tab"]')
-          .exists(),
-      ).toBe(true);
+      expect(wrapper.find('[data-test="dashboard-drilldown-open-in-new-tab"]').exists()).toBe(true);
     });
 
     it("should default to false for targetBlank", () => {
@@ -655,9 +795,7 @@ describe("DrilldownPopUp", () => {
     it("should toggle targetBlank value", async () => {
       wrapper = createWrapper();
 
-      const toggle = wrapper.find(
-        '[data-test="dashboard-drilldown-open-in-new-tab"]',
-      );
+      const toggle = wrapper.find('[data-test="dashboard-drilldown-open-in-new-tab"]');
       await toggle.trigger("click");
 
       expect(wrapper.vm.drilldownData.targetBlank).toBe(true);
@@ -665,95 +803,121 @@ describe("DrilldownPopUp", () => {
   });
 
   describe("Event Handling", () => {
-    it("should emit close when cancel button clicked", async () => {
+    it("should emit close when ODialog requests cancel (click:secondary)", async () => {
       wrapper = createWrapper();
 
-      const cancelBtn = wrapper.find('[data-test="cancel-button"]');
-      await cancelBtn.trigger("click");
+      const dialog = wrapper.findComponent(ODialogStub);
+      await dialog.vm.$emit("click:secondary");
 
-      // Check that the component calls the emit function
-      expect(wrapper.emitted()).toBeDefined();
+      expect(wrapper.emitted("close")).toBeTruthy();
+      expect(wrapper.emitted("close")!.length).toBe(1);
     });
 
-    it("should call saveDrilldown when confirm button clicked", async () => {
+    it("should emit close when ODialog requests close via update:open=false", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData.name = "Test";
-      wrapper.vm.drilldownData.type = "logs";
-      wrapper.vm.drilldownData.data.logsMode = "auto";
-      await wrapper.vm.$nextTick();
 
-      // Test by checking the form becomes valid and can be submitted
-      expect(wrapper.vm.isFormValid).toBe(false); // false means valid/enabled
+      const dialog = wrapper.findComponent(ODialogStub);
+      await dialog.vm.$emit("update:open", false);
 
-      const confirmBtn = wrapper.find('[data-test="confirm-button"]');
-      expect(confirmBtn.exists()).toBe(true);
-
-      // Check that button is enabled (not disabled)
-      const isDisabled =
-        confirmBtn.attributes("disable") === "true" ||
-        confirmBtn.attributes("disabled") === "";
-      expect(isDisabled).toBe(false);
+      expect(wrapper.emitted("close")).toBeTruthy();
+      expect(wrapper.emitted("close")!.length).toBe(1);
     });
 
-    it("should save drilldown in create mode", () => {
+    it("should not emit close when ODialog reports update:open=true", async () => {
       wrapper = createWrapper();
-      wrapper.vm.drilldownData = {
-        name: "New Drilldown",
-        type: "logs",
-        targetBlank: false,
-        findBy: "name",
-        data: {
-          logsMode: "auto",
-          logsQuery: "",
-          url: "",
-          folder: "",
-          dashboard: "",
-          tab: "",
-          passAllVariables: true,
-          variables: [],
-        },
-      };
+
+      const dialog = wrapper.findComponent(ODialogStub);
+      await dialog.vm.$emit("update:open", true);
+
+      expect(wrapper.emitted("close")).toBeFalsy();
+    });
+
+    it("saves via a valid form submit (logs/auto) and emits close", async () => {
+      wrapper = createWrapper();
+      await flushPromises();
+      setField(wrapper, "name", "Test");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "auto");
 
       const initialLength = mockDashboardPanelData.data.config.drilldown.length;
-      wrapper.vm.saveDrilldown();
+      await submitForm(wrapper);
 
-      expect(mockDashboardPanelData.data.config.drilldown.length).toBe(
-        initialLength + 1,
-      );
+      // a valid submit pushed a new drilldown and emitted close
+      expect(mockDashboardPanelData.data.config.drilldown.length).toBe(initialLength + 1);
+      expect(wrapper.emitted("close")).toBeTruthy();
     });
 
-    it("should update drilldown in edit mode", () => {
-      // Use existing drilldown data from mock
+    it("does NOT save when the form is invalid (empty name)", async () => {
+      wrapper = createWrapper();
+      await flushPromises();
+      setField(wrapper, "name", "");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "auto");
+
+      const initialLength = mockDashboardPanelData.data.config.drilldown.length;
+      await submitForm(wrapper);
+
+      expect(mockDashboardPanelData.data.config.drilldown.length).toBe(initialLength);
+      expect(wrapper.emitted("close")).toBeFalsy();
+    });
+
+    it("saves a new drilldown in create mode (validated payload)", async () => {
+      wrapper = createWrapper();
+      await flushPromises();
+      setField(wrapper, "name", "New Drilldown");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "auto");
+
+      const initialLength = mockDashboardPanelData.data.config.drilldown.length;
+      await submitForm(wrapper);
+
+      expect(mockDashboardPanelData.data.config.drilldown.length).toBe(initialLength + 1);
+      const saved =
+        mockDashboardPanelData.data.config.drilldown[
+          mockDashboardPanelData.data.config.drilldown.length - 1
+        ];
+      expect(saved.name).toBe("New Drilldown");
+      expect(saved.type).toBe("logs");
+    });
+
+    it("updates the drilldown in edit mode (validated payload)", async () => {
+      // Use existing drilldown data from mock (byDashboard with all selections)
       wrapper = createWrapper({ isEditMode: true, drilldownDataIndex: 0 });
-      wrapper.vm.drilldownData.name = "Updated Drilldown";
-      wrapper.vm.drilldownData.type = "logs";
+      await flushPromises();
+      setField(wrapper, "name", "Updated Drilldown");
+      setField(wrapper, "type", "logs");
+      setField(wrapper, "data.logsMode", "auto");
 
-      wrapper.vm.saveDrilldown();
+      await submitForm(wrapper);
 
-      expect(mockDashboardPanelData.data.config.drilldown[0].name).toBe(
-        "Updated Drilldown",
-      );
+      expect(mockDashboardPanelData.data.config.drilldown[0].name).toBe("Updated Drilldown");
       expect(mockDashboardPanelData.data.config.drilldown[0].type).toBe("logs");
     });
   });
 
   describe("Button Labels", () => {
-    it("should show 'Add' label in create mode", () => {
+    it("should show 'Add' label on ODialog primary button in create mode", () => {
       wrapper = createWrapper({ isEditMode: false });
 
-      const confirmBtn = wrapper.find('[data-test="confirm-button"]');
-      expect(confirmBtn.text()).toContain("Add");
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("primaryButtonLabel")).toBe("Add");
     });
 
-    it("should show 'Update' label in edit mode", () => {
-      // Use valid drilldown data to avoid JSON parsing issues
+    it("should show 'Update' label on ODialog primary button in edit mode", () => {
       wrapper = createWrapper({
         isEditMode: true,
         drilldownDataIndex: 0,
       });
 
-      const confirmBtn = wrapper.find('[data-test="confirm-button"]');
-      expect(confirmBtn.text()).toContain("Update");
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("primaryButtonLabel")).toBe("Update");
+    });
+
+    it("should show Cancel label on ODialog secondary button", () => {
+      wrapper = createWrapper();
+
+      const dialog = wrapper.findComponent(ODialogStub);
+      expect(dialog.props("secondaryButtonLabel")).toBe("Cancel");
     });
   });
 
@@ -776,7 +940,7 @@ describe("DrilldownPopUp", () => {
     });
 
     it("should handle undefined folders list", () => {
-      mockStore.state.organizationData.folders = undefined;
+      (mockStore.state.organizationData as any).folders = undefined;
       wrapper = createWrapper();
 
       expect(wrapper.vm.folderList).toEqual([]);
@@ -798,17 +962,15 @@ describe("DrilldownPopUp", () => {
   });
 
   describe("Component Integration", () => {
-    it("should render DrilldownUserGuide component", () => {
+    it("should render DrilldownUserGuide component in header-right slot", () => {
       wrapper = createWrapper();
 
-      expect(
-        wrapper.findComponent({ name: "DrilldownUserGuide" }).exists(),
-      ).toBe(true);
+      expect(wrapper.findComponent({ name: "DrilldownUserGuide" }).exists()).toBe(true);
     });
 
     it("should render CommonAutoComplete components for variables", async () => {
       wrapper = createWrapper();
-      wrapper.vm.changeTypeOfDrilldown("byDashboard");
+      wrapper.vm.form.setFieldValue("type", "byDashboard");
 
       // Add a variable to ensure autocomplete components are rendered
       wrapper.vm.drilldownData.data.variables.push({
@@ -820,25 +982,6 @@ describe("DrilldownPopUp", () => {
       // Check that the stub components exist (they might be rendered as stubs)
       const stubElements = wrapper.element.querySelectorAll("div");
       expect(stubElements.length).toBeGreaterThan(0);
-    });
-  });
-
-  describe("Styling and Layout", () => {
-    it("should have correct container styling", () => {
-      wrapper = createWrapper();
-
-      const container = wrapper.find('[data-test="dashboard-drilldown-popup"]');
-      expect(container.classes()).toContain("scroll");
-      expect(container.classes()).toContain("o2-input");
-    });
-
-    it("should apply selected class to active type button", () => {
-      wrapper = createWrapper();
-
-      const dashboardBtn = wrapper.find(
-        '[data-test="dashboard-drilldown-by-dashboard-btn"]',
-      );
-      expect(dashboardBtn.classes()).toContain("selected");
     });
   });
 });

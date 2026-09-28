@@ -19,15 +19,26 @@ import { describe, expect, it, beforeEach, vi, afterEach } from "vitest";
 vi.mock("monaco-editor/esm/vs/editor/editor.api", () => ({
   editor: {
     colorize: vi.fn(),
+    tokenize: vi.fn(),
   },
   languages: {
     register: vi.fn(),
     setMonarchTokensProvider: vi.fn(),
+    setLanguageConfiguration: vi.fn(),
   },
 }));
 
 // Mock SQL contribution
 vi.mock("monaco-editor/esm/vs/basic-languages/sql/sql.contribution.js", () => ({}));
+
+// Mock the PromQL grammar loader (it dynamically imports the grammar, which
+// imports monaco-editor directly and is unresolvable in the test environment).
+vi.mock("@/utils/query/promqlLanguageDefinition", () => ({
+  loadPromqlLanguage: vi.fn().mockResolvedValue({
+    language: { tokenizer: { root: [] } },
+    languageConfiguration: {},
+  }),
+}));
 
 // Mock VRL language definition
 vi.mock("@/utils/query/vrlLanguageDefinition", () => ({
@@ -41,12 +52,25 @@ vi.mock("@/utils/query/vrlLanguageDefinition", () => ({
 import { colorizeQuery } from "./colorizeQuery";
 import { editor } from "monaco-editor/esm/vs/editor/editor.api";
 
+// What colorizeQuery renders for text Monaco leaves untyped: the query, HTML-escaped.
+const plain = (q: string) =>
+  q
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
 describe("colorizeQuery", () => {
   const mockColorize = vi.mocked(editor.colorize);
+  const mockTokenize = vi.mocked(editor.tokenize);
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockColorize.mockResolvedValue("<span>colorized</span>");
+    mockTokenize.mockImplementation((text: string) =>
+      text.split(/\r\n|\r|\n/).map(() => [{ offset: 0, type: "", language: "sql" }] as any),
+    );
   });
 
   afterEach(() => {
@@ -74,7 +98,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize valid PromQL query", async () => {
@@ -82,15 +106,15 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "promql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "promql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize valid VRL query", async () => {
-      const query = ".level = \"error\"";
+      const query = '.level = "error"';
       const result = await colorizeQuery(query, "vrl");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "vrl", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
   });
 
@@ -98,19 +122,15 @@ describe("colorizeQuery", () => {
     it("should call colorize after registration", async () => {
       const result = await colorizeQuery("test query", "promql");
 
-      // Language registration happens once at module level
-      // What we care about is that colorization works
       expect(mockColorize).toHaveBeenCalledWith("test query", "promql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe("test query");
     });
 
     it("should call colorize for VRL language", async () => {
       const result = await colorizeQuery("test query", "vrl");
 
-      // Language registration happens once at module level
-      // What we care about is that colorization works
       expect(mockColorize).toHaveBeenCalledWith("test query", "vrl", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe("test query");
     });
 
     it("should handle multiple calls with same language", async () => {
@@ -140,7 +160,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "SQL");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle mixed case language names", async () => {
@@ -148,7 +168,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "SqL");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle lowercase language names", async () => {
@@ -156,7 +176,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "promql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "promql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
   });
 
@@ -166,7 +186,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize complex SQL query with joins", async () => {
@@ -179,7 +199,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize SQL query with aggregations", async () => {
@@ -187,7 +207,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize PromQL range query", async () => {
@@ -195,7 +215,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "promql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "promql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize PromQL aggregation query", async () => {
@@ -203,7 +223,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "promql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "promql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should colorize VRL transformation", async () => {
@@ -211,7 +231,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "vrl");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "vrl", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
   });
 
@@ -221,7 +241,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with newlines", async () => {
@@ -229,7 +249,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with tabs", async () => {
@@ -237,7 +257,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with single quotes", async () => {
@@ -245,7 +265,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with double quotes", async () => {
@@ -253,7 +273,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with backticks", async () => {
@@ -261,7 +281,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with comments", async () => {
@@ -269,7 +289,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle query with multi-line comments", async () => {
@@ -277,7 +297,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle very long queries", async () => {
@@ -285,7 +305,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle queries with unicode characters", async () => {
@@ -293,7 +313,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle queries with emojis", async () => {
@@ -301,7 +321,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
   });
 
@@ -341,7 +361,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "unknownlang");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "unknownlang", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should return original query on syntax errors", async () => {
@@ -356,19 +376,13 @@ describe("colorizeQuery", () => {
 
   describe("Performance and Caching", () => {
     it("should handle multiple concurrent colorization requests", async () => {
-      const queries = [
-        "SELECT * FROM logs",
-        "SELECT * FROM metrics",
-        "SELECT * FROM traces",
-      ];
+      const queries = ["SELECT * FROM logs", "SELECT * FROM metrics", "SELECT * FROM traces"];
 
-      const results = await Promise.all(
-        queries.map((q) => colorizeQuery(q, "sql"))
-      );
+      const results = await Promise.all(queries.map((q) => colorizeQuery(q, "sql")));
 
       expect(results).toHaveLength(3);
-      results.forEach((result) => {
-        expect(result).toBe("<span>colorized</span>");
+      results.forEach((result, i) => {
+        expect(result).toBe(plain(queries[i]));
       });
       expect(mockColorize).toHaveBeenCalledTimes(3);
     });
@@ -396,21 +410,20 @@ describe("colorizeQuery", () => {
     it("should handle switching between different languages", async () => {
       await colorizeQuery("SELECT * FROM logs", "sql");
       await colorizeQuery("rate(http_requests[5m])", "promql");
-      await colorizeQuery(".level = \"error\"", "vrl");
+      await colorizeQuery('.level = "error"', "vrl");
 
       expect(mockColorize).toHaveBeenCalledTimes(3);
       expect(mockColorize).toHaveBeenNthCalledWith(1, "SELECT * FROM logs", "sql", {});
       expect(mockColorize).toHaveBeenNthCalledWith(2, "rate(http_requests[5m])", "promql", {});
-      expect(mockColorize).toHaveBeenNthCalledWith(3, ".level = \"error\"", "vrl", {});
+      expect(mockColorize).toHaveBeenNthCalledWith(3, '.level = "error"', "vrl", {});
     });
 
-    it("should preserve HTML entities in colorized output", async () => {
-      mockColorize.mockResolvedValueOnce("<span>&lt;test&gt;</span>");
-
+    it("should escape HTML in the query text", async () => {
       const query = "SELECT * FROM logs WHERE html = '<test>'";
       const result = await colorizeQuery(query, "sql");
 
-      expect(result).toBe("<span>&lt;test&gt;</span>");
+      expect(result).toContain("&lt;test&gt;");
+      expect(result).not.toContain("<test>");
     });
 
     it("should handle empty options object", async () => {
@@ -450,7 +463,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should preserve trailing whitespace", async () => {
@@ -458,7 +471,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should preserve internal whitespace", async () => {
@@ -466,7 +479,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
   });
 
@@ -476,7 +489,7 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
     });
 
     it("should handle single space query", async () => {
@@ -484,7 +497,75 @@ describe("colorizeQuery", () => {
       const result = await colorizeQuery(query, "sql");
 
       expect(mockColorize).toHaveBeenCalledWith(query, "sql", {});
-      expect(result).toBe("<span>colorized</span>");
+      expect(result).toBe(plain(query));
+    });
+  });
+  describe("Theme-independent token classes", () => {
+    const tok = (offset: number, type: string) => ({ offset, type, language: "sql" }) as any;
+
+    it("paints SQL keywords with the query-syntax token utility, not a Monaco theme class", async () => {
+      const query = "SELECT count(*) FROM t WHERE s = 'x' -- c";
+      mockColorize.mockResolvedValueOnce('<span class="mtk6">SELECT</span>');
+      mockTokenize.mockReturnValueOnce([
+        [
+          tok(0, "keyword.sql"),
+          tok(6, "white.sql"),
+          tok(7, "predefined.sql"),
+          tok(12, "delimiter.parenthesis.sql"),
+          tok(13, "operator.sql"),
+          tok(14, "delimiter.parenthesis.sql"),
+          tok(15, "white.sql"),
+          tok(16, "keyword.sql"),
+          tok(20, "white.sql"),
+          tok(21, "identifier.sql"),
+          tok(22, "white.sql"),
+          tok(23, "keyword.sql"),
+          tok(28, "white.sql"),
+          tok(29, "identifier.sql"),
+          tok(30, "white.sql"),
+          tok(31, "operator.sql"),
+          tok(32, "white.sql"),
+          tok(33, "string.sql"),
+          tok(36, "white.sql"),
+          tok(37, "comment.sql"),
+        ],
+      ]);
+
+      const result = await colorizeQuery(query, "sql");
+
+      expect(result).not.toMatch(/mtk\d/);
+      expect(result).toBe(
+        '<span class="text-query-syntax-keyword">SELECT</span> ' +
+          '<span class="text-query-syntax-function">count</span>(*) ' +
+          '<span class="text-query-syntax-keyword">FROM</span> t ' +
+          '<span class="text-query-syntax-keyword">WHERE</span> s = ' +
+          '<span class="text-query-syntax-string">&#39;x&#39;</span> ' +
+          '<span class="text-query-syntax-comment">-- c</span>',
+      );
+    });
+
+    it("maps numbers and keeps multi-line statements on their own lines", async () => {
+      mockTokenize.mockReturnValueOnce([
+        [tok(0, "keyword.sql")],
+        [tok(0, "keyword.sql"), tok(5, "white.sql"), tok(6, "number.sql")],
+      ]);
+
+      const result = await colorizeQuery("SELECT\nLIMIT 10", "sql");
+
+      expect(result).toBe(
+        '<span class="text-query-syntax-keyword">SELECT</span>\n' +
+          '<span class="text-query-syntax-keyword">LIMIT</span> ' +
+          '<span class="text-query-syntax-number">10</span>',
+      );
+    });
+
+    it("escapes markup inside tokens", async () => {
+      mockTokenize.mockReturnValueOnce([[tok(0, "string.sql")]]);
+
+      const result = await colorizeQuery("'<img src=x onerror=alert(1)>'", "sql");
+
+      expect(result).not.toContain("<img");
+      expect(result).toContain("&lt;img");
     });
   });
 });
