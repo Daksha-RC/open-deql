@@ -670,6 +670,43 @@ pub fn refactor_map(
     new_map
 }
 
+/// Check if a stream name is a DEQL protected virtual table.
+///
+/// DEQL creates ephemeral virtual tables with reserved prefixes that must not be written to
+/// via normal ingestion paths. This guard prevents external writes to:
+/// - `deql_ins_*` — inspection output tables
+/// - `deql_brn_*` — decision branching tables
+/// - `deql_prj_*` — projection virtual tables
+/// - `deql_agg_*` — aggregate virtual tables
+/// - `deql_events` — the DEQL event stream (write via EXECUTE command only)
+#[cfg(feature = "deql")]
+pub fn check_ingest_guard(stream_name: &str) -> Result<()> {
+    const PROTECTED_PREFIXES: &[(&str, &str)] = &[
+        ("deql_ins_", "inspection output tables"),
+        ("deql_brn_", "decision branching tables"),
+        ("deql_prj_", "projection virtual tables"),
+        ("deql_agg_", "aggregate virtual tables"),
+    ];
+
+    for (prefix, description) in PROTECTED_PREFIXES {
+        if stream_name.starts_with(prefix) {
+            return Err(Error::IngestionError(format!(
+                "Cannot ingest into {} ({} prefix). These are ephemeral virtual tables.",
+                description, prefix
+            )));
+        }
+    }
+
+    // Also block direct writes to deql_events (only via EXECUTE command)
+    if stream_name == "deql_events" {
+        return Err(Error::IngestionError(
+            "Cannot ingest directly into deql_events. Use EXECUTE command.".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use infra::schema::{STREAM_SETTINGS, unwrap_stream_settings};
@@ -1209,5 +1246,79 @@ mod tests {
         let data = bytes::Bytes::from("{}");
         let result = create_log_ingestion_req(99, data);
         assert!(result.is_err());
+    }
+}
+
+#[cfg(all(test, feature = "deql"))]
+mod deql_tests {
+    use super::*;
+
+    #[test]
+    fn test_ingest_guard_blocks_inspection_output_prefix() {
+        let result = check_ingest_guard("deql_ins_deposit_check_20250101_001");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("inspection output tables"));
+        assert!(err.contains("deql_ins_"));
+    }
+
+    #[test]
+    fn test_ingest_guard_blocks_branching_prefix() {
+        let result = check_ingest_guard("deql_brn_deposit_check_20250101_001");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("decision branching tables"));
+        assert!(err.contains("deql_brn_"));
+    }
+
+    #[test]
+    fn test_ingest_guard_blocks_projection_prefix() {
+        let result = check_ingest_guard("deql_prj_some_projection");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("projection virtual tables"));
+        assert!(err.contains("deql_prj_"));
+    }
+
+    #[test]
+    fn test_ingest_guard_blocks_aggregate_prefix() {
+        let result = check_ingest_guard("deql_agg_balance_summary");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("aggregate virtual tables"));
+        assert!(err.contains("deql_agg_"));
+    }
+
+    #[test]
+    fn test_ingest_guard_blocks_deql_events() {
+        let result = check_ingest_guard("deql_events");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Cannot ingest directly into deql_events"));
+        assert!(err.contains("Use EXECUTE command"));
+    }
+
+    #[test]
+    fn test_ingest_guard_allows_normal_streams() {
+        assert!(check_ingest_guard("user_logs").is_ok());
+        assert!(check_ingest_guard("application_events").is_ok());
+        assert!(check_ingest_guard("test_deposits").is_ok());
+        assert!(check_ingest_guard("my_stream").is_ok());
+    }
+
+    #[test]
+    fn test_ingest_guard_allows_partial_prefix_match() {
+        // These should NOT be blocked because they don't start with the prefix
+        assert!(check_ingest_guard("my_deql_ins_table").is_ok());
+        assert!(check_ingest_guard("not_deql_brn_something").is_ok());
+        assert!(check_ingest_guard("x_deql_prj_test").is_ok());
+        assert!(check_ingest_guard("prefix_deql_agg_thing").is_ok());
+    }
+
+    #[test]
+    fn test_ingest_guard_deql_events_exact_match_only() {
+        // "deql_events" is blocked but "deql_events_extra" is not
+        assert!(check_ingest_guard("deql_events").is_err());
+        assert!(check_ingest_guard("deql_events_extra").is_ok());
     }
 }

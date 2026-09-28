@@ -1,0 +1,22 @@
+meta {
+  name: AC-2 Unknown Field
+  type: http
+  seq: 2
+}
+
+@baseUrl = {{baseUrl}}
+@org = {{org_id}}
+
+post {{baseUrl}}/api/{{org}}/deql/BankAccount/RegisterAccount
+Content-Type: application/json
+
+{
+  "account_id": "550e8400-e29b-41d4-a716-446655440000",
+  "account_holder": "Alice Smith",
+  "initial_balance": "1000.00",
+  "unknown_field": "should cause error"
+}
+
+? response.status == 400
+? response.body.error == "Validation failed"
+? response.body.errors.length > 0

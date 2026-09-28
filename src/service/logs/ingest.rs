@@ -94,6 +94,14 @@ pub async fn ingest(
     // check system resource
     check_ingestion_allowed(org_id, stream_type, Some(&stream_name)).await?;
 
+    // R3.5/R3.6: Reject ingestion to DeQL virtual streams (they have no physical storage)
+    if stream_name.starts_with("deql_agg_") || stream_name.starts_with("deql_prj_") {
+        return Err(Error::IngestionError(format!(
+            "Cannot ingest into virtual stream '{}' — it is a computed view",
+            stream_name
+        )));
+    }
+
     let now = now_micros();
     let min_ts = now - cfg.limit.ingest_allowed_upto_micro;
     let max_ts = now + cfg.limit.ingest_allowed_in_future_micro;
@@ -246,8 +254,14 @@ pub async fn ingest(
             pipeline_inputs.push(item);
             original_options.push(original_data);
         } else {
-            // JSON Flattening - use per-stream flatten level
-            let mut res = flatten::flatten_with_level(item, flatten_level)?;
+            // JSON Flattening - use per-stream flatten level.
+            // SS-04: skip flattening for deql_events — payload fields are already
+            // flat scalars and OO flattening must not rename or restructure them.
+            let mut res = if stream_name == "deql_events" {
+                item
+            } else {
+                flatten::flatten_with_level(item, flatten_level)?
+            };
 
             // handle timestamp
             let timestamp = match handle_timestamp(&mut res, min_ts, max_ts) {

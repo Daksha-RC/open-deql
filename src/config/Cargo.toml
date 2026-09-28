@@ -102,3 +102,9 @@ float-cmp = "0.10"
 
 [build-dependencies]
 chrono.workspace = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+split-debuginfo = "unpacked" # Faster linking on macOS/Linux

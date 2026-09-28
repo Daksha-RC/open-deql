@@ -1,0 +1,10 @@
+info:
+  name: 01-dereg-setup
+  type: folder
+  seq: 1
+
+request: {}
+
+docs:
+  content: "## Preprationfor DeQl test cases"
+  type: text/markdown

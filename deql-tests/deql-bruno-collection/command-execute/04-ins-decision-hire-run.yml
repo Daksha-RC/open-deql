@@ -1,0 +1,21 @@
+info:
+  name: 04-ins-decision-hire-run
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/deql/inspect/run"
+  body:
+    type: text
+    data: |-
+      INSPECT DECISION Hire
+      FROM hireemployee
+      INTO hire_audit;
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

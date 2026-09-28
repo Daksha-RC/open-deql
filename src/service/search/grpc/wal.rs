@@ -280,6 +280,10 @@ pub async fn search_memtable(
     }
 
     let start = std::time::Instant::now();
+    // Read raw memtable batches (unfiltered). We'll attempt to convert the
+    // IndexCondition -> PhysicalExpr and evaluate directly on merged
+    // RecordBatches below. This avoids creating a DataFusion SessionContext
+    // per-batch (Approach A: fast physical evaluation).
     let (mut memtable_ids, mut batches) = ingester::read_from_memtable(
         &query.org_id,
         query.stream_type.as_str(),
@@ -430,6 +434,21 @@ pub async fn search_memtable(
                 }
             })
             .collect::<Vec<_>>();
+
+        // If we have an index condition, try to evaluate it as a PhysicalExpr
+        // against each merged RecordBatch to perform in-memory predicate
+        // pushdown. Fall back to keeping the original batch on any error.
+        #[cfg(feature = "deql")]
+        let record_batches = if let Some(ic) = index_condition.as_ref() {
+            super::deql_wal_filter::filter_batches_with_index_condition(
+                record_batches,
+                ic,
+                &fst_fields,
+                &query.trace_id,
+            )
+        } else {
+            record_batches
+        };
 
         log::info!(
             "[trace_id {}] wal->mem->search: merge batches for group {i}, batches {batch_num}, took {} ms",

@@ -1,0 +1,23 @@
+meta {
+  name: AC-1 Valid Command Execution
+  type: http
+  seq: 1
+}
+
+@baseUrl = {{baseUrl}}
+@org = {{org_id}}
+
+post {{baseUrl}}/api/{{org}}/deql/BankAccount/RegisterAccount
+Content-Type: application/json
+
+{
+  "account_id": "550e8400-e29b-41d4-a716-446655440000",
+  "account_holder": "Alice Smith",
+  "initial_balance": "1000.00"
+}
+
+? response.status == 200
+? response.body.status == "success"
+? response.body.events.length > 0
+? response.body.events[0].event_type == "AccountRegistered"
+? response.body.events[0].fields.account_holder == "Alice Smith"

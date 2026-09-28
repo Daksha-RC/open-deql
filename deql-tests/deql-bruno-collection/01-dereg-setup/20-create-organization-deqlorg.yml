@@ -1,0 +1,33 @@
+info:
+  name: 20-Create-Organization-deqlorg
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{baseUrl}}/organizations"
+  body:
+    type: json
+    data: |-
+      {
+        "name": "deqlorg",
+        "description": "Deql organization"
+      }
+  auth: inherit
+
+runtime:
+  scripts:
+    - type: after-response
+      code: bru.setEnvVar("deql_org_id", res.getBody().identifier);
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: "Create a new organization named `deqlorg`. Example curl (explicit credentials):"

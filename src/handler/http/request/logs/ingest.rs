@@ -31,6 +31,8 @@ use prost::Message;
 
 #[cfg(feature = "cloud")]
 use crate::service::ingestion::check_ingestion_allowed;
+#[cfg(feature = "deql")]
+use crate::service::ingestion::check_ingest_guard;
 use crate::{
     common::{
         meta::{
@@ -168,6 +170,15 @@ pub async fn multi(
     let user_email = &user_email.user_id;
     let thread_id = get_thread_id();
 
+    #[cfg(feature = "deql")]
+    if let Err(e) = check_ingest_guard(&stream_name) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(MetaHttpResponse::error(StatusCode::FORBIDDEN, e)),
+        )
+            .into_response();
+    }
+
     #[cfg(feature = "cloud")]
     if let Err(e) = check_ingestion_allowed(&org_id, StreamType::Logs, None).await {
         return (
@@ -256,6 +267,15 @@ pub async fn json(
     let user_email = &user_email.user_id;
     let thread_id = get_thread_id();
 
+    #[cfg(feature = "deql")]
+    if let Err(e) = check_ingest_guard(&stream_name) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(MetaHttpResponse::error(StatusCode::FORBIDDEN, e)),
+        )
+            .into_response();
+    }
+
     #[cfg(feature = "cloud")]
     if let Err(e) = check_ingestion_allowed(&org_id, StreamType::Logs, None).await {
         return (
@@ -341,6 +361,15 @@ pub async fn handle_kinesis_request(
     let request_id = post_data.request_id.clone();
     let thread_id = get_thread_id();
 
+    #[cfg(feature = "deql")]
+    if let Err(e) = check_ingest_guard(&stream_name) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(MetaHttpResponse::error(StatusCode::FORBIDDEN, e)),
+        )
+            .into_response();
+    }
+
     #[cfg(feature = "cloud")]
     if let Err(e) = check_ingestion_allowed(&org_id, StreamType::Logs, None).await {
         return (
@@ -407,6 +436,15 @@ pub async fn handle_gcp_request(
 ) -> Response {
     let user_email = &user_email.user_id;
     let thread_id = get_thread_id();
+
+    #[cfg(feature = "deql")]
+    if let Err(e) = check_ingest_guard(&stream_name) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(MetaHttpResponse::error(StatusCode::FORBIDDEN, e)),
+        )
+            .into_response();
+    }
 
     #[cfg(feature = "cloud")]
     if let Err(e) = check_ingestion_allowed(&org_id, StreamType::Logs, None).await {

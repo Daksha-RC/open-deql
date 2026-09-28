@@ -34,6 +34,9 @@ pub(crate) mod tantivy_result;
 pub(crate) mod tantivy_result_cache;
 pub mod wal;
 
+#[cfg(feature = "deql")]
+pub(crate) mod deql_wal_filter;
+
 pub type SearchTable = Result<(Vec<Arc<dyn TableProvider>>, ScanStats, HashSet<u64>)>;
 
 #[derive(Debug)]

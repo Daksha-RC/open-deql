@@ -69,3 +69,12 @@ tests/ui-testing/.env.old
 /test-assist-results/
 /tests/ui-testing/test-output/
 **/debug-login-page.png
+
+# Screenshots and test artifacts
+/test-results/
+/test-assist-results/
+/tests/ui-testing/test-output/
+**/debug-login-page.png
+.lh
+temp_reports
+temp_reports/

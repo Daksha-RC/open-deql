@@ -15,10 +15,16 @@ env_logger.workspace = true
 config.workspace = true
 serde.workspace = true
 tokio.workspace = true
-chromiumoxide.workspace=true
-lettre.workspace=true
-chrono.workspace=true
-futures.workspace=true
+chromiumoxide.workspace = true
+lettre.workspace = true
+chrono.workspace = true
+futures.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+split-debuginfo = "unpacked" # Faster linking on macOS/Linux

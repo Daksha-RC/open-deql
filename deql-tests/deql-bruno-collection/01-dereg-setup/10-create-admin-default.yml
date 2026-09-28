@@ -1,0 +1,31 @@
+info:
+  name: 21-Create-DeqlAdmin-deqlorg
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/users"
+  body:
+    type: json
+    data: |-
+      {  
+        "email": "deqladmin@deqladmin.org",
+        "password": "deqladmin",
+        "first_name": "deql",
+        "last_name": "admin",
+        "role": "admin"
+      }
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

@@ -1,6 +1,16 @@
 {
-  "include": ["env.d.ts", "src/**/*", "src/**/*.vue", "src/**/*.{ts,tsx,js}"],
-  "exclude": ["src/**/__tests__/*", "node_modules", "dist", "src/**/*.spec.{ts,js}"],
+  "include": [
+    "env.d.ts",
+    "src/**/*",
+    "src/**/*.vue",
+    "src/**/*.{ts,tsx,js}"
+  ],
+  "exclude": [
+    "src/**/__tests__/*",
+    "node_modules",
+    "dist",
+    "src/**/*.spec.{ts,js}"
+  ],
   "compilerOptions": {
     "composite": true,
     "baseUrl": ".",
@@ -9,7 +19,10 @@
     "sourceMap": true,
     "resolveJsonModule": true,
     "paths": {
-      "@/*": ["./src/*"]
-    }
+      "@/*": [
+        "./src/*"
+      ]
+    },
+    "ignoreDeprecations": "6.0"
   }
 }

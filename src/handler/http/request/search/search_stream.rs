@@ -248,6 +248,215 @@ pub async fn search_http2_stream(
             return http_response;
         }
     };
+    // R3.5: If the stream is a DeQL virtual agg stream, rewrite the SQL
+    // to the fold query against deql_events and change the target stream.
+    #[cfg(feature = "deql")]
+    {
+        tracing::info!(
+            stream_names = ?stream_names,
+            sql = %req.query.sql,
+            is_ui_histogram = is_ui_histogram,
+            "DeQL R3.5: checking stream names for virtual agg"
+        );
+        if stream_names.len() == 1
+            && (stream_names[0].starts_with("deql_agg_") || stream_names[0].starts_with("deql_prj_"))
+        {
+            // Handle histogram requests for virtual streams.
+            // For aggregates: _timestamp represents the most recent update time for each aggregate.
+            // For projections: _timestamp comes from the underlying deql_events query.
+            // We compute a histogram by wrapping the query and grouping by histogram(_timestamp).
+            if is_ui_histogram {
+                if let Some(agg_lower) = stream_names[0].strip_prefix("deql_agg_") {
+                    if let Some((agg_name, field_names)) =
+                        crate::service::search::deql_virtual_rewrite::get_agg_fields(&org_id, agg_lower).await
+                    {
+                        let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                        let aggregate_id_filter =
+                            crate::service::search::deql_virtual_rewrite::extract_aggregate_id_filter(&req.query.sql);
+                        
+                        // Build the fold SQL that computes aggregate state
+                        let fold_sql = o2_deql::query::agg_sql::build_agg_sql(
+                            &agg_name,
+                            &field_refs,
+                            aggregate_id_filter.as_deref(),
+                            0,
+                            100000, // Large limit for histogram computation
+                        );
+
+                        // Wrap the fold query in a histogram query
+                        // The fold query returns _timestamp as MAX(_timestamp) for each aggregate
+                        let histogram_sql = format!(
+                            "SELECT histogram(_timestamp) AS zo_sql_key, count(*) AS zo_sql_num FROM ({}) AS agg_data GROUP BY zo_sql_key ORDER BY zo_sql_key DESC",
+                            fold_sql
+                        );
+
+                        tracing::info!(
+                            stream = %stream_names[0],
+                            histogram_sql = %histogram_sql,
+                            "DeQL R3.5: executing histogram query for virtual agg stream"
+                        );
+
+                        let end_time = config::utils::time::now_micros();
+                        let start_time = end_time - (365 * 24 * 60 * 60 * 1_000_000);
+                        let search_req = config::meta::search::Request {
+                            query: config::meta::search::Query {
+                                sql: histogram_sql,
+                                start_time,
+                                end_time,
+                                from: 0,
+                                size: 10000,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        };
+
+                        match crate::service::search::search(
+                            &trace_id, &org_id, stream_type, None, &search_req,
+                        ).await {
+                            Ok(response) => {
+                                return format_virtual_histogram_response(response);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    "DeQL R3.5: histogram query failed, returning empty histogram"
+                                );
+                                return format_empty_histogram_response();
+                            }
+                        }
+                    }
+                } else if let Some(proj_name) = stream_names[0].strip_prefix("deql_prj_") {
+                    // Handle histogram for projection streams
+                    if let Some(proj_sql) =
+                        crate::service::search::deql_virtual_rewrite::get_projection_sql(&org_id, proj_name).await
+                    {
+                        // Wrap the projection SQL in a histogram query
+                        // Projections query deql_events which has _timestamp
+                        let histogram_sql = format!(
+                            "SELECT histogram(_timestamp) AS zo_sql_key, count(*) AS zo_sql_num FROM ({}) AS proj_data GROUP BY zo_sql_key ORDER BY zo_sql_key DESC",
+                            proj_sql
+                        );
+
+                        tracing::info!(
+                            stream = %stream_names[0],
+                            histogram_sql = %histogram_sql,
+                            "DeQL R3.6: executing histogram query for virtual projection stream"
+                        );
+
+                        let end_time = config::utils::time::now_micros();
+                        let start_time = end_time - (365 * 24 * 60 * 60 * 1_000_000);
+                        let search_req = config::meta::search::Request {
+                            query: config::meta::search::Query {
+                                sql: histogram_sql,
+                                start_time,
+                                end_time,
+                                from: 0,
+                                size: 10000,
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        };
+
+                        match crate::service::search::search(
+                            &trace_id, &org_id, stream_type, None, &search_req,
+                        ).await {
+                            Ok(response) => {
+                                return format_virtual_histogram_response(response);
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = ?e,
+                                    "DeQL R3.6: histogram query failed for projection, returning empty histogram"
+                                );
+                                return format_empty_histogram_response();
+                            }
+                        }
+                    }
+                }
+                // If aggregate/projection lookup fails, return empty histogram
+                tracing::info!(
+                    stream = %stream_names[0],
+                    "DeQL: returning empty histogram for virtual stream (lookup failed)"
+                );
+                return format_empty_histogram_response();
+            }
+            if let Some(agg_lower) = stream_names[0].strip_prefix("deql_agg_") {
+                if let Some((agg_name, field_names)) =
+                    crate::service::search::deql_virtual_rewrite::get_agg_fields(&org_id, agg_lower).await
+                {
+                    let field_refs: Vec<&str> = field_names.iter().map(|s| s.as_str()).collect();
+                    let aggregate_id_filter =
+                        crate::service::search::deql_virtual_rewrite::extract_aggregate_id_filter(&req.query.sql);
+                    let fold_sql = o2_deql::query::agg_sql::build_agg_sql(
+                        &agg_name,
+                        &field_refs,
+                        aggregate_id_filter.as_deref(),
+                        0,
+                        10000,
+                    );
+
+                    let end_time = config::utils::time::now_micros();
+                    let start_time = end_time - (365 * 24 * 60 * 60 * 1_000_000);
+                    let search_req = config::meta::search::Request {
+                        query: config::meta::search::Query {
+                            sql: fold_sql,
+                            start_time,
+                            end_time,
+                            from: 0,
+                            size: 10000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+
+                    match crate::service::search::search(
+                        &trace_id, &org_id, stream_type, None, &search_req,
+                    ).await {
+                        Ok(response) => {
+                            return format_virtual_sse_response(response);
+                        }
+                        Err(e) => {
+                            return map_error_to_http_response(&e, Some(trace_id));
+                        }
+                    }
+                } else if is_deql_registry_empty(&org_id).await {
+                    return format_recovery_in_progress_response(&stream_names[0]);
+                }
+            } else if let Some(proj_name) = stream_names[0].strip_prefix("deql_prj_") {
+                if let Some(proj_sql) =
+                    crate::service::search::deql_virtual_rewrite::get_projection_sql(&org_id, proj_name).await
+                {
+                    let end_time = config::utils::time::now_micros();
+                    let start_time = end_time - (365 * 24 * 60 * 60 * 1_000_000);
+                    let search_req = config::meta::search::Request {
+                        query: config::meta::search::Query {
+                            sql: proj_sql,
+                            start_time,
+                            end_time,
+                            from: 0,
+                            size: 10000,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+
+                    match crate::service::search::search(
+                        &trace_id, &org_id, stream_type, None, &search_req,
+                    ).await {
+                        Ok(response) => {
+                            return format_virtual_sse_response(response);
+                        }
+                        Err(e) => {
+                            return map_error_to_http_response(&e, Some(trace_id));
+                        }
+                    }
+                } else if is_deql_registry_empty(&org_id).await {
+                    return format_recovery_in_progress_response(&stream_names[0]);
+                }
+            }
+        }
+    }
+
     #[cfg(feature = "enterprise")]
     for stream in stream_names.iter() {
         if let Err(e) = crate::service::search::check_search_allowed(&org_id, Some(stream)) {
@@ -1003,4 +1212,170 @@ async fn get_sql(
 ) -> Result<crate::service::search::sql::Sql, infra::errors::Error> {
     crate::service::search::sql::Sql::new(&query.clone().into(), org_id, stream_type, search_type)
         .await
+}
+
+/// Format a search::Response as an SSE (Server-Sent Events) response
+/// matching the Logs Explore streaming protocol.
+#[cfg(feature = "deql")]
+fn format_virtual_sse_response(response: config::meta::search::Response) -> axum::response::Response {
+    let hits_json = serde_json::to_string(&serde_json::json!({
+        "hits": response.hits
+    }))
+    .unwrap_or_default();
+    let meta_json = serde_json::to_string(&serde_json::json!({
+        "results": response,
+        "streaming_aggs": false,
+        "time_offset": serde_json::Value::Null
+    }))
+    .unwrap_or_default();
+
+    let sse_body = format!(
+        "event: search_response_metadata\ndata: {meta_json}\n\nevent: search_response_hits\ndata: {hits_json}\n\nevent: progress\ndata: {{\"percent\":100}}\n\ndata: [[DONE]]\n\n"
+    );
+
+    axum::response::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(axum::body::Body::from(sse_body))
+        .unwrap()
+}
+
+/// Format a histogram response for virtual aggregate streams.
+/// The response contains histogram buckets computed from the aggregate's _timestamp field.
+#[cfg(feature = "deql")]
+fn format_virtual_histogram_response(response: config::meta::search::Response) -> axum::response::Response {
+    let hits_json = serde_json::to_string(&serde_json::json!({
+        "hits": response.hits
+    }))
+    .unwrap_or_default();
+    
+    // Mark this as a histogram response
+    let mut histogram_response = response;
+    histogram_response.is_histogram_eligible = Some(true);
+    
+    let meta_json = serde_json::to_string(&serde_json::json!({
+        "results": histogram_response,
+        "streaming_aggs": false,
+        "time_offset": serde_json::Value::Null
+    }))
+    .unwrap_or_default();
+
+    let sse_body = format!(
+        "event: search_response_metadata\ndata: {meta_json}\n\nevent: search_response_hits\ndata: {hits_json}\n\nevent: progress\ndata: {{\"percent\":100}}\n\ndata: [[DONE]]\n\n"
+    );
+
+    axum::response::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(axum::body::Body::from(sse_body))
+        .unwrap()
+}
+
+/// Format an empty histogram response for virtual streams.
+/// Virtual streams (deql_agg_*, deql_prj_*) don't have physical time-series data,
+/// so histogram requests return an empty result immediately.
+#[cfg(feature = "deql")]
+fn format_empty_histogram_response() -> axum::response::Response {
+    let empty_response = config::meta::search::Response {
+        took: 0,
+        took_detail: Default::default(),
+        columns: vec![],
+        hits: vec![],
+        total: 0,
+        from: 0,
+        size: 0,
+        cached_ratio: 0,
+        scan_files: 0,
+        scan_size: 0,
+        idx_scan_size: 0,
+        scan_records: 0,
+        response_type: "".to_string(),
+        trace_id: "".to_string(),
+        function_error: vec![],
+        is_partial: false,
+        histogram_interval: None,
+        new_start_time: None,
+        new_end_time: None,
+        result_cache_ratio: 0,
+        work_group: None,
+        order_by: None,
+        order_by_metadata: vec![],
+        converted_histogram_query: None,
+        histogram_breakdown_field: None,
+        is_histogram_eligible: Some(false),
+        query_index: None,
+        peak_memory_usage: None,
+    };
+
+    let hits_json = serde_json::to_string(&serde_json::json!({
+        "hits": []
+    }))
+    .unwrap_or_default();
+    let meta_json = serde_json::to_string(&serde_json::json!({
+        "results": empty_response,
+        "streaming_aggs": false,
+        "time_offset": serde_json::Value::Null
+    }))
+    .unwrap_or_default();
+
+    let sse_body = format!(
+        "event: search_response_metadata\ndata: {meta_json}\n\nevent: search_response_hits\ndata: {hits_json}\n\nevent: progress\ndata: {{\"percent\":100}}\n\ndata: [[DONE]]\n\n"
+    );
+
+    axum::response::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .body(axum::body::Body::from(sse_body))
+        .unwrap()
+}
+
+/// Check if the DeQL registry is empty for the given org (still loading/recovering).
+#[cfg(feature = "deql")]
+async fn is_deql_registry_empty(org_id: &str) -> bool {
+    use crate::handler::http::request::dereg::get_deql_state;
+
+    let state = get_deql_state().await;
+    let org_dereg = state.org_map.get_or_init(org_id).await;
+    let dereg = org_dereg.read().await;
+    dereg.aggregate_count() == 0
+}
+
+/// Return a 503 SSE response indicating the DeQL registry is still loading.
+/// Used when a virtual stream query arrives before rehydrate has completed.
+#[cfg(feature = "deql")]
+fn format_recovery_in_progress_response(stream_name: &str) -> axum::response::Response {
+    let error_msg = format!(
+        "Virtual stream '{}' is not yet available. The DeQL registry is being recovered from audit logs. Please retry in a moment.",
+        stream_name
+    );
+
+    let meta_json = serde_json::to_string(&serde_json::json!({
+        "results": {
+            "took": 0,
+            "hits": [],
+            "total": 0,
+            "from": 0,
+            "size": 0,
+            "is_partial": true,
+            "function_error": [&error_msg]
+        },
+        "streaming_aggs": false,
+        "time_offset": serde_json::Value::Null
+    }))
+    .unwrap_or_default();
+
+    let sse_body = format!(
+        "event: search_response_metadata\ndata: {meta_json}\n\nevent: progress\ndata: {{\"percent\":100}}\n\ndata: [[DONE]]\n\n"
+    );
+
+    axum::response::Response::builder()
+        .status(503)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .header("retry-after", "10")
+        .body(axum::body::Body::from(sse_body))
+        .unwrap()
 }

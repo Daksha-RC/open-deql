@@ -13,7 +13,13 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{any::Any, sync::Arc};
+use std::{
+    any::Any,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use arrow_schema::SchemaRef;
 use config::{TIMESTAMP_COL_NAME, get_config};
@@ -205,15 +211,18 @@ fn handler_tantivy_index(
         }
 
         let start = std::time::Instant::now();
+        let access_plan_count = Arc::new(AtomicUsize::new(0));
         let new_file_groups: Vec<_> = file_groups
             .into_par_iter()
             .map(|file_group| {
+                let access_plan_count = access_plan_count.clone();
                 let group: Vec<_> = file_group
                     .into_inner()
                     .into_iter()
                     .map(|mut file| {
                         if let Some(access_plan) = generate_access_plan(&file) {
                             file = file.with_extensions(access_plan);
+                            access_plan_count.fetch_add(1, Ordering::Relaxed);
                         }
                         file
                     })
@@ -227,9 +236,10 @@ fn handler_tantivy_index(
         let groups_len = new_file_groups.len();
         let max_group_len = new_file_groups.iter().map(|g| g.len()).max().unwrap_or(0);
         let files_nums = new_file_groups.iter().map(|g| g.len()).sum::<usize>();
+        let files_with_access = access_plan_count.load(Ordering::Relaxed);
 
         log::info!(
-            "[trace_id {trace_id}] listing table adapter, file groups: {groups_len}, max group len: {max_group_len}, total files: {files_nums}, took: {} ms",
+            "[trace_id {trace_id}] listing table adapter, file groups: {groups_len}, max group len: {max_group_len}, total files: {files_nums}, files_with_access_plan: {files_with_access}, took: {} ms",
             start.elapsed().as_millis() as usize,
         );
 

@@ -1,0 +1,20 @@
+meta {
+  name: AC-6 Async Mode Not Implemented
+  type: http
+  seq: 6
+}
+
+@baseUrl = {{baseUrl}}
+@org = {{org_id}}
+
+post {{baseUrl}}/api/{{org}}/deql/BankAccount/RegisterAccount?mode=async
+Content-Type: application/json
+
+{
+  "account_id": "550e8400-e29b-41d4-a716-446655440000",
+  "account_holder": "Alice Smith",
+  "initial_balance": "1000.00"
+}
+
+? response.status == 501
+? response.body.error contains "Async mode"

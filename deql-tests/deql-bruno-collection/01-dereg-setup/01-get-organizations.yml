@@ -1,0 +1,23 @@
+info:
+  name: 01-Get-Organizations
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{baseUrl}}/organizations"
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: Retrieve the list of organizations. Uses collection-level auth (inherited).

@@ -25,6 +25,11 @@ serde_json.workspace = true
 snafu.workspace = true
 tokio.workspace = true
 core_affinity = "0.8"
+o2-deql = { path = "../deql", optional = true }
+
+[features]
+default = []
+deql = ["dep:o2-deql"]
 
 [[bin]]
 name = "wal-reader"

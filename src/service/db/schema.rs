@@ -303,16 +303,36 @@ pub async fn list(
         let (stream_type, stream_name, start_dt) = match stream_type {
             Some(stream_type) => {
                 let columns = key.split('/').take(2).collect::<Vec<_>>();
-                assert_eq!(columns.len(), 2, "BUG");
-                (stream_type, columns[0].into(), columns[1].parse().unwrap())
+                if columns.len() != 2 {
+                    log::warn!("list_schemas: skipping key with {} segments (expected 2): {key}", columns.len());
+                    continue;
+                }
+                let start_dt: i64 = match columns[1].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        log::warn!("list_schemas: skipping key with non-numeric start_dt: {key}");
+                        continue;
+                    }
+                };
+                (stream_type, columns[0].into(), start_dt)
             }
             None => {
                 let columns = key.split('/').take(3).collect::<Vec<_>>();
-                assert_eq!(columns.len(), 3, "BUG");
+                if columns.len() != 3 {
+                    log::warn!("list_schemas: skipping key with {} segments (expected 3): {key}", columns.len());
+                    continue;
+                }
+                let start_dt: i64 = match columns[2].parse() {
+                    Ok(v) => v,
+                    Err(_) => {
+                        log::warn!("list_schemas: skipping key with non-numeric start_dt: {key}");
+                        continue;
+                    }
+                };
                 (
                     columns[0].into(),
                     columns[1].into(),
-                    columns[2].parse().unwrap(),
+                    start_dt,
                 )
             }
         };
@@ -587,7 +607,10 @@ pub async fn cache() -> Result<(), anyhow::Error> {
     for (i, (key, val)) in items.into_iter().enumerate() {
         let key = key.strip_prefix(db_key).unwrap();
         let columns = key.split('/').take(4).collect::<Vec<_>>();
-        assert_eq!(columns.len(), 4, "BUG");
+        if columns.len() != 4 {
+            log::warn!("Skipping malformed schema key (expected 4 segments, got {}): {key}", columns.len());
+            continue;
+        }
         let item_key = format!("{}/{}/{}", columns[0], columns[1], columns[2]);
         let start_dt: i64 = columns[3].parse().unwrap();
         let entry = schemas.entry(item_key).or_insert(Vec::new());

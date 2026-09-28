@@ -1,0 +1,32 @@
+info:
+  name: 12-Get-Dereg-Metrics-All-Root
+  type: http
+  seq: 3
+
+http:
+  method: GET
+  url: "{{baseUrl}}/{{deql_org_id}}/dereg/metrics?scope=all"
+  params:
+    - name: scope
+      value: all
+      type: query
+  auth: inherit
+
+runtime:
+  assertions:
+    - expression: res.status
+      operator: eq
+      value: "200"
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+
+docs: |-
+  Same as the CLI check in the runbook; requests all-org dereg metrics.
+
+  Example curl (uses root credentials):
+
+  curl -u root@example.com:NzIJGjQ4qLHuGFht -s http://localhost:5080/api/default/dereg/metrics?scope=all | jq .

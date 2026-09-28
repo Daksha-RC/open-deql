@@ -1,0 +1,30 @@
+info:
+  name: 03-ingest-hireemployee
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{baseUrl}}/{{deql_org_id}}/hireemployee/_json"
+  body:
+    type: json
+    data: |-
+      [
+        {"employee_id": "EMP201", "name": "Jane Smith", "grade": "A1"},
+        {"employee_id": "EMP202", "name": "Michael Chen", "grade": "B2"},
+        {"employee_id": "EMP203", "name": "Sarah Jenkins", "grade": "A2"},
+        {"employee_id": "EMP204", "name": "David Kim", "grade": "C1"},
+        {"employee_id": "EMP205", "name": "Elena Rostova", "grade": "A1"},
+        {"employee_id": "EMP206", "name": "Carlos Mendez", "grade": "B1"},
+        {"employee_id": "EMP207", "name": "Aisha Rahman", "grade": "A3"},
+        {"employee_id": "EMP208", "name": "Liam O'Connor", "grade": "B2"},
+        {"employee_id": "EMP209", "name": "Priya Sharma", "grade": "A1"},
+        {"employee_id": "EMP210", "name": "Yuki Tanaka", "grade": "B3"}
+      ]
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5

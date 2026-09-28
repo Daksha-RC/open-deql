@@ -44,6 +44,9 @@ pub use writer::{
     flush_all, get_max_writer_seq_id, get_writer, read_from_memtable,
 };
 
+#[cfg(feature = "deql")]
+pub use writer::read_from_memtable_with_filter;
+
 use crate::errors::OpenDirSnafu;
 
 pub(crate) type ReadRecordBatchEntry = (Arc<Schema>, Vec<Arc<entry::RecordBatchEntry>>);

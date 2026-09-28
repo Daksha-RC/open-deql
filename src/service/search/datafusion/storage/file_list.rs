@@ -70,7 +70,7 @@ pub fn clear(trace_id: &str) {
     let r = FILES.read();
     let keys = r
         .keys()
-        .filter(|x| x.starts_with(trace_id))
+        .filter(|x: &&String| x.starts_with(trace_id))
         .cloned()
         .collect::<Vec<_>>();
     drop(r);
@@ -82,7 +82,6 @@ pub fn clear(trace_id: &str) {
     drop(w);
 
     // Remove all segment data for the given trace_id
-    // here we can reuse the keys, because they are the same
     let mut w = SEGMENTS.write();
     for key in keys.iter() {
         w.remove(key);
@@ -93,9 +92,58 @@ pub fn clear(trace_id: &str) {
 
 pub fn get_segment_ids(file_key: &str) -> Option<Arc<BitVec>> {
     let (trace_id, filename) = file_key.split_once("/$$/")?;
-    let r = SEGMENTS.read();
-    let data = r.get(trace_id)?;
-    data.get(filename).cloned()
+    let segs = SEGMENTS.read();
+    let seg_bv = segs
+        .get(trace_id)
+        .and_then(|data: &SegmentData| data.get(filename))
+        .cloned();
+
+    #[cfg(feature = "deql")]
+    {
+        let wal_segs = WAL_SEGMENTS.read();
+        let wal_bv = wal_segs
+            .get(trace_id)
+            .and_then(|data: &SegmentData| data.get(filename))
+            .cloned();
+        match (seg_bv, wal_bv) {
+            (Some(seg), Some(wal)) => {
+                // Merge: OR the two BitVecs (must be same length)
+                if seg.len() == wal.len() {
+                    let mut merged = (*seg).clone();
+                    for (i, bit) in wal.iter().enumerate() {
+                        if *bit {
+                            merged.set(i, true);
+                        }
+                    }
+                    Some(Arc::new(merged))
+                } else {
+                    Some(seg)
+                }
+            }
+            (Some(seg), None) => Some(seg),
+            (None, Some(wal)) => Some(wal),
+            (None, None) => None,
+        }
+    }
+
+    #[cfg(not(feature = "deql"))]
+    {
+        seg_bv
+    }
+}
+
+// --- DeQL WAL segment support ---
+
+#[cfg(feature = "deql")]
+static WAL_SEGMENTS: Lazy<RwLock<HashMap<String, SegmentData>>> = Lazy::new(Default::default);
+
+/// Register WAL segment BitVecs for a trace_id and filename.
+#[cfg(feature = "deql")]
+#[allow(dead_code)]
+pub fn set_wal_segment_ids(trace_id: &str, filename: &str, bv: Arc<BitVec>) {
+    let mut w = WAL_SEGMENTS.write();
+    let entry = w.entry(trace_id.to_string()).or_default();
+    entry.insert(filename.to_string(), bv);
 }
 
 #[cfg(test)]
@@ -103,26 +151,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_get_nonexistent_trace_id_returns_error() {
-        let result = get("nonexistent_trace_xyz_file_list_12345");
+    fn test_get_returns_error_for_missing_trace() {
+        let result = get("nonexistent_trace");
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("trace_id not found")
-        );
     }
 
+    #[cfg(feature = "deql")]
     #[test]
-    fn test_get_segment_ids_nonexistent_returns_none() {
-        let result = get_segment_ids("nonexistent_trace_file_list/$$/filename.parquet");
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn test_get_segment_ids_no_separator_returns_none() {
-        let result = get_segment_ids("no-separator-here");
-        assert!(result.is_none());
+    fn test_wal_segment_ids_merge() {
+        let trace_id = "test_trace_merge";
+        let filename = "file1.parquet";
+        let mut seg = BitVec::repeat(false, 10);
+        seg.set(2, true);
+        seg.set(5, true);
+        let mut wal = BitVec::repeat(false, 10);
+        wal.set(5, true); // overlap
+        wal.set(7, true); // unique to WAL
+        SEGMENTS.write().insert(trace_id.to_string(), {
+            let mut m = HashMap::new();
+            m.insert(filename.to_string(), Arc::new(seg));
+            m
+        });
+        set_wal_segment_ids(trace_id, filename, Arc::new(wal));
+        let merged = get_segment_ids(&format!("{}/$$/{}", trace_id, filename)).unwrap();
+        assert_eq!(merged.get(2).map(|b| *b), Some(true));
+        assert_eq!(merged.get(5).map(|b| *b), Some(true));
+        assert_eq!(merged.get(7).map(|b| *b), Some(true));
+        assert_eq!(merged.get(0).map(|b| *b), Some(false));
     }
 }

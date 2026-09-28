@@ -354,17 +354,30 @@ async fn write_logs(
     // End get stream alert
 
     // start check for schema
+    // IMPL-23: skip schema evolution for deql_events — the schema is owned by
+    // DeReg and registered at startup; OO auto-inference must not mutate it
+    // (SS-03, SS-05). Unknown fields are silently dropped by UDS enforcement.
     let min_timestamp = json_data.iter().map(|(ts, _)| ts).min().unwrap();
-    let (schema_evolution, infer_schema) = check_for_schema(
-        org_id,
-        stream_name,
-        StreamType::Logs,
-        &mut stream_schema_map,
-        json_data.iter().map(|(_, v)| v).collect(),
-        *min_timestamp,
-        is_derived, // is_derived is true if the stream is derived
-    )
-    .await?;
+    let (schema_evolution, infer_schema) = if stream_name == "deql_events" {
+        (
+            crate::common::meta::stream::SchemaEvolution {
+                is_schema_changed: false,
+                types_delta: None,
+            },
+            None,
+        )
+    } else {
+        check_for_schema(
+            org_id,
+            stream_name,
+            StreamType::Logs,
+            &mut stream_schema_map,
+            json_data.iter().map(|(_, v)| v).collect(),
+            *min_timestamp,
+            is_derived, // is_derived is true if the stream is derived
+        )
+        .await?
+    };
 
     // get schema
     let latest_schema = stream_schema_map
