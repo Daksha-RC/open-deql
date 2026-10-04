@@ -32,8 +32,8 @@ use openobserve_api_management::request::cloud;
 use openobserve_api_management::request::profiling;
 use openobserve_api_management::request::{
     alerts, announcements, authz, dashboards, db_monitoring, folders, kv, model_pricing,
-    organization, service_accounts, short_url, slos, sourcemaps, status, status_pages, stream,
-    synthetics, users,
+    organization, rum_analytics, service_accounts, short_url, slos, sourcemaps, status,
+    status_pages, stream, synthetics, users,
 };
 use openobserve_api_pipelines::request::{enrichment_table, functions, pipeline, pipelines};
 use openobserve_api_search::{profiles as profiles_query, promql, search, traces};
@@ -548,7 +548,10 @@ pub async fn proxy(Path(params): Path<PathParamProxyURL>) -> impl IntoResponse {
     {
         return (StatusCode::BAD_REQUEST, format!("URL blocked: {e}")).into_response();
     }
-    let client = match common::utils::ssrf_guard::build_safe_client(reqwest::Client::builder()) {
+    // Session replay loads the recorded page's fonts and images through here. Without a
+    // User-Agent, CDN firewalls such as the AWS managed `NoUserAgent_HEADER` rule answer 403.
+    let builder = reqwest::Client::builder().user_agent("OpenObserve");
+    let client = match common::utils::ssrf_guard::build_safe_client(builder) {
         Ok(c) => c,
         Err(e) => {
             return (
@@ -1195,7 +1198,14 @@ pub fn service_routes() -> Router {
         // sourcemaps
         .route("/{org_id}/sourcemaps",get(sourcemaps::list).post(sourcemaps::upload_maps).delete(sourcemaps::delete))
         .route("/{org_id}/sourcemaps/values",get(sourcemaps::list_values))
-        .route("/{org_id}/sourcemaps/stacktrace",post(sourcemaps::translate_stacktrace));
+        .route("/{org_id}/sourcemaps/stacktrace",post(sourcemaps::translate_stacktrace))
+
+        // RUM Product Analytics
+        .route("/{org_id}/rum/analytics/named_events", get(rum_analytics::list_named_events).post(rum_analytics::create_named_event))
+        .route("/{org_id}/rum/analytics/named_events/{id}", get(rum_analytics::get_named_event).put(rum_analytics::update_named_event).delete(rum_analytics::delete_named_event))
+        .route("/{org_id}/rum/analytics/named_events/{id}/funnels", get(rum_analytics::named_event_funnels))
+        .route("/{org_id}/rum/analytics/funnels", get(rum_analytics::list_funnels).post(rum_analytics::create_funnel))
+        .route("/{org_id}/rum/analytics/funnels/{id}", get(rum_analytics::get_funnel).put(rum_analytics::update_funnel).delete(rum_analytics::delete_funnel));
 
     #[cfg(feature = "enterprise")]
     {
@@ -1539,6 +1549,7 @@ pub fn service_routes() -> Router {
             .route("/{org_id}/synthetics/{id}/resolved-variables", get(synthetics::get_synthetic_resolved_variables))
             .route("/{org_id}/synthetics/{id}/variables/{name}/promote", post(synthetics::promote_synthetic_variable))
             .route("/{org_id}/synthetics/{id}/run", post(synthetics::run_synthetic_now))
+            .route("/{org_id}/synthetics/{id}/referenced-by", get(synthetics::get_referenced_by))
             .route("/{org_id}/synthetics/{id}/enable", put(synthetics::set_synthetic_enabled))
             .route("/{org_id}/synthetics/{id}/artifact", get(synthetics::get_artifact))
             .route("/{org_id}/synthetics/{id}/artifacts/presign", post(synthetics::presign_artifacts))
@@ -1770,6 +1781,10 @@ pub fn service_routes() -> Router {
                 get(oncall::get_prior_causes),
             )
             .route(
+                "/{org_id}/oncall/responses/{response_id}/report",
+                get(oncall::get_response_report),
+            )
+            .route(
                 "/{org_id}/oncall/responses/{response_id}/acknowledge",
                 post(oncall::acknowledge_response),
             )
@@ -1904,6 +1919,11 @@ pub fn service_routes() -> Router {
             .route(
                 "/{org_id}/quota/{pool}/usage_limit",
                 put(organization::org::set_quota_usage_limit),
+            )
+            .route(
+                "/{org_id}/quota/{feature}/paid_overage",
+                get(organization::org::get_paid_overage_status)
+                    .put(organization::org::set_paid_overage_status),
             )
             .route(
                 "/{org_id}/billings/data_usage/{usage_date}",
