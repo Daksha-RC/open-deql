@@ -3119,8 +3119,9 @@ fn anomaly_alert_payload(
 /// Called by the enterprise scheduler when anomalies are detected and alert_enabled=true.
 /// Looks up the destination by name and POSTs a JSON payload to its webhook URL.
 /// Non-HTTP destinations (email, SNS) are skipped with a warning — a known, parked gap
-/// that recovery messages inherit. Returns `Ok(true)` only when the webhook was actually
-/// sent; a skip returns `Ok(false)` so the caller never arms a cooldown on nothing.
+/// that recovery messages inherit. Returns `Ok(true)` only when the webhook accepted the
+/// send (2xx); a skip or a non-2xx rejection returns `Ok(false)` so the caller never arms
+/// a cooldown, or records a run as delivered, on a send nobody actually received.
 #[cfg(feature = "enterprise")]
 pub async fn send_anomaly_alert(
     destination_id: String,
@@ -3192,6 +3193,18 @@ pub async fn send_anomaly_alert(
         .await?;
 
     let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        log::warn!(
+            "[anomaly_detection {}] destination '{}' rejected the alert: status={}, body={}",
+            anomaly_id,
+            destination_id,
+            status,
+            body
+        );
+        return Ok(false);
+    }
+
     log::info!(
         "[anomaly_detection {}] alert sent to '{}': status={}",
         anomaly_id,
@@ -6482,5 +6495,61 @@ mod tests {
         );
         // An untagged request yields no role group at all, which is the bug this pins.
         assert_ne!(RoleGroup::from(SearchEventType::UI), RoleGroup::Background);
+    }
+
+    #[test]
+    fn red_insights_templates_pass_create_validation() {
+        use crate::traces::red_insights::{RedSignal, StreamColumns, template};
+
+        for has_parent in [true, false] {
+            let cols = StreamColumns {
+                has_parent,
+                has_status: true,
+                has_duration: true,
+            };
+            for (stream, service) in [
+                ("default", "checkout"),
+                ("a\"b", "o'brien"),
+                ("t/x", "api/v1"),
+            ] {
+                for signal in RedSignal::ALL {
+                    let req = template(stream, service, signal, &cols)
+                        .expect("every signal is eligible here")
+                        .into_request("default");
+                    validate_config_request(&req)
+                        .unwrap_or_else(|e| panic!("{signal:?} on {stream}/{service}: {e}"));
+                    config::meta::alerts::tags::normalize_tags(&req.tags).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn red_insights_skips_exactly_the_rate_detectors_g4_rejects() {
+        use crate::traces::red_insights::{RedSignal, StreamColumns, template};
+
+        let cols = StreamColumns {
+            has_parent: true,
+            has_status: true,
+            has_duration: true,
+        };
+        for word in ERROR_VOCABULARY {
+            let stream = format!("app-{word}");
+            assert!(
+                template(&stream, "svc", RedSignal::Rate, &cols).is_none(),
+                "{stream}"
+            );
+            let mut req = template("default", "svc", RedSignal::Rate, &cols)
+                .unwrap()
+                .into_request("default");
+            req.stream_name = stream.clone();
+            assert!(validate_config_request(&req).is_err(), "{stream}");
+            for signal in [RedSignal::ErrorRatio, RedSignal::P95Latency] {
+                let req = template(&stream, "svc", signal, &cols)
+                    .unwrap()
+                    .into_request("default");
+                validate_config_request(&req).unwrap_or_else(|e| panic!("{signal:?}: {e}"));
+            }
+        }
     }
 }
