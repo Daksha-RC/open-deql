@@ -42,6 +42,7 @@ vectorscan = [
     "stream/vectorscan",
 ]
 profiling = ["openobserve-api-management/profiling"]
+deql = []
 
 [dependencies]
 common.workspace = true

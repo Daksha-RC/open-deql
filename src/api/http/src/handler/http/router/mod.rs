@@ -2311,6 +2311,19 @@ pub fn create_app_router(ui_routes: fn(&str) -> Router) -> Router {
             .merge(proxy_routes(true))
     };
 
+    // DeQL routes (feature-gated)
+    #[cfg(feature = "deql")]
+    {
+        log::info!("[deql] registering deql routes");
+        let deql_cfg = openobserve_deql::DeqlConfig {
+            enabled: cfg.common.deql_enabled,
+        };
+        app = app.nest(
+            "/api/deql",
+            openobserve_deql::handlers::deql_routes(&deql_cfg),
+        );
+    }
+
     // Ensure redirect takes into account base_uri
     let web_path = format!("{}/web/", cfg.common.base_uri);
     // Add UI routes at app level (outside basic_routes to avoid any middleware conflicts)
