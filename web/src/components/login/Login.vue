@@ -210,6 +210,7 @@ import {
   getImageURL,
 } from "@/utils/zincutils";
 import { redirectUser } from "@/utils/common";
+import { withDisambiguatedOrgLabels } from "@/utils/organizationLabel";
 import { useTheme } from "@/composables/useTheme";
 import config from "@/aws-exports";
 import OButton from "@/lib/core/Button/OButton.vue";
@@ -305,14 +306,12 @@ export default defineComponent({
 
     const loginWithSSo = async () => {
       try {
-        authService.get_dex_login().then((res) => {
-          if (res) {
-            window.location.href = withSignupHint(res);
-            return;
-          }
-        });
-      } catch (error) {
-        console.error("Error during redirection:");
+        const res = await authService.get_dex_login();
+        if (res) window.location.href = withSignupHint(res);
+      } catch (error: any) {
+        // The browser aborts this request when the user leaves the page before it returns.
+        if (error?.code === "ECONNABORTED") return;
+        console.error("Error during redirection:", error);
       }
     };
 
@@ -401,7 +400,8 @@ export default defineComponent({
                   await organizationsService
                     .os_list(0, 100000, "id", false, "", "default")
                     .then((res: any) => {
-                      orgOptions.value = res.data.data.map(
+                      const labeledOrgs = withDisambiguatedOrgLabels(res.data.data);
+                      orgOptions.value = labeledOrgs.map(
                         (data: {
                           id: any;
                           name: any;
@@ -412,7 +412,9 @@ export default defineComponent({
                           search_threshold: any;
                           CustomerBillingObj: any;
                           status: any;
+                          label: string;
                         }) => {
+                          // `label` is the real name here; the disambiguated string is applied only to the dropdown copy returned below.
                           let optiondata: any = {
                             label: data.name,
                             id: data.id,
@@ -448,7 +450,7 @@ export default defineComponent({
                             tempDefaultOrg = optiondata;
                           }
 
-                          return optiondata;
+                          return { ...optiondata, label: data.label };
                         },
                       );
 

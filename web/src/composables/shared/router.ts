@@ -134,6 +134,35 @@ const dbmEnterpriseGuard = (to: any, from: any, next: any) => {
   routeGuard(to, from, next);
 };
 
+// `=== false`, not falsy: a cold load with `/config` still in flight must not bounce.
+const downtimesRouteGuard = (to: any, from: any, next: any) => {
+  const zoConfig = store.state.zoConfig;
+  const isOss = zoConfig?.build_type === "opensource";
+  if (
+    isOss ||
+    (config.isEnterprise !== "true" && config.isCloud !== "true") ||
+    zoConfig?.downtimes_enabled === false
+  ) {
+    next({ name: "alertList", query: { org_identifier: to.query.org_identifier } });
+    return;
+  }
+  routeGuard(to, from, next);
+};
+
+// `=== false`, not falsy: a cold load with `/config` still in flight must not bounce.
+const alertCalibrationRouteGuard = (to: any, from: any, next: any) => {
+  const zoConfig = store.state.zoConfig;
+  if (
+    zoConfig?.build_type === "opensource" ||
+    (config.isEnterprise !== "true" && config.isCloud !== "true") ||
+    zoConfig?.alert_calibration_enabled === false
+  ) {
+    next({ name: "alertList", query: { org_identifier: to.query.org_identifier } });
+    return;
+  }
+  routeGuard(to, from, next);
+};
+
 const ViewDashboard = () => import("@/views/Dashboards/ViewDashboard.vue");
 const AddPanel = () => import("@/views/Dashboards/addPanel/AddPanel.vue");
 const StreamExplorer = () => import("@/views/StreamExplorer.vue");
@@ -225,6 +254,17 @@ const useRoutes = () => {
       },
     },
     {
+      // Outside MainLayout and the login redirect: anyone holding a public link can read it.
+      path: "/ai/public/:token",
+      name: "publicSharedChat",
+      component: () => import("@/views/SharedChatView.vue"),
+      props: (to: any) => ({ token: to.params.token, isPublic: true }),
+      meta: {
+        public: true,
+        titleKey: "routeTitles.sharedChat",
+      },
+    },
+    {
       path: "/slack/oauth/callback",
       name: "slackOAuthCallback",
       component: () => import("@/views/SlackOAuthCallback.vue"),
@@ -242,6 +282,7 @@ const useRoutes = () => {
       meta: {
         keepAlive: true,
         titleKey: "menu.home",
+        allowOnEmptyData: true,
       },
     },
     {
@@ -251,6 +292,7 @@ const useRoutes = () => {
       meta: {
         keepAlive: true,
         titleKey: "menu.search",
+        allowOnEmptyData: true,
       },
       beforeEnter(to: any, from: any, next: any) {
         // Back-compat: Search History / Scheduler used to be `?action=…` overlays
@@ -327,6 +369,7 @@ const useRoutes = () => {
       meta: {
         keepAlive: false,
         titleKey: "menu.metrics",
+        allowOnEmptyData: true,
       },
       beforeEnter(to: any, from: any, next: any) {
         if (hasMetricsEditorParams(to.query) && to.query.mode !== "visualize") {
@@ -376,6 +419,7 @@ const useRoutes = () => {
       meta: {
         keepAlive: true,
         titleKey: "menu.traces",
+        allowOnEmptyData: true,
       },
       beforeEnter(to: any, from: any, next: any) {
         const tab = supportedTraceTab(to.query?.tab);
@@ -544,6 +588,13 @@ const useRoutes = () => {
       beforeEnter: routeGuard,
     },
     {
+      path: "infra/kubernetes-2",
+      name: "infraKubernetes2",
+      component: () => import("@/views/Infrastructure/kubernetes2/KubernetesPage.vue"),
+      meta: { titleKey: "menu.kubernetes2" },
+      beforeEnter: routeGuard,
+    },
+    {
       path: "traces/trace-details",
       name: "traceDetails",
       component: TraceDetails,
@@ -609,6 +660,7 @@ const useRoutes = () => {
       meta: {
         keepAlive: false,
         titleKey: "menu.dashboard",
+        allowOnEmptyData: true,
       },
       beforeEnter(to: any, from: any, next: any) {
         routeGuard(to, from, next);
@@ -891,6 +943,80 @@ const useRoutes = () => {
       },
     },
     {
+      path: "alert-calibration",
+      name: "alertCalibration",
+      component: () => import("@/components/alert_calibration/AlertCalibrationDashboard.vue"),
+      meta: { titleKey: "menu.alertCalibration" },
+      beforeEnter: alertCalibrationRouteGuard,
+    },
+    {
+      path: "alert-calibration/runs",
+      name: "alertCalibrationRuns",
+      component: () => import("@/components/alert_calibration/AlertCalibrationDigests.vue"),
+      meta: { titleKey: "menu.alertCalibration" },
+      beforeEnter: alertCalibrationRouteGuard,
+    },
+    {
+      path: "alert-calibration/settings",
+      name: "alertCalibrationSettings",
+      component: () => import("@/components/alert_calibration/AlertCalibrationSettings.vue"),
+      meta: { titleKey: "menu.alertCalibration" },
+      beforeEnter: alertCalibrationRouteGuard,
+    },
+    {
+      path: "alert-calibration/digests/:windowStart/:windowEnd",
+      name: "alertCalibrationDigest",
+      component: () => import("@/components/alert_calibration/AlertCalibrationDigestDetail.vue"),
+      props: true,
+      meta: { titleKey: "menu.alertCalibration" },
+      beforeEnter: alertCalibrationRouteGuard,
+    },
+    {
+      path: "downtimes",
+      name: "downtimes",
+      component: () => import("@/components/alerts/downtimes/DowntimeList.vue"),
+      meta: {
+        titleKey: "menu.downtimes",
+      },
+      beforeEnter(to: any, from: any, next: any) {
+        downtimesRouteGuard(to, from, next);
+      },
+    },
+    {
+      // Literal segments before the :id catch-all.
+      path: "downtimes/add",
+      name: "addDowntime",
+      component: () => import("@/components/alerts/downtimes/AddDowntime.vue"),
+      meta: {
+        titleKey: "alerts.downtimes.newTitle",
+      },
+      beforeEnter(to: any, from: any, next: any) {
+        downtimesRouteGuard(to, from, next);
+      },
+    },
+    {
+      path: "downtimes/:id/edit",
+      name: "editDowntime",
+      component: () => import("@/components/alerts/downtimes/AddDowntime.vue"),
+      meta: {
+        titleKey: "alerts.downtimes.editTitle",
+      },
+      beforeEnter(to: any, from: any, next: any) {
+        downtimesRouteGuard(to, from, next);
+      },
+    },
+    {
+      path: "downtimes/:id",
+      name: "downtimeDetail",
+      component: () => import("@/components/alerts/downtimes/DowntimeDetail.vue"),
+      meta: {
+        titleKey: "alerts.downtimes.detailTitle",
+      },
+      beforeEnter(to: any, from: any, next: any) {
+        downtimesRouteGuard(to, from, next);
+      },
+    },
+    {
       // Alert status page. Replaces the row-click side panel, and is where a
       // multi-alert's per-group state lives (alerts_2.md §5.4).
       path: "alerts/detail/:alert_id",
@@ -1002,6 +1128,15 @@ const useRoutes = () => {
           return;
         }
         routeGuard(to, from, next);
+      },
+    },
+    {
+      path: "ai/shared/:token",
+      name: "sharedChat",
+      component: () => import("@/views/SharedChatView.vue"),
+      props: (to: any) => ({ token: to.params.token }),
+      meta: {
+        titleKey: "routeTitles.sharedChat",
       },
     },
     {

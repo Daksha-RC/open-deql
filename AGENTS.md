@@ -1,4 +1,4 @@
-# OpenObserve — project rules
+# Open-Deql — project rules
 
 ## Build & workflow
 
@@ -37,7 +37,7 @@ Item order inside a file/module, top to bottom (clippy's default grouping):
 - `#[cfg(test)] mod tests` is always the LAST item in a file. CI enforces this
   (clippy `items_after_test_module` runs under `--all-targets -- -D warnings`).
 - The module-level order above matches clippy's `arbitrary_source_item_ordering`
-  lint with the `source-item-ordering = ["module"]` config in clippy.toml. The
+  lint with the `source-item-ordering = ["module"] config in clippy.toml. The
   lint is opt-in (too much pre-existing debt to enable repo-wide); hold the code
   you add to this order even though nothing enforces it yet.
 
@@ -60,17 +60,17 @@ reworded:
 - `///` / JSDoc doc comments on public APIs: one summary sentence, and only when
   the behaviour is non-obvious; never to restate the signature.
 
-## PR conventions
+## Version Control
 
-- CI runs on a PR only while it carries the `ready-for-ci` label and is not a draft
-  (no label or draft = nothing runs except `ci-gate`, and no red checks). Add the
-  label when you want the run, not when you open the PR; clicking "Merge when
-  ready" adds it automatically if it is missing. Which suites run is decided by
-  path detection, never by a label. The merge queue only compiles and unit-tests the merged code, so the
-  labelled PR run is the one that has to be green.
-- PR titles starting with `feat:` require `Design at: #xxx` as the FIRST line
-  of the description (enforced by `.github/workflows/feat-design-checker.yml`);
-  `fix:`/`chore:`/`test:` PRs skip the check.
+This project uses jj (Jujutsu). 
+Use Jujutsu (jj) via jj-mcp-server only; never run jj from the shell. Only call MCP tools with explicit limit, size, max, or equivalent output bounds. Never invoke unbounded show, diff, history, or file-content operations.
+Dont use `git`
+
+## Spec-driven development
+
+This project uses OpenSpec for spec-driven development. Follow the staged workflow:
+**Explore → New → Update → Continue → Apply → Verify → Sync → Archive**.
+The corresponding `openspec-*` skills handle each stage.
 
 ## Enterprise-gated code
 
@@ -84,3 +84,60 @@ reworded:
   SAME branch name in both repos — CI checks out the paired side by branch name.
 - When changing this repo's root `Cargo.toml`, mirror the change into
   `Cargo.toml.openobserve` in the o2-enterprise repo.
+
+## Tooling
+
+### GitNexus MCP
+
+Use GitNexus for architecture, code-organization, and impact questions. It provides a
+knowledge graph of the codebase but is on a remote server that may lag local changes.
+
+| When to use | Tool |
+|---|---|
+| "How does X work?" | `query()` |
+| "What does this symbol do?" | `context()` |
+| "What breaks if I change X?" | `impact()` |
+| Before modifying API routes | `api_impact()` |
+| Before committing | `detect_changes()` |
+| Structural queries | `cypher()` |
+
+⚠️ **Staleness caveat:** GitNexus is a remote server. Its index may lag local code by one
+or more commits. Always cross-reference with actual files when the result is critical.
+
+### Internet Search
+
+Never make direct internet connections (fetch, curl, `web_url_read` on arbitrary URLs).
+**Always use the `searxng_web_search`, `searxng_search_suggestions`. Use suggestions to refine
+vague queries before searching.
+
+- **Always append the current date and timezone to search queries** (today is 14th October
+  2026, IST UTC+5:30) so results reflect recent content.
+
+### Sequential Thinking
+
+### Sequential Thinking
+
+**Tool:** `sequentialthinking`
+
+**Use for:** Multi-step refactors, architecture decisions, complex debugging, planning and design tasks.
+**Skip for:** Trivial single-step tasks.
+
+**Parameters:**
+- `thought` (string, required): Your current thinking step. Can include analytical steps, revisions, questions, realizations, approach changes, hypothesis generation/verification.
+- `nextThoughtNeeded` (boolean, required): Whether another thought step is needed. Set `false` only when truly done with a satisfactory answer.
+- `thoughtNumber` (integer, required): Current number in the sequence (e.g., 1, 2, 3).
+- `totalThoughts` (integer, required): Estimated total thoughts needed (can be adjusted up/down as you progress).
+- `isRevision` (boolean, optional): Whether this thought revises previous thinking.
+- `revisesThought` (integer, optional): Which thought number is being reconsidered (used when `isRevision` is `true`).
+- `branchFromThought` (integer, optional): Branching point thought number (used when branching into a new path).
+- `branchId` (string, optional): Identifier for the current branch.
+- `needsMoreThoughts` (boolean, optional): If reaching the end but realizing more thoughts are needed.
+
+**Capabilities:**
+- Dynamic and reflective problem-solving through adjustable thinking steps
+- Build on, question, or revise previous insights
+- Add more thoughts even after reaching the "end"
+- Express uncertainty and explore alternative approaches
+- Generate and verify solution hypotheses
+- Branch and backtrack as needed
+- Final output: a single, ideally correct answer

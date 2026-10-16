@@ -167,6 +167,16 @@ pub struct OrgDetails {
     pub user_obj: OrgUser,
     #[serde(default)]
     pub plan: i32,
+    /// The org admin/owner's email — used by the frontend to disambiguate
+    /// two orgs that share a display name (e.g. two orgs both named
+    /// "default"). Empty when no admin could be resolved (e.g. root-user
+    /// view of a stale org).
+    #[serde(default)]
+    pub owner_email: String,
+    /// The org admin/owner's first name, when set; the frontend falls back
+    /// to the local part of `owner_email` when this is empty.
+    #[serde(default)]
+    pub owner_first_name: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -324,7 +334,8 @@ impl TriggerStatus {
                     usage::RunOutcome::Firing
                     | usage::RunOutcome::Normal
                     | usage::RunOutcome::Succeeded
-                    | usage::RunOutcome::Pending => status.healthy += 1,
+                    | usage::RunOutcome::Pending
+                    | usage::RunOutcome::Suppressed => status.healthy += 1,
                     usage::RunOutcome::Error | usage::RunOutcome::NotifyFailed => {
                         status.failed += 1
                     }
@@ -459,10 +470,6 @@ fn default_enable_streaming_search() -> bool {
 /// absent setting means the per-org `usage` stream is not written and the
 /// Usage tab shows only the billing-API cards plus an "Enable usage reporting"
 /// CTA.
-///
-/// The global `ZO_USAGE_REPORT_TO_OWN_ORG` remains the deploy-wide master
-/// switch for whether per-org self-reporting is available at all; it no longer
-/// flips the per-org default.
 fn default_usage_stream_enabled() -> bool {
     false
 }
@@ -477,7 +484,10 @@ pub struct DomainOrgMapping {
     pub domain: String,
     pub org_id: String,
     pub base_role: String,
-    pub user_group: Option<String>,
+    #[serde(default)]
+    pub role_claim_name: Option<String>,
+    #[serde(default)]
+    pub create_missing_roles: bool,
 }
 
 #[derive(Serialize, ToSchema, Deserialize, Debug, Clone)]
@@ -908,6 +918,8 @@ mod tests {
             org_type: "basic".to_string(),
             user_obj: user,
             plan: 0,
+            owner_email: "admin1@example.com".to_string(),
+            owner_first_name: "Admin".to_string(),
         };
 
         let response = OrganizationResponse {
@@ -1609,9 +1621,7 @@ mod tests {
     #[cfg(feature = "cloud")]
     #[test]
     fn test_usage_stream_enabled_defaults_off_in_cloud() {
-        // Own-org usage reporting is OFF by default on cloud; orgs opt in
-        // explicitly. The global ZO_USAGE_REPORT_TO_OWN_ORG stays the master
-        // switch but no longer flips the per-org default.
+        // Own-org usage reporting is OFF by default on cloud; orgs opt in explicitly.
         assert!(!default_usage_stream_enabled());
         assert!(!OrganizationSetting::default().usage_stream_enabled);
 
