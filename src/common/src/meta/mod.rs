@@ -31,3 +31,7 @@ pub mod stream;
 pub mod telemetry;
 pub mod traces;
 pub mod user;
+
+// DeQL meta types (feature-gated)
+#[cfg(feature = "deql")]
+pub mod deql;

@@ -84,3 +84,5 @@ rustc-ice-*.txt
 /.claude/worktrees/
 .screenshots/
 .pnpm-store/
+.lh
+.bun

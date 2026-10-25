@@ -18,6 +18,7 @@ enterprise = [
     "transform/enterprise",
 ]
 cloud = ["infra/cloud", "enterprise", "o2_enterprise/cloud"]
+deql = []
 
 [dependencies]
 transform.workspace = true

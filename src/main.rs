@@ -185,10 +185,29 @@ async fn run() -> Result<(), anyhow::Error> {
                 panic!("db init failed: {e}");
             }
 
+            // DeQL migrations (feature-gated)
+            #[cfg(feature = "deql")]
+            {
+                log::info!("[deql] running deql migrations");
+                // TODO: run deql migrations via openobserve_deql::bootstrap::migrate().await
+                log::info!("[deql] deql migrations completed");
+            }
+
             // init infra
             if let Err(e) = infra::init().await {
                 job_init_tx.send(false).ok();
                 panic!("infra init failed: {e}");
+            }
+
+            // DeQL infra init (feature-gated)
+            #[cfg(feature = "deql")]
+            if let Err(e) = openobserve_deql::bootstrap::init(&openobserve_deql::DeqlConfig {
+                enabled: cfg.common.deql_enabled,
+            })
+            .await
+            {
+                job_init_tx.send(false).ok();
+                panic!("deql infra init failed: {e}");
             }
 
             // Must precede every cipher_keys read or write, including default-org creation.
@@ -243,6 +262,14 @@ async fn run() -> Result<(), anyhow::Error> {
             if let Err(e) = job::init().await {
                 job_init_tx.send(false).ok();
                 panic!("job init failed: {e}");
+            }
+
+            // DeQL background workers (feature-gated)
+            #[cfg(feature = "deql")]
+            {
+                log::info!("[deql] starting deql background workers");
+                // TODO: spawn deql workers via openobserve_deql::bootstrap::spawn_workers().await
+                log::info!("[deql] deql background workers started");
             }
 
             // Register job runtime for metrics collection

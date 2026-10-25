@@ -71,6 +71,8 @@ Dont use `git`
 This project uses OpenSpec for spec-driven development. Follow the staged workflow:
 **Explore → New → Update → Continue → Apply → Verify → Sync → Archive**.
 The corresponding `openspec-*` skills handle each stage.
+## Project Context 
+This project re-implements DeQL — a domain-event / event-sourcing system with SQL-based decision logic, projections, and virtual streams — on top of the OpenObserve codebase. Zero DeQL code exists here today; artifacts in .ai-meta/backup/ are historical and must be rebuilt against a significantly reorganized codebase (35+ workspace members, modular Axum router, DataFusion-based search, SeaORM persistence). Delivery follows four gated phases: Foundation → Virtual Tables → Command Execution → Introspection & Recovery. Each phase compiles behind #[cfg(feature = "deql")], and work proceeds through the OpenSpec workflow (Explore → New → Update → Continue → Apply → Verify → Sync → Archive). The full roadmap lives at .ai-meta/pmt/DEQL_REIMPLEMENTATION_ROADMAP.md.
 
 ## Enterprise-gated code
 

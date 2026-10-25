@@ -2497,6 +2497,12 @@ pub struct Common {
         help = "Show experimental features in the UI. Hidden by default"
     )]
     pub experimental: bool,
+    #[env_config(
+        name = "ZO_DEQL_ENABLED",
+        default = false,
+        help = "Enable the DeQL subsystem. When true, DeQL routes, infrastructure, and background workers are initialized."
+    )]
+    pub deql_enabled: bool,
 }
 
 impl Common {

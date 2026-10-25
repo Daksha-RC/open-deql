@@ -58,6 +58,7 @@ profiling = [
     "openobserve-core/profiling",
 ]
 tokio-console = ["dep:console-subscriber"]
+deql = ["dep:openobserve-deql", "common/deql", "openobserve-api-http/deql"]
 
 [profile.release]
 debug = false
@@ -233,6 +234,7 @@ super_cluster_queue.workspace = true
 usage_reporting.workspace = true
 openobserve-jobs.workspace = true
 openobserve-mcp.workspace = true
+openobserve-deql = { path = "src/deql", optional = true }
 
 [dev-dependencies]
 arrow.workspace = true
@@ -294,6 +296,8 @@ members = [
     "src/flight",
     "src/tantivy_utils",
     "src/web",
+    "src/deql-core",
+    "src/deql",
 ]
 resolver = "2"
 

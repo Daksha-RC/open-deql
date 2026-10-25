@@ -3,29 +3,16 @@
   "build": {
     "dockerfile": "Dockerfile",
   },
-  "features": {
-    "ghcr.io/devcontainers/features/node:1": {},
-  },
+  "workspaceFolder": "/home/coder/open-deql",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/home/coder/open-deql,type=bind",
   "forwardPorts": [5080, 8081],
-  "mounts": [
-    "source=open-deql-rust-target,target=${containerWorkspaceFolder}/target,type=volume",
-    "source=open-deql-tmp,target=/tmp/open-deql-tmp,type=volume",
-    "source=open-deql-web-node-modules,target=${containerWorkspaceFolder}/web/node_modules,type=volume",
-    "source=rustup-data,target=/home/developer/.rustup,type=volume",
-    "source=cargo-data,target=/home/developer/.cargo,type=volume",
-    "source=/Users/mallru/workspace/dpghackhaton/deql-cli,target=/workspaces/deql-cli,type=bind,consistency=cached:ro",
-    "source=/tmp/ssh-IL9Qgx9clO/agent.1103,target=/ssh-agent,type=bind"
-  ],
+  "mounts": [],
   "remoteEnv": {
-    "TMPDIR": "/tmp/open-deql-tmp",
-    "RUSTUP_HOME": "/home/developer/.rustup",
-    "CARGO_HOME": "/home/developer/.cargo",
-    "SSH_AUTH_SOCK": "/ssh-agent"
+    "SSH_AUTH_SOCK": "/ssh-agent",
   },
   "containerEnv": {
-      "OMLX_LLM_API_KEY": "${localEnv:OMLX_LLM_API_KEY}"
-    },
-    "remoteUser": "developer",
-    "containerUser": "root",
-    "postCreateCommand": "sh -c 'chown \"501:20\" \"${containerWorkspaceFolder}/target\" \"/tmp/open-deql-tmp\" \"${containerWorkspaceFolder}/web/node_modules\"'"
+    "OMLX_LLM_API_KEY": "${localEnv:OMLX_LLM_API_KEY}",
+  },
+  "remoteUser": "coder",
+  "containerUser": "coder",
 }

@@ -7914,6 +7914,7 @@ dependencies = [
  "openobserve-api-management",
  "openobserve-api-pipelines",
  "openobserve-core",
+ "openobserve-deql",
  "openobserve-jobs",
  "openobserve-mcp",
  "openobserve-node",
@@ -8397,6 +8398,36 @@ dependencies = [
  "utoipa",
  "version-compare",
  "vrl",
+]
+
+[[package]]
+name = "openobserve-deql"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "datafusion",
+ "log",
+ "openobserve-deql-core",
+ "sea-orm",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "openobserve-deql-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
